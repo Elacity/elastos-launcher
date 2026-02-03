@@ -6,6 +6,10 @@ on:
       - 'v*'  # Triggers on version tags like v0.1.1, v1.0.0
   workflow_dispatch:  # Allows manual trigger from GitHub UI
 
+# Grant write permissions for creating releases
+permissions:
+  contents: write
+
 jobs:
   build:
     strategy:
@@ -35,7 +39,7 @@ jobs:
         run: npm ci
 
       - name: Build for ${{ matrix.platform }}
-        run: npm run build:${{ matrix.platform }}
+        run: npm run build:${{ matrix.platform }} -- --publish never
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
