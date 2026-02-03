@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:">
+  <title>ElastOS</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="hardware-box">
+    <!-- Title Bar -->
+    <div class="title-bar">
+      <div class="title-with-logo">
+        <img src="elastos-logo.svg" alt="Elastos" class="title-logo">
+        <span class="title">Personal Cloud OS</span>
+      </div>
+    </div>
+
+    <!-- Main Unit -->
+    <div class="unit">
+      <!-- Front Panel - Status + Power -->
+      <div class="front-panel">
+        <div class="status-display">
+          <div class="led" id="status-led"></div>
+          <span class="status-text" id="status-text">Checking...</span>
+        </div>
+        <button class="power-button" id="power-btn" title="Power">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M12 2v10M18.4 6.6a9 9 0 1 1-12.8 0"/>
+          </svg>
+        </button>
+      </div>
+
+      <!-- Control Buttons -->
+      <div class="control-panel">
+        <button class="control-btn gold" id="open-btn" disabled>
+          <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="12" r="10"/>
+            <path d="M2 12h20M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/>
+          </svg>
+          <span>Open My Cloud</span>
+        </button>
+        
+        <div class="button-row">
+          <button class="control-btn" id="logs-btn">
+            <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+              <polyline points="14 2 14 8 20 8"/>
+              <line x1="16" y1="13" x2="8" y2="13"/>
+              <line x1="16" y1="17" x2="8" y2="17"/>
+            </svg>
+            <span>Logs</span>
+          </button>
+          
+          <button class="control-btn danger" id="uninstall-btn" disabled>
+            <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <polyline points="3 6 5 6 21 6"/>
+              <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
+              <line x1="10" y1="11" x2="10" y2="17"/>
+              <line x1="14" y1="11" x2="14" y2="17"/>
+            </svg>
+            <span>Uninstall</span>
+          </button>
+        </div>
+      </div>
+
+      <!-- Info Panel -->
+      <div class="info-panel">
+        <div class="info-row">
+          <span class="info-label">URL</span>
+          <span class="info-value">localhost:4200</span>
+        </div>
+        <div class="info-row">
+          <span class="info-label">Version</span>
+          <span class="info-value" id="version">0.1.1</span>
+        </div>
+      </div>
+
+      <!-- Logs Panel (overlay) -->
+      <div class="logs-panel hidden" id="logs-panel">
+        <div class="logs-header">
+          <span>Server Logs</span>
+          <div class="logs-actions">
+            <button class="copy-btn" id="copy-logs" title="Copy Logs">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>
+                <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
+              </svg>
+            </button>
+            <button class="close-btn" id="close-logs">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <line x1="18" y1="6" x2="6" y2="18"/>
+                <line x1="6" y1="6" x2="18" y2="18"/>
+              </svg>
+            </button>
+          </div>
+        </div>
+        <div class="logs-content selectable" id="logs-content"></div>
+      </div>
+
+
+      <!-- Confirm Modal -->
+      <div class="confirm-modal hidden" id="confirm-modal">
+        <div class="confirm-content">
+          <div class="confirm-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/>
+              <line x1="12" y1="9" x2="12" y2="13"/>
+              <line x1="12" y1="17" x2="12.01" y2="17"/>
+            </svg>
+          </div>
+          <h3>Uninstall PC2?</h3>
+          <p>This will permanently delete all PC2 files and data at:</p>
+          <p class="confirm-path" id="confirm-path">~/.pc2</p>
+          <p class="confirm-warning">This action cannot be undone!</p>
+          <div class="confirm-buttons">
+            <button class="confirm-btn cancel" id="confirm-cancel">Cancel</button>
+            <button class="confirm-btn delete" id="confirm-delete">Delete</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Bottom Panel -->
+    <div class="bottom-panel">
+      <div class="env-selector">
+        <span class="env-label">Location</span>
+        <select id="env-select" class="env-dropdown">
+          <option value="default">~/.pc2</option>
+          <option value="dev">~/pc2.net</option>
+        </select>
+      </div>
+      <div class="brand-section">
+        <span class="presented-by">Presented by</span>
+        <img src="elacity-labs-logo.svg" alt="Elacity Labs" class="brand-logo">
+      </div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
