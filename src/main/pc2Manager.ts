@@ -20,8 +20,8 @@ const NODE_URLS: Record<string, string> = {
   'linux-arm64': `https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-arm64.tar.gz`,
 };
 
-// Where we store our bundled Node.js
-const BUNDLED_NODE_DIR = path.join(HOME, '.pc2', 'node');
+// Where we store our bundled Node.js (separate from .pc2 to avoid backup issues)
+const BUNDLED_NODE_DIR = path.join(HOME, '.elastos', 'node');
 
 // Store the running PC2 process
 let pc2Process: ChildProcess | null = null;
