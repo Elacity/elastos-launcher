@@ -18,28 +18,28 @@ A one-click desktop app to run your Personal Cloud Computer (PC2).
 
 macOS shows a security warning for apps downloaded outside the App Store. Use this one-time Terminal command:
 
-```bash
-# Download the .dmg first, then run:
-cp -R "/Volumes/ElastOS 0.1.4-arm64/ElastOS.app" /Applications/ && xattr -cr /Applications/ElastOS.app && open /Applications/ElastOS.app
-```
-
-**If you get "Permission denied" errors** (upgrading from older version):
+**Step 1: Remove any old versions**
 ```bash
 sudo rm -rf /Applications/ElastOS.app
+rm -rf ~/.elastos ~/.pc2
 ```
-Then run the install command above.
+
+**Step 2: Download the .dmg, double-click to mount, then run:**
+```bash
+cp -R "/Volumes/ElastOS 0.1.7-arm64/ElastOS.app" /Applications/ && xattr -cr /Applications/ElastOS.app && open /Applications/ElastOS.app
+```
 
 ## Linux Installation
 
 **Ubuntu/Debian:**
 ```bash
-sudo dpkg -i elastos-launcher_0.1.4_amd64.deb
+sudo dpkg -i elastos-launcher_0.1.7_amd64.deb
 ```
 
 **AppImage (any distro):**
 ```bash
-chmod +x ElastOS-0.1.4.AppImage
-./ElastOS-0.1.4.AppImage
+chmod +x ElastOS-0.1.7.AppImage
+./ElastOS-0.1.7.AppImage
 ```
 
 ## Features
