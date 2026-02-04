@@ -11,9 +11,9 @@ const IS_WINDOWS = process.platform === 'win32';
 const IS_MAC = process.platform === 'darwin';
 const IS_ARM = process.arch === 'arm64';
 
-// Node.js 20 LTS download URLs (we bundle our own Node to avoid version issues)
-// Using 20.18.1 to satisfy @solana/codecs-core requirement of >=20.18.0
-const NODE_VERSION = '20.18.1';
+// Node.js 22 LTS download URLs (Active LTS with best compatibility)
+// jsdom@27 requires >=20.19.0 or ^22.12.0, so using Node 22 LTS
+const NODE_VERSION = '22.13.1';
 const NODE_URLS: Record<string, string> = {
   'darwin-arm64': `https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-darwin-arm64.tar.gz`,
   'darwin-x64': `https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-darwin-x64.tar.gz`,
