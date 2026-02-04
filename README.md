@@ -20,7 +20,7 @@ macOS shows a security warning for apps downloaded outside the App Store. Use th
 
 ```bash
 # Download the .dmg first, then run:
-cp -R "/Volumes/ElastOS 0.1.2-arm64/ElastOS.app" /Applications/ && xattr -cr /Applications/ElastOS.app && open /Applications/ElastOS.app
+cp -R "/Volumes/ElastOS 0.1.4-arm64/ElastOS.app" /Applications/ && xattr -cr /Applications/ElastOS.app && open /Applications/ElastOS.app
 ```
 
 **If you get "Permission denied" errors** (upgrading from older version):
@@ -33,13 +33,13 @@ Then run the install command above.
 
 **Ubuntu/Debian:**
 ```bash
-sudo dpkg -i elastos-launcher_0.1.2_amd64.deb
+sudo dpkg -i elastos-launcher_0.1.4_amd64.deb
 ```
 
 **AppImage (any distro):**
 ```bash
-chmod +x ElastOS-0.1.2.AppImage
-./ElastOS-0.1.2.AppImage
+chmod +x ElastOS-0.1.4.AppImage
+./ElastOS-0.1.4.AppImage
 ```
 
 ## Features
@@ -58,13 +58,15 @@ chmod +x ElastOS-0.1.2.AppImage
 
 ## Requirements
 
-The launcher will automatically install:
-- Node.js (via nvm if not present)
-- PC2 (cloned from GitHub)
+The launcher automatically handles everything:
+- **Bundles Node.js 20 LTS** - Downloads its own compatible Node.js, regardless of what you have installed
+- **Installs PC2** - Clones and builds from GitHub
 
 You just need:
 - Git (usually pre-installed on Mac/Linux)
 - Internet connection (for first-time setup)
+
+**Note:** Even if you have a different Node.js version installed (v25, homebrew, etc.), the launcher will download and use its own Node.js 20 LTS to ensure compatibility.
 
 ## Windows Users
 
