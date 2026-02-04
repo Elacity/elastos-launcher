@@ -1,4 +1,4 @@
-import { spawn, exec, execSync } from 'child_process';
+import { spawn, exec, execSync, ChildProcess } from 'child_process';
 import * as os from 'os';
 import * as path from 'path';
 import * as fs from 'fs';
@@ -7,6 +7,11 @@ import log from 'electron-log';
 const HOME = os.homedir();
 const PC2_URL = 'http://localhost:4200';
 const IS_WINDOWS = process.platform === 'win32';
+
+// Store the running PC2 process
+let pc2Process: ChildProcess | null = null;
+let logBuffer: string[] = [];
+const MAX_LOG_LINES = 500;
 
 // Get WSL home directory (for Windows)
 function getWSLHome(): string {
@@ -24,45 +29,70 @@ function getWSLHome(): string {
 
 const WSL_HOME = IS_WINDOWS ? getWSLHome() : HOME;
 
-// Convert Windows path to WSL path
-function toWSLPath(winPath: string): string {
-  if (!IS_WINDOWS) return winPath;
-  
-  // Replace Windows home with WSL home
-  if (winPath.startsWith(HOME)) {
-    return winPath.replace(HOME, WSL_HOME).replace(/\\/g, '/');
-  }
-  
-  // Convert drive letter paths: C:\Users\... -> /mnt/c/Users/...
-  const match = winPath.match(/^([A-Za-z]):\\/);
-  if (match) {
-    const driveLetter = match[1].toLowerCase();
-    return `/mnt/${driveLetter}${winPath.slice(2).replace(/\\/g, '/')}`;
-  }
-  
-  return winPath.replace(/\\/g, '/');
-}
-
 // Wrap command for WSL if on Windows
 function wslCmd(cmd: string): string {
   if (!IS_WINDOWS) return cmd;
   
   // Wrap the command to run inside WSL with proper PATH
-  // Source nvm and bashrc to ensure pm2/node are available
   const wslSetup = 'source ~/.nvm/nvm.sh 2>/dev/null || true; source ~/.bashrc 2>/dev/null || true;';
   return `wsl bash -c "${wslSetup} ${cmd.replace(/"/g, '\\"')}"`;
 }
 
-// Get proper shell PATH for finding pm2, node, npm etc.
+// Find node executable
+function findNodePath(): string {
+  // Common paths where node might be installed
+  const possiblePaths = [
+    '/usr/local/bin/node',
+    '/opt/homebrew/bin/node',
+    path.join(HOME, '.nvm/versions/node'),
+    '/usr/bin/node',
+  ];
+  
+  // Check nvm first
+  const nvmDir = path.join(HOME, '.nvm/versions/node');
+  if (fs.existsSync(nvmDir)) {
+    try {
+      const versions = fs.readdirSync(nvmDir);
+      if (versions.length > 0) {
+        const latestVersion = versions.sort().reverse()[0];
+        const nvmNode = path.join(nvmDir, latestVersion, 'bin', 'node');
+        if (fs.existsSync(nvmNode)) {
+          return nvmNode;
+        }
+      }
+    } catch (e) {
+      log.warn('Could not read nvm versions:', e);
+    }
+  }
+  
+  // Check other common paths
+  for (const nodePath of possiblePaths) {
+    if (fs.existsSync(nodePath)) {
+      return nodePath;
+    }
+  }
+  
+  // Try to find via which
+  try {
+    const result = execSync('which node', { encoding: 'utf8' }).trim();
+    if (result) return result;
+  } catch (e) {
+    // Ignore
+  }
+  
+  // Fallback to just 'node' and hope it's in PATH
+  return 'node';
+}
+
+// Get proper shell PATH for finding node, npm etc.
 function getShellEnv(): NodeJS.ProcessEnv {
   const env = { ...process.env };
   
-  // On Windows, we run commands via WSL, so PATH setup is handled there
   if (IS_WINDOWS) return env;
   
-  // Common paths where node/npm/pm2 might be installed (macOS/Linux)
+  // Common paths where node/npm might be installed (macOS/Linux)
   const additionalPaths = [
-    path.join(HOME, '.nvm/versions/node'),  // nvm
+    path.join(HOME, '.nvm/versions/node'),
     '/usr/local/bin',
     '/opt/homebrew/bin',
     path.join(HOME, '.npm-global/bin'),
@@ -75,7 +105,6 @@ function getShellEnv(): NodeJS.ProcessEnv {
     try {
       const versions = fs.readdirSync(nvmDir);
       if (versions.length > 0) {
-        // Use the most recent version
         const latestVersion = versions.sort().reverse()[0];
         additionalPaths.unshift(path.join(nvmDir, latestVersion, 'bin'));
       }
@@ -84,7 +113,6 @@ function getShellEnv(): NodeJS.ProcessEnv {
     }
   }
   
-  // Build PATH
   const currentPath = env.PATH || '';
   env.PATH = [...additionalPaths, ...currentPath.split(':')].join(':');
   
@@ -97,7 +125,6 @@ export type PC2Status = 'running' | 'stopped' | 'starting' | 'stopping' | 'error
 export type PC2Environment = 'default' | 'dev' | 'custom';
 
 // Environment configurations
-// On Windows, PC2 is installed inside WSL, so we use WSL paths
 const BASE_HOME = IS_WINDOWS ? WSL_HOME : HOME;
 const ENVIRONMENTS: Record<string, { dir: string; nodeDir: string; wslDir: string; wslNodeDir: string; label: string }> = {
   'default': {
@@ -123,7 +150,6 @@ const ENVIRONMENTS: Record<string, { dir: string; nodeDir: string; wslDir: strin
   }
 };
 
-// Get the correct directory path (WSL path on Windows, normal path otherwise)
 function getWSLNodeDir(): string {
   return ENVIRONMENTS[currentEnv].wslNodeDir;
 }
@@ -180,12 +206,18 @@ function emitLog(message: string): void {
   const timestamp = new Date().toLocaleTimeString();
   const logMessage = `[${timestamp}] ${message}`;
   log.info(logMessage);
+  
+  // Add to buffer
+  logBuffer.push(logMessage);
+  if (logBuffer.length > MAX_LOG_LINES) {
+    logBuffer.shift();
+  }
+  
   logListeners.forEach(cb => cb(logMessage));
 }
 
 export async function isInstalled(): Promise<boolean> {
   if (IS_WINDOWS) {
-    // Check inside WSL
     return new Promise((resolve) => {
       const wslNodeDir = getWSLNodeDir();
       exec(`wsl test -f "${wslNodeDir}/dist/index.js" && echo "yes" || echo "no"`, (error, stdout) => {
@@ -219,32 +251,15 @@ export async function getStatus(): Promise<PC2Status> {
       return 'running';
     }
   } catch (err) {
-    // Server not responding, check PM2
+    // Server not responding
   }
 
-  // Check PM2 process
-  return new Promise((resolve) => {
-    const cmd = IS_WINDOWS ? wslCmd('pm2 jlist') : 'pm2 jlist';
-    exec(cmd, { env: shellEnv }, (error, stdout) => {
-      if (error) {
-        resolve('stopped');
-        return;
-      }
-      
-      try {
-        const processes = JSON.parse(stdout || '[]');
-        const pc2 = processes.find((p: any) => p.name === 'pc2');
-        
-        if (pc2?.pm2_env?.status === 'online') {
-          resolve('starting'); // PM2 says online but health check failed = still starting
-        } else {
-          resolve('stopped');
-        }
-      } catch (e) {
-        resolve('stopped');
-      }
-    });
-  });
+  // Check if we have a tracked process running
+  if (pc2Process && !pc2Process.killed) {
+    return 'starting'; // Process exists but health check failed = still starting
+  }
+
+  return 'stopped';
 }
 
 export async function startPC2(): Promise<void> {
@@ -257,50 +272,79 @@ export async function startPC2(): Promise<void> {
     return;
   }
 
+  // Check if already running
+  if (pc2Process && !pc2Process.killed) {
+    emitLog('PC2 is already running');
+    return;
+  }
+
   emitStatus('starting');
   emitLog(`Starting PC2 from ${nodeDir}...`);
 
   return new Promise((resolve, reject) => {
-    let pm2Start;
+    const nodePath = findNodePath();
+    const distPath = path.join(getPC2NodeDir(), 'dist', 'index.js');
+    
+    emitLog(`Using node: ${nodePath}`);
+    emitLog(`Starting: ${distPath}`);
     
     if (IS_WINDOWS) {
-      // Run pm2 inside WSL
-      const cmd = wslCmd(`cd "${nodeDir}" && pm2 start npm --name pc2 -- start`);
-      pm2Start = spawn(cmd, [], { shell: true });
-    } else {
-      pm2Start = spawn('pm2', ['start', 'npm', '--name', 'pc2', '--', 'start'], {
-        cwd: nodeDir,
+      // Run node inside WSL
+      const cmd = wslCmd(`cd "${nodeDir}" && node dist/index.js`);
+      pc2Process = spawn(cmd, [], { 
         shell: true,
-        env: shellEnv
+        stdio: ['ignore', 'pipe', 'pipe']
+      });
+    } else {
+      pc2Process = spawn(nodePath, ['dist/index.js'], {
+        cwd: getPC2NodeDir(),
+        env: shellEnv,
+        stdio: ['ignore', 'pipe', 'pipe']
       });
     }
 
-    pm2Start.stdout.on('data', (data) => {
-      emitLog(data.toString().trim());
+    pc2Process.stdout?.on('data', (data) => {
+      const lines = data.toString().split('\n').filter((l: string) => l.trim());
+      lines.forEach((line: string) => emitLog(line));
     });
 
-    pm2Start.stderr.on('data', (data) => {
-      const msg = data.toString().trim();
-      if (msg) emitLog(msg);
+    pc2Process.stderr?.on('data', (data) => {
+      const lines = data.toString().split('\n').filter((l: string) => l.trim());
+      lines.forEach((line: string) => emitLog(`[stderr] ${line}`));
     });
 
-    pm2Start.on('close', (code) => {
-      if (code === 0) {
-        emitLog('PM2 process started, waiting for server...');
-        waitForServer().then(() => {
-          emitStatus('running');
-          emitLog('PC2 is now running!');
-          resolve();
-        }).catch((err) => {
-          emitStatus('error');
-          emitLog('Failed to start: ' + err.message);
-          reject(err);
-        });
-      } else {
-        emitStatus('error');
-        emitLog(`Failed to start PC2 (exit code: ${code})`);
-        reject(new Error(`PM2 start failed with code ${code}`));
+    pc2Process.on('error', (error) => {
+      emitStatus('error');
+      emitLog(`Failed to start PC2: ${error.message}`);
+      pc2Process = null;
+      reject(error);
+    });
+
+    pc2Process.on('exit', (code, signal) => {
+      if (code !== null) {
+        emitLog(`PC2 exited with code ${code}`);
+      } else if (signal) {
+        emitLog(`PC2 was killed with signal ${signal}`);
       }
+      pc2Process = null;
+      emitStatus('stopped');
+    });
+
+    // Wait for server to be ready
+    emitLog('Process spawned, waiting for server to be ready...');
+    waitForServer().then(() => {
+      emitStatus('running');
+      emitLog('PC2 is now running!');
+      resolve();
+    }).catch((err) => {
+      emitStatus('error');
+      emitLog('Failed to start: ' + err.message);
+      // Kill the process if it didn't start properly
+      if (pc2Process && !pc2Process.killed) {
+        pc2Process.kill();
+        pc2Process = null;
+      }
+      reject(err);
     });
   });
 }
@@ -310,29 +354,37 @@ export async function stopPC2(): Promise<void> {
   emitLog('Stopping PC2...');
 
   return new Promise((resolve) => {
-    let pm2Stop;
-    
-    if (IS_WINDOWS) {
-      const cmd = wslCmd('pm2 stop pc2');
-      pm2Stop = spawn(cmd, [], { shell: true });
+    if (pc2Process && !pc2Process.killed) {
+      pc2Process.kill('SIGTERM');
+      
+      // Give it a moment to shut down gracefully
+      setTimeout(() => {
+        if (pc2Process && !pc2Process.killed) {
+          emitLog('Force killing PC2...');
+          pc2Process.kill('SIGKILL');
+        }
+        pc2Process = null;
+        emitStatus('stopped');
+        emitLog('PC2 stopped');
+        resolve();
+      }, 3000);
     } else {
-      pm2Stop = spawn('pm2', ['stop', 'pc2'], { shell: true, env: shellEnv });
+      // No tracked process, but maybe something is running on the port
+      // Try to kill any node process on port 4200
+      if (IS_WINDOWS) {
+        exec(wslCmd('fuser -k 4200/tcp 2>/dev/null || true'), () => {
+          emitStatus('stopped');
+          emitLog('PC2 stopped');
+          resolve();
+        });
+      } else {
+        exec('lsof -ti:4200 | xargs kill -9 2>/dev/null || true', { env: shellEnv }, () => {
+          emitStatus('stopped');
+          emitLog('PC2 stopped');
+          resolve();
+        });
+      }
     }
-
-    pm2Stop.stdout.on('data', (data) => {
-      emitLog(data.toString().trim());
-    });
-
-    pm2Stop.stderr.on('data', (data) => {
-      const msg = data.toString().trim();
-      if (msg) emitLog(msg);
-    });
-
-    pm2Stop.on('close', () => {
-      emitStatus('stopped');
-      emitLog('PC2 stopped');
-      resolve();
-    });
   });
 }
 
@@ -340,40 +392,15 @@ export async function restartPC2(): Promise<void> {
   emitStatus('starting');
   emitLog('Restarting PC2...');
 
-  return new Promise((resolve, reject) => {
-    let pm2Restart;
-    
-    if (IS_WINDOWS) {
-      const cmd = wslCmd('pm2 restart pc2');
-      pm2Restart = spawn(cmd, [], { shell: true });
-    } else {
-      pm2Restart = spawn('pm2', ['restart', 'pc2'], { shell: true, env: shellEnv });
-    }
-
-    pm2Restart.on('close', (code) => {
-      if (code === 0) {
-        waitForServer().then(() => {
-          emitStatus('running');
-          emitLog('PC2 restarted successfully');
-          resolve();
-        }).catch(reject);
-      } else {
-        emitStatus('error');
-        reject(new Error(`Restart failed with code ${code}`));
-      }
-    });
-  });
+  await stopPC2();
+  await new Promise(resolve => setTimeout(resolve, 1000)); // Brief pause
+  await startPC2();
 }
 
 export async function getLogs(lines: number = 100): Promise<string> {
-  return new Promise((resolve) => {
-    const cmd = IS_WINDOWS 
-      ? wslCmd(`pm2 logs pc2 --nostream --lines ${lines}`)
-      : `pm2 logs pc2 --nostream --lines ${lines}`;
-    exec(cmd, { env: shellEnv }, (error, stdout, stderr) => {
-      resolve(stdout + stderr);
-    });
-  });
+  // Return logs from our buffer
+  const recentLogs = logBuffer.slice(-lines);
+  return recentLogs.join('\n');
 }
 
 export async function installPC2(onProgress: (message: string) => void): Promise<void> {
@@ -383,9 +410,8 @@ export async function installPC2(onProgress: (message: string) => void): Promise
   emitLog(`Installing PC2 to ${pc2Dir}...`);
   onProgress('Preparing installation...');
 
-  // Check if directory exists (handle differently for WSL)
+  // Check if directory exists
   if (IS_WINDOWS) {
-    // Check inside WSL
     const checkCmd = `wsl test -d "${pc2Dir}" && echo "exists" || echo "no"`;
     const exists = await new Promise<boolean>((resolve) => {
       exec(checkCmd, (error, stdout) => resolve(stdout.trim() === 'exists'));
@@ -419,7 +445,7 @@ export async function installPC2(onProgress: (message: string) => void): Promise
 
   onProgress('Cloning repository...');
 
-  // Build commands - use WSL wrapper on Windows
+  // Build commands
   const steps = IS_WINDOWS ? [
     { cmd: wslCmd(`git clone https://github.com/Elacity/pc2.net "${pc2Dir}"`), msg: 'Cloning repository...' },
     { cmd: wslCmd(`cd "${pc2Dir}" && npm install --legacy-peer-deps --ignore-scripts`), msg: 'Installing dependencies...' },
@@ -486,7 +512,7 @@ export function openInBrowser(): void {
 export async function uninstallPC2(): Promise<void> {
   const pc2Dir = IS_WINDOWS ? getWSLDir() : getPC2Dir();
   
-  // Safety check - don't delete if it's a dev environment or system path
+  // Safety check
   if (!pc2Dir.includes('.pc2') && !pc2Dir.includes('pc2.net')) {
     throw new Error('Safety check failed: refusing to delete this path');
   }
@@ -500,7 +526,6 @@ export async function uninstallPC2(): Promise<void> {
   emitLog(`Uninstalling PC2 from ${pc2Dir}...`);
   
   if (IS_WINDOWS) {
-    // Remove via WSL
     await new Promise<void>((resolve) => {
       exec(`wsl rm -rf "${pc2Dir}"`, () => {
         emitLog('PC2 uninstalled successfully');
@@ -508,7 +533,6 @@ export async function uninstallPC2(): Promise<void> {
       });
     });
   } else {
-    // Remove the directory
     if (fs.existsSync(pc2Dir)) {
       fs.rmSync(pc2Dir, { recursive: true, force: true });
       emitLog('PC2 uninstalled successfully');
@@ -522,7 +546,6 @@ export function getLocalIP(): string {
   const interfaces = os.networkInterfaces();
   for (const name of Object.keys(interfaces)) {
     for (const iface of interfaces[name] || []) {
-      // Skip internal and non-IPv4 addresses
       if (iface.family === 'IPv4' && !iface.internal) {
         return iface.address;
       }
