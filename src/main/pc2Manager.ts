@@ -12,7 +12,8 @@ const IS_MAC = process.platform === 'darwin';
 const IS_ARM = process.arch === 'arm64';
 
 // Node.js 20 LTS download URLs (we bundle our own Node to avoid version issues)
-const NODE_VERSION = '20.11.1';
+// Using 20.18.1 to satisfy @solana/codecs-core requirement of >=20.18.0
+const NODE_VERSION = '20.18.1';
 const NODE_URLS: Record<string, string> = {
   'darwin-arm64': `https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-darwin-arm64.tar.gz`,
   'darwin-x64': `https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-darwin-x64.tar.gz`,
