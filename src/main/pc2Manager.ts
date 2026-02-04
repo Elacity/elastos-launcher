@@ -38,25 +38,38 @@ function wslCmd(cmd: string): string {
   return `wsl bash -c "${wslSetup} ${cmd.replace(/"/g, '\\"')}"`;
 }
 
-// Find node executable
+// Find node executable - prefer Node 20 LTS for compatibility
 function findNodePath(): string {
-  // Common paths where node might be installed
-  const possiblePaths = [
-    '/usr/local/bin/node',
-    '/opt/homebrew/bin/node',
-    path.join(HOME, '.nvm/versions/node'),
-    '/usr/bin/node',
-  ];
-  
-  // Check nvm first
+  // Check nvm first - prefer v20.x for compatibility with native modules
   const nvmDir = path.join(HOME, '.nvm/versions/node');
   if (fs.existsSync(nvmDir)) {
     try {
       const versions = fs.readdirSync(nvmDir);
-      if (versions.length > 0) {
-        const latestVersion = versions.sort().reverse()[0];
-        const nvmNode = path.join(nvmDir, latestVersion, 'bin', 'node');
+      // Prefer v20.x (LTS) over newer versions which may have compatibility issues
+      const v20Versions = versions.filter(v => v.startsWith('v20'));
+      const v22Versions = versions.filter(v => v.startsWith('v22'));
+      
+      // Try v20 first (best compatibility), then v22
+      const preferredVersions = [...v20Versions.sort().reverse(), ...v22Versions.sort().reverse()];
+      
+      for (const version of preferredVersions) {
+        const nvmNode = path.join(nvmDir, version, 'bin', 'node');
         if (fs.existsSync(nvmNode)) {
+          log.info(`Using nvm Node.js ${version}`);
+          return nvmNode;
+        }
+      }
+      
+      // Fallback to any version that's not too new (< v25)
+      const safeVersions = versions.filter(v => {
+        const major = parseInt(v.replace('v', '').split('.')[0], 10);
+        return major >= 18 && major < 25;
+      }).sort().reverse();
+      
+      if (safeVersions.length > 0) {
+        const nvmNode = path.join(nvmDir, safeVersions[0], 'bin', 'node');
+        if (fs.existsSync(nvmNode)) {
+          log.info(`Using nvm Node.js ${safeVersions[0]}`);
           return nvmNode;
         }
       }
@@ -64,6 +77,13 @@ function findNodePath(): string {
       log.warn('Could not read nvm versions:', e);
     }
   }
+  
+  // Common paths where node might be installed
+  const possiblePaths = [
+    '/usr/local/bin/node',
+    '/opt/homebrew/bin/node',
+    '/usr/bin/node',
+  ];
   
   // Check other common paths
   for (const nodePath of possiblePaths) {
@@ -83,6 +103,35 @@ function findNodePath(): string {
   // Fallback to just 'node' and hope it's in PATH
   return 'node';
 }
+
+// Check if Node version is compatible (18-24)
+function checkNodeVersion(): { compatible: boolean; version: string; message: string } {
+  try {
+    const nodePath = findNodePath();
+    const version = execSync(`"${nodePath}" -v`, { encoding: 'utf8' }).trim();
+    const major = parseInt(version.replace('v', '').split('.')[0], 10);
+    
+    if (major >= 25) {
+      return {
+        compatible: false,
+        version,
+        message: `Node.js ${version} is too new. PC2 requires Node.js 20 LTS. Please install via: nvm install 20 && nvm use 20`
+      };
+    } else if (major < 18) {
+      return {
+        compatible: false,
+        version,
+        message: `Node.js ${version} is too old. PC2 requires Node.js 20 LTS. Please install via: nvm install 20 && nvm use 20`
+      };
+    }
+    
+    return { compatible: true, version, message: `Node.js ${version} OK` };
+  } catch (e) {
+    return { compatible: false, version: 'unknown', message: 'Node.js not found. Please install Node.js 20 LTS.' };
+  }
+}
+
+export { checkNodeVersion };
 
 // Get proper shell PATH for finding node, npm etc.
 function getShellEnv(): NodeJS.ProcessEnv {
@@ -408,6 +457,65 @@ export async function installPC2(onProgress: (message: string) => void): Promise
   const nodeDir = IS_WINDOWS ? getWSLNodeDir() : getPC2NodeDir();
   
   emitLog(`Installing PC2 to ${pc2Dir}...`);
+  onProgress('Checking Node.js version...');
+
+  // Check Node.js version compatibility
+  const nodeCheck = checkNodeVersion();
+  emitLog(nodeCheck.message);
+  
+  if (!nodeCheck.compatible) {
+    onProgress('Installing Node.js 20 via nvm...');
+    emitLog('Node.js version incompatible, attempting to install Node 20 via nvm...');
+    
+    // Try to install Node 20 via nvm
+    const nvmDir = path.join(HOME, '.nvm');
+    const hasNvm = fs.existsSync(nvmDir);
+    
+    if (!hasNvm && !IS_WINDOWS) {
+      // Install nvm first
+      emitLog('Installing nvm...');
+      await new Promise<void>((resolve, reject) => {
+        exec('curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh | bash', 
+          { maxBuffer: 10 * 1024 * 1024 }, 
+          (error) => {
+            if (error) {
+              emitLog(`Warning: Could not install nvm: ${error.message}`);
+            }
+            resolve();
+          }
+        );
+      });
+    }
+    
+    // Install Node 20 via nvm
+    if (fs.existsSync(path.join(HOME, '.nvm')) || IS_WINDOWS) {
+      emitLog('Installing Node.js 20 LTS via nvm...');
+      const nvmInstallCmd = IS_WINDOWS 
+        ? wslCmd('source ~/.nvm/nvm.sh && nvm install 20 && nvm alias default 20')
+        : 'source ~/.nvm/nvm.sh && nvm install 20 && nvm alias default 20';
+      
+      await new Promise<void>((resolve) => {
+        exec(nvmInstallCmd, { shell: '/bin/bash', maxBuffer: 10 * 1024 * 1024 }, (error, stdout, stderr) => {
+          if (error) {
+            emitLog(`Warning: Could not install Node 20: ${error.message}`);
+            emitLog('Please manually install Node.js 20 LTS: nvm install 20 && nvm use 20');
+          } else {
+            emitLog('Node.js 20 LTS installed successfully');
+          }
+          resolve();
+        });
+      });
+      
+      // Verify installation
+      const recheck = checkNodeVersion();
+      if (!recheck.compatible) {
+        throw new Error(`Node.js version still incompatible after install attempt. ${recheck.message}`);
+      }
+    } else {
+      throw new Error('Node.js version incompatible and could not install nvm. Please manually install Node.js 20 LTS.');
+    }
+  }
+
   onProgress('Preparing installation...');
 
   // Check if directory exists
