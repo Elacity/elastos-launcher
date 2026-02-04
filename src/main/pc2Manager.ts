@@ -2,11 +2,26 @@ import { spawn, exec, execSync, ChildProcess } from 'child_process';
 import * as os from 'os';
 import * as path from 'path';
 import * as fs from 'fs';
+import * as https from 'https';
 import log from 'electron-log';
 
 const HOME = os.homedir();
 const PC2_URL = 'http://localhost:4200';
 const IS_WINDOWS = process.platform === 'win32';
+const IS_MAC = process.platform === 'darwin';
+const IS_ARM = process.arch === 'arm64';
+
+// Node.js 20 LTS download URLs (we bundle our own Node to avoid version issues)
+const NODE_VERSION = '20.11.1';
+const NODE_URLS: Record<string, string> = {
+  'darwin-arm64': `https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-darwin-arm64.tar.gz`,
+  'darwin-x64': `https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-darwin-x64.tar.gz`,
+  'linux-x64': `https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.gz`,
+  'linux-arm64': `https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-arm64.tar.gz`,
+};
+
+// Where we store our bundled Node.js
+const BUNDLED_NODE_DIR = path.join(HOME, '.pc2', 'node');
 
 // Store the running PC2 process
 let pc2Process: ChildProcess | null = null;
@@ -38,38 +53,124 @@ function wslCmd(cmd: string): string {
   return `wsl bash -c "${wslSetup} ${cmd.replace(/"/g, '\\"')}"`;
 }
 
-// Find node executable - prefer Node 20 LTS for compatibility
+// Get the path to our bundled Node.js binary
+function getBundledNodePath(): string {
+  const platform = IS_WINDOWS ? 'win32' : process.platform;
+  const arch = process.arch;
+  const nodeBin = IS_WINDOWS ? 'node.exe' : 'node';
+  return path.join(BUNDLED_NODE_DIR, `node-v${NODE_VERSION}-${platform}-${arch}`, 'bin', nodeBin);
+}
+
+// Check if we have our bundled Node.js installed
+function hasBundledNode(): boolean {
+  const nodePath = getBundledNodePath();
+  return fs.existsSync(nodePath);
+}
+
+// Download a file with progress
+async function downloadFile(url: string, dest: string, onProgress?: (percent: number) => void): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const file = fs.createWriteStream(dest);
+    
+    https.get(url, (response) => {
+      // Handle redirects
+      if (response.statusCode === 302 || response.statusCode === 301) {
+        const redirectUrl = response.headers.location;
+        if (redirectUrl) {
+          file.close();
+          fs.unlinkSync(dest);
+          downloadFile(redirectUrl, dest, onProgress).then(resolve).catch(reject);
+          return;
+        }
+      }
+      
+      const totalBytes = parseInt(response.headers['content-length'] || '0', 10);
+      let downloadedBytes = 0;
+      
+      response.on('data', (chunk) => {
+        downloadedBytes += chunk.length;
+        if (totalBytes > 0 && onProgress) {
+          onProgress(Math.round((downloadedBytes / totalBytes) * 100));
+        }
+      });
+      
+      response.pipe(file);
+      
+      file.on('finish', () => {
+        file.close();
+        resolve();
+      });
+    }).on('error', (err) => {
+      fs.unlink(dest, () => {}); // Delete the file on error
+      reject(err);
+    });
+  });
+}
+
+// Download and extract Node.js for the current platform
+async function downloadBundledNode(onProgress: (message: string) => void): Promise<void> {
+  const platform = process.platform;
+  const arch = process.arch;
+  const key = `${platform}-${arch}`;
+  
+  const url = NODE_URLS[key];
+  if (!url) {
+    throw new Error(`No Node.js binary available for ${key}. Please install Node.js 20 manually.`);
+  }
+  
+  // Create directory
+  if (!fs.existsSync(BUNDLED_NODE_DIR)) {
+    fs.mkdirSync(BUNDLED_NODE_DIR, { recursive: true });
+  }
+  
+  const tarPath = path.join(BUNDLED_NODE_DIR, `node-v${NODE_VERSION}.tar.gz`);
+  
+  onProgress(`Downloading Node.js ${NODE_VERSION}...`);
+  log.info(`Downloading Node.js from ${url}`);
+  
+  await downloadFile(url, tarPath, (percent) => {
+    onProgress(`Downloading Node.js ${NODE_VERSION}... ${percent}%`);
+  });
+  
+  onProgress('Extracting Node.js...');
+  log.info('Extracting Node.js...');
+  
+  // Extract the tarball
+  await new Promise<void>((resolve, reject) => {
+    exec(`tar -xzf "${tarPath}" -C "${BUNDLED_NODE_DIR}"`, (error) => {
+      if (error) {
+        reject(error);
+      } else {
+        // Clean up tarball
+        fs.unlinkSync(tarPath);
+        resolve();
+      }
+    });
+  });
+  
+  log.info(`Node.js ${NODE_VERSION} installed to ${BUNDLED_NODE_DIR}`);
+}
+
+// Find node executable - ALWAYS prefer our bundled Node.js
 function findNodePath(): string {
-  // Check nvm first - prefer v20.x for compatibility with native modules
+  // First check for our bundled Node.js (guaranteed compatible)
+  const bundledNode = getBundledNodePath();
+  if (fs.existsSync(bundledNode)) {
+    log.info(`Using bundled Node.js: ${bundledNode}`);
+    return bundledNode;
+  }
+  
+  // Fallback: Check nvm for v20.x
   const nvmDir = path.join(HOME, '.nvm/versions/node');
   if (fs.existsSync(nvmDir)) {
     try {
       const versions = fs.readdirSync(nvmDir);
-      // Prefer v20.x (LTS) over newer versions which may have compatibility issues
-      const v20Versions = versions.filter(v => v.startsWith('v20'));
-      const v22Versions = versions.filter(v => v.startsWith('v22'));
+      const v20Versions = versions.filter(v => v.startsWith('v20')).sort().reverse();
       
-      // Try v20 first (best compatibility), then v22
-      const preferredVersions = [...v20Versions.sort().reverse(), ...v22Versions.sort().reverse()];
-      
-      for (const version of preferredVersions) {
+      for (const version of v20Versions) {
         const nvmNode = path.join(nvmDir, version, 'bin', 'node');
         if (fs.existsSync(nvmNode)) {
           log.info(`Using nvm Node.js ${version}`);
-          return nvmNode;
-        }
-      }
-      
-      // Fallback to any version that's not too new (< v25)
-      const safeVersions = versions.filter(v => {
-        const major = parseInt(v.replace('v', '').split('.')[0], 10);
-        return major >= 18 && major < 25;
-      }).sort().reverse();
-      
-      if (safeVersions.length > 0) {
-        const nvmNode = path.join(nvmDir, safeVersions[0], 'bin', 'node');
-        if (fs.existsSync(nvmNode)) {
-          log.info(`Using nvm Node.js ${safeVersions[0]}`);
           return nvmNode;
         }
       }
@@ -78,60 +179,36 @@ function findNodePath(): string {
     }
   }
   
-  // Common paths where node might be installed
+  // Last resort: system node (may have compatibility issues)
   const possiblePaths = [
     '/usr/local/bin/node',
     '/opt/homebrew/bin/node',
     '/usr/bin/node',
   ];
   
-  // Check other common paths
   for (const nodePath of possiblePaths) {
     if (fs.existsSync(nodePath)) {
+      log.warn(`Using system Node.js: ${nodePath} - may have compatibility issues`);
       return nodePath;
     }
   }
   
-  // Try to find via which
-  try {
-    const result = execSync('which node', { encoding: 'utf8' }).trim();
-    if (result) return result;
-  } catch (e) {
-    // Ignore
-  }
-  
-  // Fallback to just 'node' and hope it's in PATH
   return 'node';
 }
 
-// Check if Node version is compatible (18-24)
-function checkNodeVersion(): { compatible: boolean; version: string; message: string } {
-  try {
-    const nodePath = findNodePath();
-    const version = execSync(`"${nodePath}" -v`, { encoding: 'utf8' }).trim();
-    const major = parseInt(version.replace('v', '').split('.')[0], 10);
-    
-    if (major >= 25) {
-      return {
-        compatible: false,
-        version,
-        message: `Node.js ${version} is too new. PC2 requires Node.js 20 LTS. Please install via: nvm install 20 && nvm use 20`
-      };
-    } else if (major < 18) {
-      return {
-        compatible: false,
-        version,
-        message: `Node.js ${version} is too old. PC2 requires Node.js 20 LTS. Please install via: nvm install 20 && nvm use 20`
-      };
+// Get npm path (relative to our node)
+function findNpmPath(): string {
+  const bundledNode = getBundledNodePath();
+  if (fs.existsSync(bundledNode)) {
+    const npmPath = path.join(path.dirname(bundledNode), 'npm');
+    if (fs.existsSync(npmPath)) {
+      return npmPath;
     }
-    
-    return { compatible: true, version, message: `Node.js ${version} OK` };
-  } catch (e) {
-    return { compatible: false, version: 'unknown', message: 'Node.js not found. Please install Node.js 20 LTS.' };
   }
+  return 'npm';
 }
 
-export { checkNodeVersion };
+export { hasBundledNode, downloadBundledNode };
 
 // Get proper shell PATH for finding node, npm etc.
 function getShellEnv(): NodeJS.ProcessEnv {
@@ -140,7 +217,11 @@ function getShellEnv(): NodeJS.ProcessEnv {
   if (IS_WINDOWS) return env;
   
   // Common paths where node/npm might be installed (macOS/Linux)
+  // Prioritize our bundled Node.js
+  const bundledBinDir = path.join(BUNDLED_NODE_DIR, `node-v${NODE_VERSION}-${process.platform}-${process.arch}`, 'bin');
+  
   const additionalPaths = [
+    bundledBinDir,  // Our bundled Node first!
     path.join(HOME, '.nvm/versions/node'),
     '/usr/local/bin',
     '/opt/homebrew/bin',
@@ -457,64 +538,25 @@ export async function installPC2(onProgress: (message: string) => void): Promise
   const nodeDir = IS_WINDOWS ? getWSLNodeDir() : getPC2NodeDir();
   
   emitLog(`Installing PC2 to ${pc2Dir}...`);
-  onProgress('Checking Node.js version...');
-
-  // Check Node.js version compatibility
-  const nodeCheck = checkNodeVersion();
-  emitLog(nodeCheck.message);
   
-  if (!nodeCheck.compatible) {
-    onProgress('Installing Node.js 20 via nvm...');
-    emitLog('Node.js version incompatible, attempting to install Node 20 via nvm...');
+  // Step 1: Ensure we have our bundled Node.js (guaranteed compatible)
+  if (!hasBundledNode() && !IS_WINDOWS) {
+    onProgress('Downloading Node.js 20 LTS...');
+    emitLog('Downloading bundled Node.js 20 LTS for compatibility...');
     
-    // Try to install Node 20 via nvm
-    const nvmDir = path.join(HOME, '.nvm');
-    const hasNvm = fs.existsSync(nvmDir);
-    
-    if (!hasNvm && !IS_WINDOWS) {
-      // Install nvm first
-      emitLog('Installing nvm...');
-      await new Promise<void>((resolve, reject) => {
-        exec('curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh | bash', 
-          { maxBuffer: 10 * 1024 * 1024 }, 
-          (error) => {
-            if (error) {
-              emitLog(`Warning: Could not install nvm: ${error.message}`);
-            }
-            resolve();
-          }
-        );
-      });
-    }
-    
-    // Install Node 20 via nvm
-    if (fs.existsSync(path.join(HOME, '.nvm')) || IS_WINDOWS) {
-      emitLog('Installing Node.js 20 LTS via nvm...');
-      const nvmInstallCmd = IS_WINDOWS 
-        ? wslCmd('source ~/.nvm/nvm.sh && nvm install 20 && nvm alias default 20')
-        : 'source ~/.nvm/nvm.sh && nvm install 20 && nvm alias default 20';
-      
-      await new Promise<void>((resolve) => {
-        exec(nvmInstallCmd, { shell: '/bin/bash', maxBuffer: 10 * 1024 * 1024 }, (error, stdout, stderr) => {
-          if (error) {
-            emitLog(`Warning: Could not install Node 20: ${error.message}`);
-            emitLog('Please manually install Node.js 20 LTS: nvm install 20 && nvm use 20');
-          } else {
-            emitLog('Node.js 20 LTS installed successfully');
-          }
-          resolve();
-        });
-      });
-      
-      // Verify installation
-      const recheck = checkNodeVersion();
-      if (!recheck.compatible) {
-        throw new Error(`Node.js version still incompatible after install attempt. ${recheck.message}`);
-      }
-    } else {
-      throw new Error('Node.js version incompatible and could not install nvm. Please manually install Node.js 20 LTS.');
+    try {
+      await downloadBundledNode(onProgress);
+      emitLog(`Node.js ${NODE_VERSION} ready`);
+    } catch (error: any) {
+      emitLog(`Warning: Could not download bundled Node.js: ${error.message}`);
+      emitLog('Will try to use system Node.js...');
     }
   }
+  
+  const nodePath = findNodePath();
+  const npmPath = findNpmPath();
+  emitLog(`Using Node.js: ${nodePath}`);
+  emitLog(`Using npm: ${npmPath}`);
 
   onProgress('Preparing installation...');
 
@@ -553,7 +595,9 @@ export async function installPC2(onProgress: (message: string) => void): Promise
 
   onProgress('Cloning repository...');
 
-  // Build commands
+  // Build commands - use our bundled npm for guaranteed compatibility
+  const npmCmd = `"${npmPath}"`;
+  
   const steps = IS_WINDOWS ? [
     { cmd: wslCmd(`git clone https://github.com/Elacity/pc2.net "${pc2Dir}"`), msg: 'Cloning repository...' },
     { cmd: wslCmd(`cd "${pc2Dir}" && npm install --legacy-peer-deps --ignore-scripts`), msg: 'Installing dependencies...' },
@@ -561,9 +605,9 @@ export async function installPC2(onProgress: (message: string) => void): Promise
     { cmd: wslCmd(`cd "${nodeDir}" && npm run build`), msg: 'Building PC2...' },
   ] : [
     { cmd: `git clone https://github.com/Elacity/pc2.net "${pc2Dir}"`, msg: 'Cloning repository...' },
-    { cmd: `cd "${pc2Dir}" && npm install --legacy-peer-deps --ignore-scripts`, msg: 'Installing dependencies...' },
-    { cmd: `cd "${nodeDir}" && npm install --legacy-peer-deps`, msg: 'Installing node dependencies...' },
-    { cmd: `cd "${nodeDir}" && npm run build`, msg: 'Building PC2...' },
+    { cmd: `cd "${pc2Dir}" && ${npmCmd} install --legacy-peer-deps --ignore-scripts`, msg: 'Installing dependencies...' },
+    { cmd: `cd "${nodeDir}" && ${npmCmd} install --legacy-peer-deps`, msg: 'Installing node dependencies...' },
+    { cmd: `cd "${nodeDir}" && ${npmCmd} run build`, msg: 'Building PC2...' },
   ];
 
   for (const step of steps) {
