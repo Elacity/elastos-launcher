@@ -26,20 +26,20 @@ rm -rf ~/.elastos ~/.pc2
 
 **Step 2: Download the .dmg, double-click to mount, then run:**
 ```bash
-cp -R "/Volumes/ElastOS 0.1.7-arm64/ElastOS.app" /Applications/ && xattr -cr /Applications/ElastOS.app && open /Applications/ElastOS.app
+cp -R "/Volumes/ElastOS 1.0.0-arm64/ElastOS.app" /Applications/ && xattr -cr /Applications/ElastOS.app && open /Applications/ElastOS.app
 ```
 
 ## Linux Installation
 
 **Ubuntu/Debian:**
 ```bash
-sudo dpkg -i elastos-launcher_0.1.7_amd64.deb
+sudo dpkg -i elastos-launcher_1.0.0_amd64.deb
 ```
 
 **AppImage (any distro):**
 ```bash
-chmod +x ElastOS-0.1.7.AppImage
-./ElastOS-0.1.7.AppImage
+chmod +x ElastOS-1.0.0.AppImage
+./ElastOS-1.0.0.AppImage
 ```
 
 ## Features
