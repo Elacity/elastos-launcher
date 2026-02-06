@@ -52,6 +52,28 @@
       "target": [
         "nsis",
         "portable"
+      ],
+      "extraResources": [
+        {
+          "from": "pc2-bundle/pc2-node/dist",
+          "to": "pc2-bundle/dist"
+        },
+        {
+          "from": "pc2-bundle/pc2-node/frontend",
+          "to": "pc2-bundle/frontend"
+        },
+        {
+          "from": "pc2-bundle/pc2-node/node_modules",
+          "to": "pc2-bundle/node_modules"
+        },
+        {
+          "from": "pc2-bundle/pc2-node/package.json",
+          "to": "pc2-bundle/package.json"
+        },
+        {
+          "from": "pc2-bundle/config",
+          "to": "pc2-bundle/config"
+        }
       ]
     },
     "linux": {

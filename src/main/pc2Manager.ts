@@ -19,6 +19,7 @@ const NODE_URLS: Record<string, string> = {
   'darwin-x64': `https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-darwin-x64.tar.gz`,
   'linux-x64': `https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.gz`,
   'linux-arm64': `https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-arm64.tar.gz`,
+  'win32-x64': `https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-win-x64.zip`,
 };
 
 // Where we store our bundled Node.js (separate from .pc2 to avoid backup issues)
@@ -29,37 +30,61 @@ let pc2Process: ChildProcess | null = null;
 let logBuffer: string[] = [];
 const MAX_LOG_LINES = 500;
 
-// Get WSL home directory (for Windows)
-function getWSLHome(): string {
-  if (!IS_WINDOWS) return HOME;
-  
+// Check if git is available on the system (critical for Windows where git may not be pre-installed)
+function isGitAvailable(): boolean {
   try {
-    // Get the WSL username
-    const result = execSync('wsl whoami', { encoding: 'utf8' }).trim();
-    return `/home/${result}`;
-  } catch (e) {
-    log.warn('Could not get WSL home, using default');
-    return '/home/user';
+    execSync('git --version', { encoding: 'utf8', stdio: 'pipe' });
+    return true;
+  } catch {
+    return false;
   }
 }
 
-const WSL_HOME = IS_WINDOWS ? getWSLHome() : HOME;
+// Check if a pre-built PC2 bundle is included in the packaged Electron app (Windows only).
+// When built via CI, electron-builder's extraResources places the pre-compiled PC2
+// at process.resourcesPath/pc2-bundle/ so users don't need git or build tools.
+function getBundledPC2Path(): string | null {
+  try {
+    const bundlePath = path.join(process.resourcesPath, 'pc2-bundle');
+    if (fs.existsSync(path.join(bundlePath, 'dist', 'index.js'))) {
+      return bundlePath;
+    }
+  } catch {
+    // process.resourcesPath may not exist in dev mode
+  }
+  return null;
+}
 
-// Wrap command for WSL if on Windows
-function wslCmd(cmd: string): string {
-  if (!IS_WINDOWS) return cmd;
-  
-  // Wrap the command to run inside WSL with proper PATH
-  const wslSetup = 'source ~/.nvm/nvm.sh 2>/dev/null || true; source ~/.bashrc 2>/dev/null || true;';
-  return `wsl bash -c "${wslSetup} ${cmd.replace(/"/g, '\\"')}"`;
+// Recursively copy a directory tree from src to dest
+function copyDirRecursive(src: string, dest: string): void {
+  fs.mkdirSync(dest, { recursive: true });
+  for (const entry of fs.readdirSync(src, { withFileTypes: true })) {
+    const srcPath = path.join(src, entry.name);
+    const destPath = path.join(dest, entry.name);
+    if (entry.isDirectory()) {
+      copyDirRecursive(srcPath, destPath);
+    } else {
+      fs.copyFileSync(srcPath, destPath);
+    }
+  }
 }
 
 // Get the path to our bundled Node.js binary
+// Windows Node.js zip extracts to node-v22.13.1-win-x64/ with node.exe at root (no bin/ subfolder)
+// macOS/Linux tar.gz extracts to node-v22.13.1-<platform>-<arch>/bin/node
 function getBundledNodePath(): string {
-  const platform = IS_WINDOWS ? 'win32' : process.platform;
-  const arch = process.arch;
-  const nodeBin = IS_WINDOWS ? 'node.exe' : 'node';
-  return path.join(BUNDLED_NODE_DIR, `node-v${NODE_VERSION}-${platform}-${arch}`, 'bin', nodeBin);
+  if (IS_WINDOWS) {
+    return path.join(BUNDLED_NODE_DIR, `node-v${NODE_VERSION}-win-x64`, 'node.exe');
+  }
+  return path.join(BUNDLED_NODE_DIR, `node-v${NODE_VERSION}-${process.platform}-${process.arch}`, 'bin', 'node');
+}
+
+// Get the directory containing the bundled Node.js binary (used for PATH)
+function getBundledNodeBinDir(): string {
+  if (IS_WINDOWS) {
+    return path.join(BUNDLED_NODE_DIR, `node-v${NODE_VERSION}-win-x64`);
+  }
+  return path.join(BUNDLED_NODE_DIR, `node-v${NODE_VERSION}-${process.platform}-${process.arch}`, 'bin');
 }
 
 // Check if we have our bundled Node.js installed
@@ -116,7 +141,7 @@ async function downloadBundledNode(onProgress: (message: string) => void): Promi
   
   const url = NODE_URLS[key];
   if (!url) {
-    throw new Error(`No Node.js binary available for ${key}. Please install Node.js 20 manually.`);
+    throw new Error(`No Node.js binary available for ${key}. Please install Node.js ${NODE_VERSION} manually.`);
   }
   
   // Create directory
@@ -124,26 +149,38 @@ async function downloadBundledNode(onProgress: (message: string) => void): Promi
     fs.mkdirSync(BUNDLED_NODE_DIR, { recursive: true });
   }
   
-  const tarPath = path.join(BUNDLED_NODE_DIR, `node-v${NODE_VERSION}.tar.gz`);
+  const isZip = url.endsWith('.zip');
+  const archiveExt = isZip ? '.zip' : '.tar.gz';
+  const archivePath = path.join(BUNDLED_NODE_DIR, `node-v${NODE_VERSION}${archiveExt}`);
   
   onProgress(`Downloading Node.js ${NODE_VERSION}...`);
   log.info(`Downloading Node.js from ${url}`);
   
-  await downloadFile(url, tarPath, (percent) => {
+  await downloadFile(url, archivePath, (percent) => {
     onProgress(`Downloading Node.js ${NODE_VERSION}... ${percent}%`);
   });
   
   onProgress('Extracting Node.js...');
   log.info('Extracting Node.js...');
   
-  // Extract the tarball
+  // Extract the archive
   await new Promise<void>((resolve, reject) => {
-    exec(`tar -xzf "${tarPath}" -C "${BUNDLED_NODE_DIR}"`, (error) => {
+    let extractCmd: string;
+    
+    if (isZip) {
+      // Windows: Use PowerShell Expand-Archive for .zip files
+      extractCmd = `powershell -NoProfile -Command "Expand-Archive -Path '${archivePath}' -DestinationPath '${BUNDLED_NODE_DIR}' -Force"`;
+    } else {
+      // macOS/Linux: Use tar for .tar.gz files
+      extractCmd = `tar -xzf "${archivePath}" -C "${BUNDLED_NODE_DIR}"`;
+    }
+    
+    exec(extractCmd, (error) => {
       if (error) {
         reject(error);
       } else {
-        // Clean up tarball
-        fs.unlinkSync(tarPath);
+        // Clean up archive
+        fs.unlinkSync(archivePath);
         resolve();
       }
     });
@@ -161,7 +198,26 @@ function findNodePath(): string {
     return bundledNode;
   }
   
-  // Fallback: Check nvm for v20.x
+  if (IS_WINDOWS) {
+    // On Windows, check common Node.js installation paths
+    const possiblePaths = [
+      path.join(process.env.PROGRAMFILES || 'C:\\Program Files', 'nodejs', 'node.exe'),
+      path.join(process.env['PROGRAMFILES(X86)'] || 'C:\\Program Files (x86)', 'nodejs', 'node.exe'),
+      path.join(process.env.LOCALAPPDATA || '', 'Programs', 'nodejs', 'node.exe'),
+    ];
+    
+    for (const nodePath of possiblePaths) {
+      if (nodePath && fs.existsSync(nodePath)) {
+        log.warn(`Using system Node.js: ${nodePath} - may have compatibility issues`);
+        return nodePath;
+      }
+    }
+    
+    // On Windows, 'node' on PATH will work if Node.js is installed
+    return 'node';
+  }
+  
+  // Fallback: Check nvm for v20.x (macOS/Linux only)
   const nvmDir = path.join(HOME, '.nvm/versions/node');
   if (fs.existsSync(nvmDir)) {
     try {
@@ -198,15 +254,17 @@ function findNodePath(): string {
 }
 
 // Get npm path (relative to our node)
+// On Windows, npm is a .cmd file; on macOS/Linux it's a shell script
 function findNpmPath(): string {
   const bundledNode = getBundledNodePath();
   if (fs.existsSync(bundledNode)) {
-    const npmPath = path.join(path.dirname(bundledNode), 'npm');
+    const npmName = IS_WINDOWS ? 'npm.cmd' : 'npm';
+    const npmPath = path.join(path.dirname(bundledNode), npmName);
     if (fs.existsSync(npmPath)) {
       return npmPath;
     }
   }
-  return 'npm';
+  return IS_WINDOWS ? 'npm.cmd' : 'npm';
 }
 
 export { hasBundledNode, downloadBundledNode };
@@ -215,12 +273,18 @@ export { hasBundledNode, downloadBundledNode };
 function getShellEnv(): NodeJS.ProcessEnv {
   const env = { ...process.env };
   
-  if (IS_WINDOWS) return env;
+  // Prioritize our bundled Node.js in PATH
+  const bundledBinDir = getBundledNodeBinDir();
+  const pathSeparator = IS_WINDOWS ? ';' : ':';
+  
+  if (IS_WINDOWS) {
+    // On Windows, prepend bundled Node.js to PATH
+    const currentPath = env.PATH || '';
+    env.PATH = bundledBinDir + pathSeparator + currentPath;
+    return env;
+  }
   
   // Common paths where node/npm might be installed (macOS/Linux)
-  // Prioritize our bundled Node.js
-  const bundledBinDir = path.join(BUNDLED_NODE_DIR, `node-v${NODE_VERSION}-${process.platform}-${process.arch}`, 'bin');
-  
   const additionalPaths = [
     bundledBinDir,  // Our bundled Node first!
     path.join(HOME, '.nvm/versions/node'),
@@ -245,7 +309,7 @@ function getShellEnv(): NodeJS.ProcessEnv {
   }
   
   const currentPath = env.PATH || '';
-  env.PATH = [...additionalPaths, ...currentPath.split(':')].join(':');
+  env.PATH = [...additionalPaths, ...currentPath.split(pathSeparator)].join(pathSeparator);
   
   return env;
 }
@@ -255,39 +319,24 @@ const shellEnv = getShellEnv();
 export type PC2Status = 'running' | 'stopped' | 'starting' | 'stopping' | 'error' | 'not-installed';
 export type PC2Environment = 'default' | 'dev' | 'custom';
 
-// Environment configurations
-const BASE_HOME = IS_WINDOWS ? WSL_HOME : HOME;
-const ENVIRONMENTS: Record<string, { dir: string; nodeDir: string; wslDir: string; wslNodeDir: string; label: string }> = {
+// Environment configurations - all paths are native OS paths (no WSL)
+const ENVIRONMENTS: Record<string, { dir: string; nodeDir: string; label: string }> = {
   'default': {
-    dir: IS_WINDOWS ? path.join(HOME, '.pc2') : path.join(HOME, '.pc2'),
-    nodeDir: IS_WINDOWS ? path.join(HOME, '.pc2', 'pc2-node') : path.join(HOME, '.pc2', 'pc2-node'),
-    wslDir: `${BASE_HOME}/.pc2`,
-    wslNodeDir: `${BASE_HOME}/.pc2/pc2-node`,
+    dir: path.join(HOME, '.pc2'),
+    nodeDir: path.join(HOME, '.pc2', 'pc2-node'),
     label: 'Default (~/.pc2)'
   },
   'dev': {
-    dir: IS_WINDOWS ? path.join(HOME, 'pc2.net') : path.join(HOME, 'pc2.net'),
-    nodeDir: IS_WINDOWS ? path.join(HOME, 'pc2.net', 'pc2-node') : path.join(HOME, 'pc2.net', 'pc2-node'),
-    wslDir: `${BASE_HOME}/pc2.net`,
-    wslNodeDir: `${BASE_HOME}/pc2.net/pc2-node`,
+    dir: path.join(HOME, 'pc2.net'),
+    nodeDir: path.join(HOME, 'pc2.net', 'pc2-node'),
     label: 'Development (~/pc2.net)'
   },
   'custom': {
     dir: '',
     nodeDir: '',
-    wslDir: '',
-    wslNodeDir: '',
     label: 'Custom Location'
   }
 };
-
-function getWSLNodeDir(): string {
-  return ENVIRONMENTS[currentEnv].wslNodeDir;
-}
-
-function getWSLDir(): string {
-  return ENVIRONMENTS[currentEnv].wslDir;
-}
 
 let currentEnv: PC2Environment = 'default';
 let customPath: string = '';
@@ -348,15 +397,7 @@ function emitLog(message: string): void {
 }
 
 export async function isInstalled(): Promise<boolean> {
-  if (IS_WINDOWS) {
-    return new Promise((resolve) => {
-      const wslNodeDir = getWSLNodeDir();
-      exec(`wsl test -f "${wslNodeDir}/dist/index.js" && echo "yes" || echo "no"`, (error, stdout) => {
-        resolve(stdout.trim() === 'yes');
-      });
-    });
-  }
-  
+  // Use native fs for all platforms (no WSL needed)
   const nodeDir = getPC2NodeDir();
   return fs.existsSync(nodeDir) && fs.existsSync(path.join(nodeDir, 'dist', 'index.js'));
 }
@@ -395,7 +436,7 @@ export async function getStatus(): Promise<PC2Status> {
 
 export async function startPC2(): Promise<void> {
   const installed = await isInstalled();
-  const nodeDir = IS_WINDOWS ? getWSLNodeDir() : getPC2NodeDir();
+  const nodeDir = getPC2NodeDir();
   
   if (!installed) {
     emitStatus('not-installed');
@@ -414,25 +455,19 @@ export async function startPC2(): Promise<void> {
 
   return new Promise((resolve, reject) => {
     const nodePath = findNodePath();
-    const distPath = path.join(getPC2NodeDir(), 'dist', 'index.js');
+    const distPath = path.join(nodeDir, 'dist', 'index.js');
     
     emitLog(`Using node: ${nodePath}`);
     emitLog(`Starting: ${distPath}`);
     
-    if (IS_WINDOWS) {
-      // Run node inside WSL
-      const cmd = wslCmd(`cd "${nodeDir}" && node dist/index.js`);
-      pc2Process = spawn(cmd, [], { 
-        shell: true,
-        stdio: ['ignore', 'pipe', 'pipe']
-      });
-    } else {
-      pc2Process = spawn(nodePath, ['dist/index.js'], {
-        cwd: getPC2NodeDir(),
-        env: shellEnv,
-        stdio: ['ignore', 'pipe', 'pipe']
-      });
-    }
+    // Native spawn for all platforms (no WSL)
+    pc2Process = spawn(nodePath, ['dist/index.js'], {
+      cwd: nodeDir,
+      env: shellEnv,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      // shell: true needed on Windows for .exe resolution when using PATH
+      ...(IS_WINDOWS ? { shell: true } : {}),
+    });
 
     pc2Process.stdout?.on('data', (data) => {
       const lines = data.toString().split('\n').filter((l: string) => l.trim());
@@ -501,9 +536,10 @@ export async function stopPC2(): Promise<void> {
       }, 3000);
     } else {
       // No tracked process, but maybe something is running on the port
-      // Try to kill any node process on port 4200
+      // Try to kill any process on port 4200
       if (IS_WINDOWS) {
-        exec(wslCmd('fuser -k 4200/tcp 2>/dev/null || true'), () => {
+        // Windows: Use netstat to find PID on port 4200, then taskkill
+        exec('for /f "tokens=5" %a in (\'netstat -ano ^| findstr :4200 ^| findstr LISTENING\') do taskkill /F /PID %a 2>nul', { shell: 'cmd.exe' }, () => {
           emitStatus('stopped');
           emitLog('PC2 stopped');
           resolve();
@@ -535,15 +571,119 @@ export async function getLogs(lines: number = 100): Promise<string> {
 }
 
 export async function installPC2(onProgress: (message: string) => void): Promise<void> {
-  const pc2Dir = IS_WINDOWS ? getWSLDir() : getPC2Dir();
-  const nodeDir = IS_WINDOWS ? getWSLNodeDir() : getPC2NodeDir();
+  const pc2Dir = getPC2Dir();
+  const nodeDir = getPC2NodeDir();
   
   emitLog(`Installing PC2 to ${pc2Dir}...`);
   
+  // On Windows, check if we have a pre-built PC2 bundle from the packaged app.
+  // This enables a true download-and-run experience: no git, no build tools, no npm needed.
+  const bundlePath = getBundledPC2Path();
+  if (IS_WINDOWS && bundlePath) {
+    await installFromBundle(bundlePath, pc2Dir, nodeDir, onProgress);
+    return;
+  }
+  
+  // Fallback: Clone from source and build (macOS/Linux, or Windows dev mode without bundle)
+  await installFromSource(pc2Dir, nodeDir, onProgress);
+}
+
+// Install PC2 by copying the pre-built bundle from the packaged Electron app.
+// Used on Windows when the .exe includes the pre-compiled PC2 via extraResources.
+async function installFromBundle(
+  bundlePath: string,
+  pc2Dir: string,
+  nodeDir: string,
+  onProgress: (message: string) => void,
+): Promise<void> {
+  emitLog(`Installing from bundled PC2 at ${bundlePath}...`);
+  
+  // Step 1: Ensure we have our bundled Node.js (still needed to run PC2)
+  if (!hasBundledNode()) {
+    onProgress(`Downloading Node.js ${NODE_VERSION} LTS...`);
+    emitLog(`Downloading bundled Node.js ${NODE_VERSION} LTS for compatibility...`);
+    
+    try {
+      await downloadBundledNode(onProgress);
+      emitLog(`Node.js ${NODE_VERSION} ready`);
+    } catch (error: any) {
+      emitLog(`Warning: Could not download bundled Node.js: ${error.message}`);
+      emitLog('Will try to use system Node.js...');
+    }
+  }
+  
+  onProgress('Preparing installation...');
+  
+  // Back up existing directory if it's not a valid PC2 install
+  if (fs.existsSync(pc2Dir)) {
+    const hasPackageJson = fs.existsSync(path.join(pc2Dir, 'package.json'));
+    if (!hasPackageJson) {
+      const backupDir = `${pc2Dir}_backup_${Date.now()}`;
+      emitLog(`Backing up existing ${pc2Dir} to ${backupDir}`);
+      fs.renameSync(pc2Dir, backupDir);
+    }
+  }
+  
+  // Create the target directories
+  fs.mkdirSync(nodeDir, { recursive: true });
+  
+  // Step 2: Copy pre-built dist/ to ~/.pc2/pc2-node/dist/
+  onProgress('Installing PC2 backend...');
+  emitLog('Copying pre-built backend...');
+  copyDirRecursive(path.join(bundlePath, 'dist'), path.join(nodeDir, 'dist'));
+  
+  // Step 3: Copy pre-built frontend/ to ~/.pc2/pc2-node/frontend/
+  onProgress('Installing PC2 frontend...');
+  emitLog('Copying pre-built frontend...');
+  const frontendSrc = path.join(bundlePath, 'frontend');
+  if (fs.existsSync(frontendSrc)) {
+    copyDirRecursive(frontendSrc, path.join(nodeDir, 'frontend'));
+  }
+  
+  // Step 4: Copy node_modules/ (pre-compiled native modules included)
+  onProgress('Installing dependencies (pre-compiled)...');
+  emitLog('Copying pre-compiled node_modules...');
+  copyDirRecursive(path.join(bundlePath, 'node_modules'), path.join(nodeDir, 'node_modules'));
+  
+  // Step 5: Copy package.json
+  const pkgSrc = path.join(bundlePath, 'package.json');
+  if (fs.existsSync(pkgSrc)) {
+    fs.copyFileSync(pkgSrc, path.join(nodeDir, 'package.json'));
+  }
+  
+  // Step 6: Copy config/ to ~/.pc2/config/
+  onProgress('Installing configuration...');
+  emitLog('Copying configuration...');
+  const configSrc = path.join(bundlePath, 'config');
+  if (fs.existsSync(configSrc)) {
+    const configDest = path.join(pc2Dir, 'config');
+    copyDirRecursive(configSrc, configDest);
+  }
+  
+  emitLog('Installation complete! (from pre-built bundle)');
+  onProgress('Installation complete!');
+}
+
+// Install PC2 by cloning from source and building.
+// Used on macOS/Linux and as a fallback on Windows when no bundle is available (dev mode).
+async function installFromSource(
+  pc2Dir: string,
+  nodeDir: string,
+  onProgress: (message: string) => void,
+): Promise<void> {
+  // Step 0: Check git is available (critical on Windows where it may not be pre-installed)
+  if (!isGitAvailable()) {
+    const gitMsg = IS_WINDOWS
+      ? 'Git is not installed. Please download and install Git from https://git-scm.com/download/win then restart the launcher.'
+      : 'Git is not installed. Please install git and try again.';
+    emitLog(gitMsg);
+    throw new Error(gitMsg);
+  }
+  
   // Step 1: Ensure we have our bundled Node.js (guaranteed compatible)
-  if (!hasBundledNode() && !IS_WINDOWS) {
-    onProgress('Downloading Node.js 20 LTS...');
-    emitLog('Downloading bundled Node.js 20 LTS for compatibility...');
+  if (!hasBundledNode()) {
+    onProgress(`Downloading Node.js ${NODE_VERSION} LTS...`);
+    emitLog(`Downloading bundled Node.js ${NODE_VERSION} LTS for compatibility...`);
     
     try {
       await downloadBundledNode(onProgress);
@@ -561,36 +701,13 @@ export async function installPC2(onProgress: (message: string) => void): Promise
 
   onProgress('Preparing installation...');
 
-  // Check if directory exists
-  if (IS_WINDOWS) {
-    const checkCmd = `wsl test -d "${pc2Dir}" && echo "exists" || echo "no"`;
-    const exists = await new Promise<boolean>((resolve) => {
-      exec(checkCmd, (error, stdout) => resolve(stdout.trim() === 'exists'));
-    });
-    
-    if (exists) {
-      const hasPackageJson = await new Promise<boolean>((resolve) => {
-        exec(`wsl test -f "${pc2Dir}/package.json" && echo "yes" || echo "no"`, (error, stdout) => {
-          resolve(stdout.trim() === 'yes');
-        });
-      });
-      
-      if (!hasPackageJson) {
-        const backupDir = `${pc2Dir}_backup_${Date.now()}`;
-        emitLog(`Backing up existing ${pc2Dir} to ${backupDir}`);
-        await new Promise<void>((resolve) => {
-          exec(`wsl mv "${pc2Dir}" "${backupDir}"`, () => resolve());
-        });
-      }
-    }
-  } else {
-    if (fs.existsSync(getPC2Dir())) {
-      const hasPackageJson = fs.existsSync(path.join(getPC2Dir(), 'package.json'));
-      if (!hasPackageJson) {
-        const backupDir = `${getPC2Dir()}_backup_${Date.now()}`;
-        emitLog(`Backing up existing ${getPC2Dir()} to ${backupDir}`);
-        fs.renameSync(getPC2Dir(), backupDir);
-      }
+  // Check if directory exists and back up if it's not a valid PC2 install
+  if (fs.existsSync(pc2Dir)) {
+    const hasPackageJson = fs.existsSync(path.join(pc2Dir, 'package.json'));
+    if (!hasPackageJson) {
+      const backupDir = `${pc2Dir}_backup_${Date.now()}`;
+      emitLog(`Backing up existing ${pc2Dir} to ${backupDir}`);
+      fs.renameSync(pc2Dir, backupDir);
     }
   }
 
@@ -599,12 +716,7 @@ export async function installPC2(onProgress: (message: string) => void): Promise
   // Build commands - use our bundled npm for guaranteed compatibility
   const npmCmd = `"${npmPath}"`;
   
-  const steps = IS_WINDOWS ? [
-    { cmd: wslCmd(`git clone https://github.com/Elacity/pc2.net "${pc2Dir}"`), msg: 'Cloning repository...' },
-    { cmd: wslCmd(`cd "${pc2Dir}" && npm install --legacy-peer-deps --ignore-scripts`), msg: 'Installing dependencies...' },
-    { cmd: wslCmd(`cd "${nodeDir}" && npm install --legacy-peer-deps`), msg: 'Installing node dependencies...' },
-    { cmd: wslCmd(`cd "${nodeDir}" && npm run build`), msg: 'Building PC2...' },
-  ] : [
+  const steps = [
     { cmd: `git clone https://github.com/Elacity/pc2.net "${pc2Dir}"`, msg: 'Cloning repository...' },
     { cmd: `cd "${pc2Dir}" && ${npmCmd} install --legacy-peer-deps --ignore-scripts`, msg: 'Installing dependencies...' },
     { cmd: `cd "${nodeDir}" && ${npmCmd} install --legacy-peer-deps`, msg: 'Installing node dependencies...' },
@@ -616,7 +728,7 @@ export async function installPC2(onProgress: (message: string) => void): Promise
     emitLog(step.msg);
     
     await new Promise<void>((resolve, reject) => {
-      exec(step.cmd, { maxBuffer: 10 * 1024 * 1024, env: shellEnv }, (error, stdout, stderr) => {
+      exec(step.cmd, { maxBuffer: 10 * 1024 * 1024, env: shellEnv, shell: IS_WINDOWS ? 'cmd.exe' : '/bin/sh' }, (error, stdout, stderr) => {
         if (error) {
           emitLog(`Error: ${error.message}`);
           reject(error);
@@ -663,7 +775,7 @@ export function openInBrowser(): void {
 }
 
 export async function uninstallPC2(): Promise<void> {
-  const pc2Dir = IS_WINDOWS ? getWSLDir() : getPC2Dir();
+  const pc2Dir = getPC2Dir();
   
   // Safety check
   if (!pc2Dir.includes('.pc2') && !pc2Dir.includes('pc2.net')) {
@@ -678,18 +790,10 @@ export async function uninstallPC2(): Promise<void> {
   
   emitLog(`Uninstalling PC2 from ${pc2Dir}...`);
   
-  if (IS_WINDOWS) {
-    await new Promise<void>((resolve) => {
-      exec(`wsl rm -rf "${pc2Dir}"`, () => {
-        emitLog('PC2 uninstalled successfully');
-        resolve();
-      });
-    });
-  } else {
-    if (fs.existsSync(pc2Dir)) {
-      fs.rmSync(pc2Dir, { recursive: true, force: true });
-      emitLog('PC2 uninstalled successfully');
-    }
+  // Use native fs for all platforms (no WSL)
+  if (fs.existsSync(pc2Dir)) {
+    fs.rmSync(pc2Dir, { recursive: true, force: true });
+    emitLog('PC2 uninstalled successfully');
   }
   
   emitStatus('not-installed');
