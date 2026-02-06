@@ -598,16 +598,21 @@ export async function installPC2(onProgress: (message: string) => void): Promise
 
   // Build commands - use our bundled npm for guaranteed compatibility
   const npmCmd = `"${npmPath}"`;
+  const nodeCmd = `"${nodePath}"`;
   
   const steps = IS_WINDOWS ? [
     { cmd: wslCmd(`git clone https://github.com/Elacity/pc2.net "${pc2Dir}"`), msg: 'Cloning repository...' },
     { cmd: wslCmd(`cd "${pc2Dir}" && npm install --legacy-peer-deps --ignore-scripts`), msg: 'Installing dependencies...' },
     { cmd: wslCmd(`cd "${nodeDir}" && npm install --legacy-peer-deps`), msg: 'Installing node dependencies...' },
+    // Force rebuild better-sqlite3 for correct Node.js version to avoid NODE_MODULE_VERSION mismatch (ERR_DLOPEN_FAILED)
+    { cmd: wslCmd(`cd "${nodeDir}" && npm rebuild better-sqlite3 --build-from-source`), msg: 'Building native modules...' },
     { cmd: wslCmd(`cd "${nodeDir}" && npm run build`), msg: 'Building PC2...' },
   ] : [
     { cmd: `git clone https://github.com/Elacity/pc2.net "${pc2Dir}"`, msg: 'Cloning repository...' },
     { cmd: `cd "${pc2Dir}" && ${npmCmd} install --legacy-peer-deps --ignore-scripts`, msg: 'Installing dependencies...' },
     { cmd: `cd "${nodeDir}" && ${npmCmd} install --legacy-peer-deps`, msg: 'Installing node dependencies...' },
+    // Force rebuild better-sqlite3 for correct Node.js version to avoid NODE_MODULE_VERSION mismatch (ERR_DLOPEN_FAILED)
+    { cmd: `cd "${nodeDir}" && ${nodeCmd} -e "console.log('Building native modules for Node.js ' + process.version + ' (MODULE_VERSION ' + process.versions.modules + ')')" && ${npmCmd} rebuild better-sqlite3 --build-from-source`, msg: 'Building native modules...' },
     { cmd: `cd "${nodeDir}" && ${npmCmd} run build`, msg: 'Building PC2...' },
   ];
 
