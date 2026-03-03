@@ -534,6 +534,169 @@ export async function getLogs(lines: number = 100): Promise<string> {
   return recentLogs.join('\n');
 }
 
+function sudoExec(cmd: string): Promise<{ stdout: string; stderr: string }> {
+  return new Promise((resolve, reject) => {
+    if (IS_MAC) {
+      const escaped = cmd.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+      const osa = `osascript -e 'do shell script "${escaped}" with administrator privileges'`;
+      exec(osa, { maxBuffer: 10 * 1024 * 1024, env: shellEnv }, (error, stdout, stderr) => {
+        if (error) reject(error); else resolve({ stdout, stderr });
+      });
+    } else {
+      exec(`sudo -n ${cmd} 2>/dev/null || pkexec ${cmd}`, { maxBuffer: 10 * 1024 * 1024, env: shellEnv }, (error, stdout, stderr) => {
+        if (error) reject(error); else resolve({ stdout, stderr });
+      });
+    }
+  });
+}
+
+function commandExists(bin: string): boolean {
+  try {
+    execSync(`which ${bin} 2>/dev/null`, { env: shellEnv });
+    return true;
+  } catch { return false; }
+}
+
+async function setupNetworking(pc2Dir: string, onProgress: (msg: string) => void): Promise<void> {
+  const brewPrefix = IS_MAC ? (execSync('brew --prefix 2>/dev/null || echo /usr/local', { env: shellEnv }).toString().trim()) : '';
+  const binDir = IS_MAC ? `${brewPrefix}/bin` : '/usr/local/bin';
+
+  // WireGuard
+  if (!commandExists('wg')) {
+    onProgress('Installing WireGuard...');
+    emitLog('Installing WireGuard tools...');
+    try {
+      if (IS_MAC) {
+        exec('brew install wireguard-tools', { env: shellEnv }, () => {});
+        await new Promise(r => setTimeout(r, 10000));
+      } else {
+        await sudoExec('apt-get install -y wireguard-tools');
+      }
+    } catch (e: any) { emitLog(`WireGuard install warning: ${e.message}`); }
+  }
+
+  // WireGuard sudoers
+  const wgQuickPath = commandExists('wg-quick') ? execSync('which wg-quick', { env: shellEnv }).toString().trim() : '';
+  if (wgQuickPath) {
+    try {
+      const user = os.userInfo().username;
+      await sudoExec(`sh -c "echo '${user} ALL=(ALL) NOPASSWD: ${wgQuickPath}' > /etc/sudoers.d/wireguard && chmod 440 /etc/sudoers.d/wireguard"`);
+      emitLog('WireGuard permissions configured');
+    } catch (e: any) { emitLog(`WireGuard sudoers warning: ${e.message}`); }
+  }
+
+  // AmneziaWG
+  if (!commandExists('amneziawg-go')) {
+    onProgress('Building AmneziaWG stealth transport...');
+    emitLog('Building amneziawg-go from source...');
+    try {
+      if (!commandExists('go')) {
+        if (IS_MAC) {
+          execSync('brew install go 2>&1', { env: shellEnv, timeout: 120000 });
+        } else {
+          await sudoExec('apt-get install -y golang-go');
+        }
+      }
+      if (commandExists('go')) {
+        const tmpDir = execSync('mktemp -d', { env: shellEnv }).toString().trim();
+        execSync(`cd "${tmpDir}" && git clone --depth 1 https://github.com/amnezia-vpn/amneziawg-go.git 2>&1 && cd amneziawg-go && make 2>&1`, { env: shellEnv, timeout: 180000 });
+        if (IS_MAC) {
+          execSync(`cp "${tmpDir}/amneziawg-go/amneziawg-go" "${binDir}/amneziawg-go" && chmod 755 "${binDir}/amneziawg-go"`, { env: shellEnv });
+        } else {
+          await sudoExec(`cp "${tmpDir}/amneziawg-go/amneziawg-go" "${binDir}/amneziawg-go" && chmod 755 "${binDir}/amneziawg-go"`);
+        }
+        execSync(`rm -rf "${tmpDir}"`, { env: shellEnv });
+        emitLog('AmneziaWG binary installed');
+      }
+    } catch (e: any) { emitLog(`AmneziaWG build warning: ${e.message}`); }
+  }
+
+  // awg-quick + awg tools
+  if (!commandExists('awg-quick')) {
+    onProgress('Installing AmneziaWG tools...');
+    emitLog('Building awg-quick from source...');
+    try {
+      const tmpDir = execSync('mktemp -d', { env: shellEnv }).toString().trim();
+      const quickScript = IS_MAC ? 'darwin.bash' : 'linux.bash';
+      execSync(`cd "${tmpDir}" && git clone --depth 1 https://github.com/amnezia-vpn/amnezia-wg-tools.git 2>&1 && cd amnezia-wg-tools/src && make 2>&1`, { env: shellEnv, timeout: 120000 });
+      if (IS_MAC) {
+        execSync(`cp "${tmpDir}/amnezia-wg-tools/src/wg" "${binDir}/awg" && cp "${tmpDir}/amnezia-wg-tools/src/wg-quick/${quickScript}" "${binDir}/awg-quick" && chmod 755 "${binDir}/awg" "${binDir}/awg-quick"`, { env: shellEnv });
+      } else {
+        await sudoExec(`cp "${tmpDir}/amnezia-wg-tools/src/wg" "${binDir}/awg" && cp "${tmpDir}/amnezia-wg-tools/src/wg-quick/${quickScript}" "${binDir}/awg-quick" && chmod 755 "${binDir}/awg" "${binDir}/awg-quick"`);
+      }
+      execSync(`rm -rf "${tmpDir}"`, { env: shellEnv });
+      emitLog('AmneziaWG tools installed');
+    } catch (e: any) { emitLog(`AmneziaWG tools warning: ${e.message}`); }
+  }
+
+  // Patch awg-quick
+  if (commandExists('awg-quick')) {
+    try {
+      const awqPath = execSync('which awg-quick', { env: shellEnv }).toString().trim();
+      const content = fs.readFileSync(awqPath, 'utf8');
+      if (content.includes('/var/run/wireguard/$INTERFACE.name') || content.includes('cmd wg ')) {
+        emitLog('Patching awg-quick (fixing upstream bugs)...');
+        const sedFlag = IS_MAC ? "-i ''" : '-i.bak';
+        await sudoExec(`sed ${sedFlag} -e 's|/var/run/wireguard/\\$INTERFACE\\.name|/var/run/amneziawg/\\$INTERFACE.name|g' -e 's|/var/run/wireguard/\\$REAL_INTERFACE\\.sock|/var/run/amneziawg/\\$REAL_INTERFACE.sock|g' -e 's|cmd wg setconf|cmd awg setconf|g' -e 's|cmd wg showconf|cmd awg showconf|g' -e 's|wg show interfaces|awg show interfaces|g' "${awqPath}" && rm -f "${awqPath}.bak" 2>/dev/null || true`);
+        emitLog('awg-quick patched');
+      }
+    } catch (e: any) { emitLog(`awg-quick patch warning: ${e.message}`); }
+  }
+
+  // AmneziaWG sudoers
+  if (commandExists('awg-quick')) {
+    try {
+      const user = os.userInfo().username;
+      const awqPath = execSync('which awg-quick', { env: shellEnv }).toString().trim();
+      const killallPath = commandExists('killall') ? execSync('which killall', { env: shellEnv }).toString().trim() : '/usr/bin/killall';
+      await sudoExec(`sh -c "printf '${user} ALL=(ALL) NOPASSWD:SETENV: ${awqPath}\\n${user} ALL=(ALL) NOPASSWD: ${killallPath} amneziawg-go\\n${user} ALL=(ALL) NOPASSWD: /bin/rm -rf /var/run/amneziawg/\\n' > /etc/sudoers.d/amneziawg && chmod 440 /etc/sudoers.d/amneziawg"`);
+      emitLog('AmneziaWG permissions configured');
+    } catch (e: any) { emitLog(`AmneziaWG sudoers warning: ${e.message}`); }
+  }
+
+  // sing-box
+  if (!commandExists('sing-box') && !fs.existsSync('/usr/local/bin/sing-box')) {
+    onProgress('Installing sing-box (VLESS Reality)...');
+    emitLog('Installing sing-box 1.13.0...');
+    try {
+      const sbVersion = '1.13.0';
+      if (IS_MAC) {
+        execSync('brew install sing-box 2>&1 || true', { env: shellEnv, timeout: 60000 });
+        if (!commandExists('sing-box')) {
+          const sbArch = IS_ARM ? 'arm64' : 'amd64';
+          const tmpDir = execSync('mktemp -d', { env: shellEnv }).toString().trim();
+          execSync(`curl -sL "https://github.com/SagerNet/sing-box/releases/download/v${sbVersion}/sing-box-${sbVersion}-darwin-${sbArch}.tar.gz" -o "${tmpDir}/sb.tar.gz" && cd "${tmpDir}" && tar -xzf sb.tar.gz && cp sing-box-*/sing-box /usr/local/bin/sing-box && chmod 755 /usr/local/bin/sing-box`, { env: shellEnv, timeout: 60000 });
+          execSync(`rm -rf "${tmpDir}"`, { env: shellEnv });
+        }
+      } else {
+        const sbArch = IS_ARM ? 'arm64' : 'amd64';
+        const tmpDir = execSync('mktemp -d', { env: shellEnv }).toString().trim();
+        execSync(`curl -sL "https://github.com/SagerNet/sing-box/releases/download/v${sbVersion}/sing-box-${sbVersion}-linux-${sbArch}.tar.gz" -o "${tmpDir}/sb.tar.gz" && cd "${tmpDir}" && tar -xzf sb.tar.gz`, { env: shellEnv, timeout: 60000 });
+        await sudoExec(`cp "${tmpDir}"/sing-box-*/sing-box /usr/local/bin/sing-box && chmod 755 /usr/local/bin/sing-box`);
+        execSync(`rm -rf "${tmpDir}"`, { env: shellEnv });
+      }
+      emitLog('sing-box installed');
+    } catch (e: any) { emitLog(`sing-box install warning: ${e.message}`); }
+  }
+
+  // Particle auth .env
+  const particleEnv = path.join(pc2Dir, 'packages', 'particle-auth', '.env');
+  if (!fs.existsSync(particleEnv)) {
+    onProgress('Configuring wallet integration...');
+    try {
+      const dir = path.dirname(particleEnv);
+      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(particleEnv, `VITE_PARTICLE_PROJECT_ID=01cdbdd6-b07e-45b5-81ca-7036e45dff0d
+VITE_PARTICLE_CLIENT_KEY=cMSSRMUCgciyuStuvPg2FSLKSovXDmrbvknJJnLU
+VITE_PARTICLE_APP_ID=1567a90d-9ff3-459a-bca8-d264685482cb
+VITE_WALLETCONNECT_PROJECT_ID=0d1ac2ba93587a74b54f92189bdc341e
+VITE_PUTER_API_URL=http://localhost:4200
+`);
+      emitLog('Particle auth configured');
+    } catch (e: any) { emitLog(`Particle auth warning: ${e.message}`); }
+  }
+}
+
 export async function installPC2(onProgress: (message: string) => void): Promise<void> {
   const pc2Dir = IS_WINDOWS ? getWSLDir() : getPC2Dir();
   const nodeDir = IS_WINDOWS ? getWSLNodeDir() : getPC2NodeDir();
@@ -630,6 +793,17 @@ export async function installPC2(onProgress: (message: string) => void): Promise
         }
       });
     });
+  }
+
+  // Install networking tools (WireGuard, AmneziaWG, sing-box)
+  if (!IS_WINDOWS) {
+    onProgress('Setting up networking...');
+    try {
+      await setupNetworking(pc2Dir, onProgress);
+    } catch (e: any) {
+      emitLog(`Networking setup warning: ${e.message}`);
+      emitLog('PC2 will work but stealth transport may not be available');
+    }
   }
 
   emitLog('Installation complete!');
