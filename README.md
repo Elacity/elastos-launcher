@@ -26,47 +26,60 @@ rm -rf ~/.elastos ~/.pc2
 
 **Step 2: Download the .dmg, double-click to mount, then run:**
 ```bash
-cp -R "/Volumes/ElastOS 1.0.0-arm64/ElastOS.app" /Applications/ && xattr -cr /Applications/ElastOS.app && open /Applications/ElastOS.app
+# Replace VERSION with the version you downloaded (run: ls /Volumes/ to check)
+cp -R "/Volumes/ElastOS VERSION-arm64/ElastOS.app" /Applications/ && xattr -cr /Applications/ElastOS.app && open /Applications/ElastOS.app
 ```
 
 ## Linux Installation
 
 **Ubuntu/Debian:**
 ```bash
-sudo dpkg -i elastos-launcher_1.0.0_amd64.deb
+sudo dpkg -i elastos-launcher_*_amd64.deb
 ```
 
 **AppImage (any distro):**
 ```bash
-chmod +x ElastOS-1.0.0.AppImage
-./ElastOS-1.0.0.AppImage
+chmod +x ElastOS-*.AppImage
+./ElastOS-*.AppImage
 ```
 
 ## Features
 
 - **One-Click Start/Stop** - No terminal needed
+- **Full Install** - Downloads PC2, Node.js, WireGuard, AmneziaWG, sing-box — everything the terminal scripts install
+- **Version Display** - Shows your installed PC2 version
+- **One-Click Updates** - Checks GitHub for new releases; click "Update" to pull, build, and restart
 - **Status Monitoring** - See if PC2 is running
 - **Log Viewer** - Built-in server logs
-- **Auto-Install** - Downloads and sets up PC2 automatically
-- **No Dependencies** - Everything managed by the app (no pm2/node required pre-installed)
+- **Environment Switcher** - Switch between `~/.pc2` and `~/pc2.net` installs
 
 ## How It Works
 
-1. Click "Power On" to start PC2
+1. Click "Power On" to start PC2 (installs automatically on first run)
 2. Click "Open Cloud" to access your Personal Cloud at `http://localhost:4200`
 3. Connect your wallet to claim ownership
 
-## Requirements
+## What Gets Installed
 
-The launcher automatically handles everything:
-- **Bundles Node.js 20 LTS** - Downloads its own compatible Node.js, regardless of what you have installed
-- **Installs PC2** - Clones and builds from GitHub
+The launcher automatically handles everything — identical to what the terminal install scripts (`start-local.sh` / `install-arm.sh`) provide:
+
+- **Node.js 20 LTS** - Bundled, independent of your system Node.js
+- **PC2** - Cloned and built from GitHub
+- **WireGuard** - Fast encrypted tunnel for remote access via `.ela.city` domains
+- **AmneziaWG** - DPI-resistant stealth transport (built from source)
+- **sing-box 1.13.0** - VLESS Reality TCP stealth transport
+- **Sudoers configs** - Passwordless `wg-quick` and `awg-quick` for background operation
+- **Particle auth** - Wallet integration config
+
+On macOS, a native password dialog appears during first install for the networking tools that require admin access.
 
 You just need:
 - Git (usually pre-installed on Mac/Linux)
 - Internet connection (for first-time setup)
 
-**Note:** Even if you have a different Node.js version installed (v25, homebrew, etc.), the launcher will download and use its own Node.js 20 LTS to ensure compatibility.
+## Install Parity Rule
+
+**The launcher must always install the exact same set of tools as the terminal scripts.** If a new tool or dependency is added to `start-local.sh` or `install-arm.sh`, the corresponding install step must be added to `setupNetworking()` in `src/main/pc2Manager.ts`. See [CONTRIBUTING.md](CONTRIBUTING.md) for details.
 
 ## Windows Users
 
