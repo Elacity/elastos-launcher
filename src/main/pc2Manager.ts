@@ -500,8 +500,8 @@ export async function stopPC2(): Promise<void> {
         resolve();
       }, 3000);
     } else {
-      // No tracked process, but maybe something is running on the port
-      // Try to kill any node process on port 4200
+      // No tracked process -- kill PC2 on port 4200 but exclude our own Electron process
+      const selfPid = process.pid;
       if (IS_WINDOWS) {
         exec(wslCmd('fuser -k 4200/tcp 2>/dev/null || true'), () => {
           emitStatus('stopped');
@@ -509,7 +509,7 @@ export async function stopPC2(): Promise<void> {
           resolve();
         });
       } else {
-        exec('lsof -ti:4200 | xargs kill -9 2>/dev/null || true', { env: shellEnv }, () => {
+        exec(`lsof -ti:4200 2>/dev/null | grep -v "^${selfPid}$" | xargs kill -9 2>/dev/null || true`, { env: shellEnv }, () => {
           emitStatus('stopped');
           emitLog('PC2 stopped');
           resolve();
@@ -728,6 +728,119 @@ export async function generateQRCode(): Promise<string> {
       light: '#1e1e1e'
     }
   });
+}
+
+export function getPC2Version(): string {
+  const pkgPath = path.join(getPC2Dir(), 'package.json');
+  try {
+    const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
+    return pkg.version || 'unknown';
+  } catch {
+    return 'not installed';
+  }
+}
+
+function compareVersions(a: string, b: string): number {
+  const pa = a.replace(/^v/, '').split('.').map(Number);
+  const pb = b.replace(/^v/, '').split('.').map(Number);
+  for (let i = 0; i < 3; i++) {
+    const diff = (pa[i] || 0) - (pb[i] || 0);
+    if (diff !== 0) return diff;
+  }
+  return 0;
+}
+
+export async function checkForUpdate(): Promise<{ current: string; latest: string; updateAvailable: boolean; releaseUrl: string }> {
+  const current = getPC2Version();
+  const result = { current, latest: current, updateAvailable: false, releaseUrl: '' };
+
+  if (current === 'not installed' || current === 'unknown') return result;
+
+  return new Promise((resolve) => {
+    const options = {
+      hostname: 'api.github.com',
+      path: '/repos/Elacity/pc2.net/releases/latest',
+      headers: { 'User-Agent': 'elastos-launcher' }
+    };
+
+    https.get(options, (res) => {
+      let data = '';
+      res.on('data', (chunk) => { data += chunk; });
+      res.on('end', () => {
+        try {
+          const release = JSON.parse(data);
+          const latest = (release.tag_name || '').replace(/^v/, '');
+          result.latest = latest;
+          result.releaseUrl = release.html_url || '';
+          result.updateAvailable = latest !== '' && compareVersions(latest, current) > 0;
+        } catch (e) {
+          log.warn('Failed to parse GitHub release:', e);
+        }
+        resolve(result);
+      });
+    }).on('error', (e) => {
+      log.warn('Failed to check for updates:', e.message);
+      resolve(result);
+    });
+  });
+}
+
+export async function updatePC2(onProgress: (msg: string) => void): Promise<void> {
+  const pc2Dir = IS_WINDOWS ? getWSLDir() : getPC2Dir();
+  const nodeDir = IS_WINDOWS ? getWSLNodeDir() : getPC2NodeDir();
+  const npmPath = findNpmPath();
+  const npmCmd = `"${npmPath}"`;
+
+  const wasRunning = pc2Process !== null && !pc2Process.killed;
+  if (wasRunning) {
+    onProgress('Stopping PC2...');
+    emitLog('Stopping PC2 for update...');
+    pc2Process!.kill('SIGTERM');
+    await new Promise(r => setTimeout(r, 3000));
+    if (pc2Process && !pc2Process.killed) {
+      pc2Process.kill('SIGKILL');
+    }
+    pc2Process = null;
+    emitStatus('stopped');
+    await new Promise(r => setTimeout(r, 1000));
+  }
+
+  const gitPull = `cd "${pc2Dir}" && git fetch origin && git reset --hard origin/main`;
+  const steps = IS_WINDOWS ? [
+    { cmd: wslCmd(gitPull), msg: 'Pulling latest code...' },
+    { cmd: wslCmd(`cd "${nodeDir}" && npm install --legacy-peer-deps`), msg: 'Installing dependencies...' },
+    { cmd: wslCmd(`cd "${nodeDir}" && npm run build`), msg: 'Building PC2...' },
+  ] : [
+    { cmd: gitPull, msg: 'Pulling latest code...' },
+    { cmd: `cd "${nodeDir}" && ${npmCmd} install --legacy-peer-deps`, msg: 'Installing dependencies...' },
+    { cmd: `cd "${nodeDir}" && ${npmCmd} run build`, msg: 'Building PC2...' },
+  ];
+
+  for (const step of steps) {
+    onProgress(step.msg);
+    emitLog(step.msg);
+
+    await new Promise<void>((resolve, reject) => {
+      exec(step.cmd, { maxBuffer: 10 * 1024 * 1024, env: shellEnv }, (error, stdout, stderr) => {
+        if (error) {
+          emitLog(`Update error: ${error.message}`);
+          reject(error);
+        } else {
+          resolve();
+        }
+      });
+    });
+  }
+
+  const newVersion = getPC2Version();
+  onProgress(`Update complete! v${newVersion}`);
+  emitLog(`PC2 updated to v${newVersion}`);
+
+  if (wasRunning) {
+    onProgress('Restarting PC2...');
+    emitLog('Restarting PC2 after update...');
+    await startPC2();
+  }
 }
 
 export const PC2_URL_EXPORT = PC2_URL;

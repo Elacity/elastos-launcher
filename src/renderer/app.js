@@ -14,8 +14,12 @@ const confirmPath = document.getElementById('confirm-path');
 const confirmCancel = document.getElementById('confirm-cancel');
 const confirmDelete = document.getElementById('confirm-delete');
 const copyLogsBtn = document.getElementById('copy-logs');
+const versionEl = document.getElementById('version');
+const updateBtn = document.getElementById('update-btn');
+const updateBtnLabel = document.getElementById('update-btn-label');
 
 let currentStatus = 'stopped';
+let isUpdating = false;
 let logs = [];
 const MAX_LOGS = 200;
 
@@ -164,6 +168,9 @@ envSelect.addEventListener('change', async () => {
   // Check status in new environment
   const status = await window.pc2.getStatus();
   updateStatus(status);
+
+  await refreshVersion();
+  checkForUpdate();
 });
 
 // Listen for status changes
@@ -182,16 +189,68 @@ window.pc2.onInstallProgress((message) => {
   addLog(message);
 });
 
+// Listen for update progress
+window.pc2.onUpdateProgress((message) => {
+  statusText.textContent = message;
+  addLog(message);
+});
+
+// Version display and update check
+async function refreshVersion() {
+  try {
+    const version = await window.pc2.getVersion();
+    versionEl.textContent = version === 'not installed' ? '—' : `v${version}`;
+  } catch {
+    versionEl.textContent = '—';
+  }
+}
+
+async function checkForUpdate() {
+  try {
+    const result = await window.pc2.checkForUpdate();
+    if (result.updateAvailable) {
+      updateBtn.classList.remove('hidden');
+      updateBtnLabel.textContent = `Update to v${result.latest}`;
+      updateBtn.title = `Update available: v${result.current} → v${result.latest}`;
+    } else {
+      updateBtn.classList.add('hidden');
+    }
+  } catch {
+    updateBtn.classList.add('hidden');
+  }
+}
+
+// Update button click
+updateBtn.addEventListener('click', async () => {
+  if (isUpdating) return;
+  isUpdating = true;
+  updateBtn.disabled = true;
+  updateBtnLabel.textContent = 'Updating...';
+
+  try {
+    await window.pc2.update();
+    await refreshVersion();
+    updateBtn.classList.add('hidden');
+  } catch (err) {
+    addLog('Update failed: ' + err.message);
+    updateBtnLabel.textContent = 'Retry';
+    updateBtn.disabled = false;
+  } finally {
+    isUpdating = false;
+  }
+});
+
 // Initial setup
 async function init() {
   try {
-    // Load current environment
     const envInfo = await window.pc2.getEnvironment();
     envSelect.value = envInfo.env;
     
-    // Check status
     const status = await window.pc2.getStatus();
     updateStatus(status);
+
+    await refreshVersion();
+    checkForUpdate();
   } catch (err) {
     console.error('Init error:', err);
     updateStatus('error');

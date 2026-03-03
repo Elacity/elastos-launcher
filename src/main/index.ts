@@ -169,6 +169,15 @@ ipcMain.handle('pc2:install', async (event) => {
 
 ipcMain.handle('pc2:uninstall', () => pc2Manager.uninstallPC2());
 
+// Version and updates
+ipcMain.handle('pc2:getVersion', () => pc2Manager.getPC2Version());
+ipcMain.handle('pc2:checkForUpdate', () => pc2Manager.checkForUpdate());
+ipcMain.handle('pc2:update', async (event) => {
+  return pc2Manager.updatePC2((msg) => {
+    event.sender.send('pc2:updateProgress', msg);
+  });
+});
+
 // Environment management
 ipcMain.handle('pc2:setEnvironment', async (_, env: string, customPath?: string) => {
   pc2Manager.setEnvironment(env as pc2Manager.PC2Environment, customPath);

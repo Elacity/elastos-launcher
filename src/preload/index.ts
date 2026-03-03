@@ -22,6 +22,11 @@ contextBridge.exposeInMainWorld('pc2', {
   isInstalled: () => ipcRenderer.invoke('pc2:isInstalled'),
   getLanURL: () => ipcRenderer.invoke('pc2:getLanURL'),
   getQRCode: () => ipcRenderer.invoke('pc2:getQRCode'),
+
+  // Version and updates
+  getVersion: () => ipcRenderer.invoke('pc2:getVersion'),
+  checkForUpdate: () => ipcRenderer.invoke('pc2:checkForUpdate'),
+  update: () => ipcRenderer.invoke('pc2:update'),
   
   // Event listeners
   onStatus: (callback: (status: PC2Status) => void) => {
@@ -40,6 +45,12 @@ contextBridge.exposeInMainWorld('pc2', {
     const listener = (_event: Electron.IpcRendererEvent, message: string) => callback(message);
     ipcRenderer.on('pc2:installProgress', listener);
     return () => ipcRenderer.removeListener('pc2:installProgress', listener);
+  },
+
+  onUpdateProgress: (callback: (message: string) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, message: string) => callback(message);
+    ipcRenderer.on('pc2:updateProgress', listener);
+    return () => ipcRenderer.removeListener('pc2:updateProgress', listener);
   }
 });
 
@@ -56,9 +67,13 @@ declare global {
       getStatus: () => Promise<PC2Status>;
       getLogs: (lines: number) => Promise<string>;
       isInstalled: () => Promise<boolean>;
+      getVersion: () => Promise<string>;
+      checkForUpdate: () => Promise<{ current: string; latest: string; updateAvailable: boolean; releaseUrl: string }>;
+      update: () => Promise<void>;
       onStatus: (callback: (status: PC2Status) => void) => () => void;
       onLog: (callback: (log: string) => void) => () => void;
       onInstallProgress: (callback: (message: string) => void) => () => void;
+      onUpdateProgress: (callback: (message: string) => void) => () => void;
     };
   }
 }
