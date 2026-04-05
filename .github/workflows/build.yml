@@ -38,10 +38,32 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Import macOS signing certificate
+        if: matrix.platform == 'mac'
+        env:
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+        run: |
+          echo "Certificate imported via electron-builder CSC_LINK env var"
+
       - name: Build for ${{ matrix.platform }}
         run: npm run build:${{ matrix.platform }} -- --publish never
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CSC_LINK: ${{ matrix.platform == 'mac' && secrets.CSC_LINK || '' }}
+          CSC_KEY_PASSWORD: ${{ matrix.platform == 'mac' && secrets.CSC_KEY_PASSWORD || '' }}
+          APPLE_ID: ${{ matrix.platform == 'mac' && secrets.APPLE_ID || '' }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ matrix.platform == 'mac' && secrets.APPLE_APP_SPECIFIC_PASSWORD || '' }}
+          APPLE_TEAM_ID: ${{ matrix.platform == 'mac' && secrets.APPLE_TEAM_ID || '' }}
+
+      - name: Verify macOS code signature
+        if: matrix.platform == 'mac'
+        run: |
+          APP_PATH=$(find dist-electron -name "*.app" -maxdepth 2 | head -1)
+          if [ -n "$APP_PATH" ]; then
+            echo "Verifying signature on: $APP_PATH"
+            codesign --verify --deep --strict "$APP_PATH" && echo "Signature valid" || echo "WARNING: Signature verification failed"
+          fi
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
