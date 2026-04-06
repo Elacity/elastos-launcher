@@ -16,7 +16,13 @@ A one-click desktop app to run your Personal Cloud Computer (PC2).
 
 ## macOS Installation
 
-macOS shows a security warning for apps downloaded outside the App Store. Use this one-time Terminal command:
+### Signed builds (v1.2.0+)
+
+Starting with v1.2.0, macOS builds are code-signed with an Apple Developer ID certificate and notarized. Simply download the `.dmg`, drag to Applications, and launch — no Terminal commands needed.
+
+### Unsigned builds (v1.1.x and earlier)
+
+Older releases require a one-time Terminal workaround:
 
 **Step 1: Remove any old versions**
 ```bash
