@@ -1,6 +1,6 @@
 {
   "name": "elastos-launcher",
-  "version": "1.2.1",
+  "version": "1.2.2",
   "description": "ElastOS Personal Cloud - Desktop Launcher",
   "main": "dist/main/index.js",
   "author": {
@@ -49,7 +49,8 @@
       "hardenedRuntime": true,
       "gatekeeperAssess": false,
       "entitlements": "resources/entitlements.mac.plist",
-      "entitlementsInherit": "resources/entitlements.mac.plist"
+      "entitlementsInherit": "resources/entitlements.mac.plist",
+      "notarize": false
     },
     "win": {
       "icon": "resources/icon.ico",
