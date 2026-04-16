@@ -4,37 +4,23 @@ A one-click desktop app to run your Personal Cloud Computer (PC2).
 
 ## Download
 
-**[Download Latest Release](https://github.com/Elacity/elastos-launcher/releases/latest)**
+**[Download Latest Release](https://github.com/Elacity/elastos-launcher/releases/tag/v1.2.2)**
 
-| Platform | Download |
-|----------|----------|
-| **macOS** (Apple Silicon M1/M2/M3) | [ElastOS-x.x.x-arm64.dmg](https://github.com/Elacity/elastos-launcher/releases/latest) |
-| **macOS** (Intel) | Works via Rosetta 2 |
-| **Linux** (Ubuntu/Debian) | [elastos-launcher_x.x.x_amd64.deb](https://github.com/Elacity/elastos-launcher/releases/latest) |
-| **Linux** (Other) | [ElastOS-x.x.x.AppImage](https://github.com/Elacity/elastos-launcher/releases/latest) |
-| **Windows** | Not recommended - [Use VPS instead](https://docs.ela.city) |
+| Platform | Download | Status |
+|----------|----------|--------|
+| **macOS** (Apple Silicon M1/M2/M3/M4) | [ElastOS-1.2.2-arm64.dmg](https://github.com/Elacity/elastos-launcher/releases/download/v1.2.2/ElastOS-1.2.2-arm64.dmg) | Apple Notarized |
+| **macOS** (Intel) | Works via Rosetta 2 | Apple Notarized |
+| **Linux** (Ubuntu/Debian) | [elastos-launcher_1.2.2_amd64.deb](https://github.com/Elacity/elastos-launcher/releases/download/v1.2.2/elastos-launcher_1.2.2_amd64.deb) | Available |
+| **Linux** (Other) | [ElastOS-1.2.2.AppImage](https://github.com/Elacity/elastos-launcher/releases/download/v1.2.2/ElastOS-1.2.2.AppImage) | Available |
+| **Windows** | [ElastOS.Setup.1.2.2.exe](https://github.com/Elacity/elastos-launcher/releases/download/v1.2.2/ElastOS.Setup.1.2.2.exe) | Available |
 
 ## macOS Installation
 
-### Signed builds (v1.2.0+)
+**Download the `.dmg`, double-click to mount, drag ElastOS to Applications, and launch.** That's it -- no Terminal, no workarounds.
 
-Starting with v1.2.0, macOS builds are code-signed with an Apple Developer ID certificate and notarized. Simply download the `.dmg`, drag to Applications, and launch — no Terminal commands needed.
+The app is signed with an Apple Developer ID certificate and notarized by Apple. macOS Gatekeeper will verify the signature automatically.
 
-### Unsigned builds (v1.1.x and earlier)
-
-Older releases require a one-time Terminal workaround:
-
-**Step 1: Remove any old versions**
-```bash
-sudo rm -rf /Applications/ElastOS.app
-rm -rf ~/.elastos ~/.pc2
-```
-
-**Step 2: Download the .dmg, double-click to mount, then run:**
-```bash
-# Replace VERSION with the version you downloaded (run: ls /Volumes/ to check)
-cp -R "/Volumes/ElastOS VERSION-arm64/ElastOS.app" /Applications/ && xattr -cr /Applications/ElastOS.app && open /Applications/ElastOS.app
-```
+> **Upgrading from v1.1.x or earlier?** You may need to remove the old unsigned app first: `sudo rm -rf /Applications/ElastOS.app`
 
 ## Linux Installation
 
