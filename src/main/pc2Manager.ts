@@ -763,11 +763,18 @@ export async function installPC2(onProgress: (message: string) => void): Promise
   const npmCmd = `"${npmPath}"`;
   const nodeCmd = `"${nodePath}"`;
   
-  // npm rebuild --build-from-source forces every native module (better-sqlite3,
-  // sharp, bcrypt, usb, canvas, ed25519-to-x25519.wasm, …) to recompile against
-  // the bundled Node ABI — fixes the recurring NODE_MODULE_VERSION mismatch
-  // (ERR_DLOPEN_FAILED) that crashed every fresh install on Node 22 because
-  // older deps only ship Node ≤ 20 prebuilds.
+  // Rebuild strategy: only force --build-from-source for better-sqlite3 (the
+  // one module known to ship Node-22-incompatible prebuilds). For other
+  // native modules (sharp, bcrypt, node-pty, …) plain `npm rebuild` is enough
+  // — prebuild-install will pick up the right binary for the current Node ABI.
+  //
+  // v1.2.4 forced --build-from-source for ALL modules, which exposed
+  // node-datachannel's cmake-js source-build path on macOS without cmake
+  // installed and crashed every fresh install at the rebuild step with
+  // "OMG CMake executable is not found" (reported by Sasha, Apr 30 2026).
+  // v1.2.5 reverts to the proven v1.2.3 strategy — only better-sqlite3
+  // gets force-built, everything else uses prebuilds when available.
+  //
   // HUSKY=0 neutralises the `prepare` script so the root install never bombs
   // with "sh: husky: not found" on a fresh, dev-tools-free user box.
   const npmEnvPrefix = IS_WINDOWS ? '' : 'HUSKY=0 ';
@@ -775,13 +782,13 @@ export async function installPC2(onProgress: (message: string) => void): Promise
     { cmd: wslCmd(`git clone https://github.com/Elacity/pc2.net "${pc2Dir}"`), msg: 'Cloning repository...' },
     { cmd: wslCmd(`cd "${pc2Dir}" && HUSKY=0 npm install --legacy-peer-deps --ignore-scripts`), msg: 'Installing dependencies...' },
     { cmd: wslCmd(`cd "${nodeDir}" && HUSKY=0 npm install --legacy-peer-deps`), msg: 'Installing node dependencies...' },
-    { cmd: wslCmd(`cd "${nodeDir}" && HUSKY=0 npm rebuild --build-from-source`), msg: 'Building native modules (this can take a few minutes)...' },
+    { cmd: wslCmd(`cd "${nodeDir}" && HUSKY=0 npm rebuild better-sqlite3 --build-from-source`), msg: 'Rebuilding better-sqlite3 against Node ABI...' },
     { cmd: wslCmd(`cd "${nodeDir}" && npm run build`), msg: 'Building PC2...' },
   ] : [
     { cmd: `git clone https://github.com/Elacity/pc2.net "${pc2Dir}"`, msg: 'Cloning repository...' },
     { cmd: `cd "${pc2Dir}" && ${npmEnvPrefix}${npmCmd} install --legacy-peer-deps --ignore-scripts`, msg: 'Installing dependencies...' },
     { cmd: `cd "${nodeDir}" && ${npmEnvPrefix}${npmCmd} install --legacy-peer-deps`, msg: 'Installing node dependencies...' },
-    { cmd: `cd "${nodeDir}" && ${nodeCmd} -e "console.log('Building native modules for Node.js ' + process.version + ' (MODULE_VERSION ' + process.versions.modules + ')')" && ${npmEnvPrefix}${npmCmd} rebuild --build-from-source`, msg: 'Building native modules (this can take a few minutes)...' },
+    { cmd: `cd "${nodeDir}" && ${nodeCmd} -e "console.log('Building native modules for Node.js ' + process.version + ' (MODULE_VERSION ' + process.versions.modules + ')')" && ${npmEnvPrefix}${npmCmd} rebuild better-sqlite3 --build-from-source`, msg: 'Rebuilding better-sqlite3 against Node ABI...' },
     { cmd: `cd "${nodeDir}" && ${npmCmd} run build`, msg: 'Building PC2...' },
   ];
 
@@ -801,6 +808,21 @@ export async function installPC2(onProgress: (message: string) => void): Promise
     });
   }
 
+  // ──────────────────────────────────────────────────────────────────
+  // Native module verification gauntlet (v1.2.5).
+  //
+  // After the build completes, verify both critical native modules
+  // actually load. If either fails, attempt a clean reinstall (Ahmed's
+  // Apr 30 2026 fix pattern — `npm rebuild` reuses install-time prebuild
+  // metadata, only `rm -rf MOD && npm install MOD` queries fresh against
+  // the current Node ABI). If THAT also fails, fail loudly with module-
+  // specific fix instructions instead of letting PC2 crash-loop on boot.
+  //
+  // Without this: v1.2.4 silently shipped broken node-datachannel for
+  // Sasha (cmake missing) and the install reported success.
+  // ──────────────────────────────────────────────────────────────────
+  await verifyNativeModules(nodeDir, nodeCmd, npmCmd, npmEnvPrefix, onProgress);
+
   // Install networking tools (WireGuard, AmneziaWG, sing-box)
   if (!IS_WINDOWS) {
     onProgress('Setting up networking...');
@@ -814,6 +836,76 @@ export async function installPC2(onProgress: (message: string) => void): Promise
 
   emitLog('Installation complete!');
   onProgress('Installation complete!');
+}
+
+/**
+ * Verify that critical native modules actually load against the bundled Node.
+ * Three-attempt gauntlet:
+ *   1. Plain load (works for clean prebuild-install case).
+ *   2. Clean reinstall (rm -rf node_modules/MOD && npm install MOD) —
+ *      forces prebuild-install to query fresh against the current Node ABI.
+ *   3. If still failing, throw with module-specific fix instructions.
+ */
+async function verifyNativeModules(
+  nodeDir: string,
+  nodeCmd: string,
+  npmCmd: string,
+  npmEnvPrefix: string,
+  onProgress: (m: string) => void
+): Promise<void> {
+  const modules: Array<{ name: string; isEsm: boolean; fixHint: string }> = [
+    {
+      name: 'better-sqlite3',
+      isEsm: false,
+      fixHint: 'Install Xcode Command Line Tools: xcode-select --install',
+    },
+    {
+      name: 'node-datachannel',
+      isEsm: true,
+      fixHint: 'Install cmake: brew install cmake',
+    },
+  ];
+
+  for (const mod of modules) {
+    onProgress(`Verifying ${mod.name}...`);
+    emitLog(`Verifying ${mod.name} loads against bundled Node...`);
+
+    const loadProbe = mod.isEsm
+      ? `${nodeCmd} -e "import('${mod.name}').then(m => { if (!m) throw new Error('null'); }).catch(e => { console.error(e.message); process.exit(1); })"`
+      : `${nodeCmd} -e "require('${mod.name}')(':memory:').prepare('SELECT 1').get()"`;
+
+    const tryLoad = (): Promise<boolean> =>
+      new Promise((resolve) => {
+        exec(`cd "${nodeDir}" && ${loadProbe}`, { maxBuffer: 1024 * 1024, env: shellEnv }, (err) => {
+          resolve(!err);
+        });
+      });
+
+    if (await tryLoad()) {
+      emitLog(`✓ ${mod.name} verified`);
+      continue;
+    }
+
+    emitLog(`⚠ ${mod.name} failed to load — attempting clean reinstall...`);
+    onProgress(`Recovering ${mod.name} via clean reinstall...`);
+
+    const reinstallCmd = IS_WINDOWS
+      ? wslCmd(`cd "${nodeDir}" && rm -rf node_modules/${mod.name} && HUSKY=0 npm install ${mod.name} --legacy-peer-deps`)
+      : `cd "${nodeDir}" && rm -rf node_modules/${mod.name} && ${npmEnvPrefix}${npmCmd} install ${mod.name} --legacy-peer-deps`;
+
+    await new Promise<void>((resolve) => {
+      exec(reinstallCmd, { maxBuffer: 10 * 1024 * 1024, env: shellEnv }, () => resolve());
+    });
+
+    if (await tryLoad()) {
+      emitLog(`✓ ${mod.name} recovered via clean reinstall`);
+      continue;
+    }
+
+    const errMsg = `${mod.name} failed to load even after clean reinstall. ${mod.fixHint}`;
+    emitLog(`❌ ${errMsg}`);
+    throw new Error(errMsg);
+  }
 }
 
 async function waitForServer(timeout: number = 30000): Promise<void> {
@@ -968,7 +1060,9 @@ export async function checkForUpdate(): Promise<{ current: string; latest: strin
 export async function updatePC2(onProgress: (msg: string) => void): Promise<void> {
   const pc2Dir = IS_WINDOWS ? getWSLDir() : getPC2Dir();
   const nodeDir = IS_WINDOWS ? getWSLNodeDir() : getPC2NodeDir();
+  const nodePath = findNodePath();
   const npmPath = findNpmPath();
+  const nodeCmd = `"${nodePath}"`;
   const npmCmd = `"${npmPath}"`;
 
   const wasRunning = pc2Process !== null && !pc2Process.killed;
@@ -989,19 +1083,22 @@ export async function updatePC2(onProgress: (msg: string) => void): Promise<void
   // GUI build), the native-module rebuild (in case the pulled package.json
   // changed any native dep ABI), and HUSKY=0 to defend against legacy
   // package.json versions that lacked the husky-tolerant prepare script.
+  //
+  // Rebuild only better-sqlite3 from source (see install flow above for why
+  // we don't do --build-from-source for everything).
   const gitPull = `cd "${pc2Dir}" && git fetch origin && git reset --hard origin/main`;
   const npmEnvPrefix = IS_WINDOWS ? '' : 'HUSKY=0 ';
   const steps = IS_WINDOWS ? [
     { cmd: wslCmd(gitPull), msg: 'Pulling latest code...' },
     { cmd: wslCmd(`cd "${pc2Dir}" && HUSKY=0 npm install --legacy-peer-deps --ignore-scripts`), msg: 'Updating root dependencies...' },
     { cmd: wslCmd(`cd "${nodeDir}" && HUSKY=0 npm install --legacy-peer-deps`), msg: 'Installing dependencies...' },
-    { cmd: wslCmd(`cd "${nodeDir}" && HUSKY=0 npm rebuild --build-from-source`), msg: 'Rebuilding native modules...' },
+    { cmd: wslCmd(`cd "${nodeDir}" && HUSKY=0 npm rebuild better-sqlite3 --build-from-source`), msg: 'Rebuilding better-sqlite3 against Node ABI...' },
     { cmd: wslCmd(`cd "${nodeDir}" && npm run build`), msg: 'Building PC2...' },
   ] : [
     { cmd: gitPull, msg: 'Pulling latest code...' },
     { cmd: `cd "${pc2Dir}" && ${npmEnvPrefix}${npmCmd} install --legacy-peer-deps --ignore-scripts`, msg: 'Updating root dependencies...' },
     { cmd: `cd "${nodeDir}" && ${npmEnvPrefix}${npmCmd} install --legacy-peer-deps`, msg: 'Installing dependencies...' },
-    { cmd: `cd "${nodeDir}" && ${npmEnvPrefix}${npmCmd} rebuild --build-from-source`, msg: 'Rebuilding native modules...' },
+    { cmd: `cd "${nodeDir}" && ${npmEnvPrefix}${npmCmd} rebuild better-sqlite3 --build-from-source`, msg: 'Rebuilding better-sqlite3 against Node ABI...' },
     { cmd: `cd "${nodeDir}" && ${npmCmd} run build`, msg: 'Building PC2...' },
   ];
 
@@ -1020,6 +1117,10 @@ export async function updatePC2(onProgress: (msg: string) => void): Promise<void
       });
     });
   }
+
+  // Same verification gauntlet as install — make sure the rebuild
+  // actually produced loadable native modules before declaring victory.
+  await verifyNativeModules(nodeDir, nodeCmd, npmCmd, npmEnvPrefix, onProgress);
 
   const newVersion = getPC2Version();
   onProgress(`Update complete! v${newVersion}`);
