@@ -4,15 +4,15 @@ A one-click desktop app to run your Personal Cloud Computer (PC2).
 
 ## Download
 
-**[Download Latest Release](https://github.com/Elacity/elastos-launcher/releases/tag/v1.2.2)**
+**[Download Latest Release](https://github.com/Elacity/elastos-launcher/releases/tag/v1.2.4)**
 
 | Platform | Download | Status |
 |----------|----------|--------|
-| **macOS** (Apple Silicon M1/M2/M3/M4) | [ElastOS-1.2.2-arm64.dmg](https://github.com/Elacity/elastos-launcher/releases/download/v1.2.2/ElastOS-1.2.2-arm64.dmg) | Apple Notarized |
+| **macOS** (Apple Silicon M1/M2/M3/M4) | [ElastOS-1.2.4-arm64.dmg](https://github.com/Elacity/elastos-launcher/releases/download/v1.2.4/ElastOS-1.2.4-arm64.dmg) | Apple Notarized |
 | **macOS** (Intel) | Works via Rosetta 2 | Apple Notarized |
-| **Linux** (Ubuntu/Debian) | [elastos-launcher_1.2.2_amd64.deb](https://github.com/Elacity/elastos-launcher/releases/download/v1.2.2/elastos-launcher_1.2.2_amd64.deb) | Available |
-| **Linux** (Other) | [ElastOS-1.2.2.AppImage](https://github.com/Elacity/elastos-launcher/releases/download/v1.2.2/ElastOS-1.2.2.AppImage) | Available |
-| **Windows** | [ElastOS.Setup.1.2.2.exe](https://github.com/Elacity/elastos-launcher/releases/download/v1.2.2/ElastOS.Setup.1.2.2.exe) | Available |
+| **Linux** (Ubuntu/Debian) | [elastos-launcher_1.2.4_amd64.deb](https://github.com/Elacity/elastos-launcher/releases/download/v1.2.4/elastos-launcher_1.2.4_amd64.deb) | Available |
+| **Linux** (Other) | [ElastOS-1.2.4.AppImage](https://github.com/Elacity/elastos-launcher/releases/download/v1.2.4/ElastOS-1.2.4.AppImage) | Available |
+| **Windows** | [ElastOS.Setup.1.2.4.exe](https://github.com/Elacity/elastos-launcher/releases/download/v1.2.4/ElastOS.Setup.1.2.4.exe) | Available |
 
 ## macOS Installation
 
@@ -88,13 +88,27 @@ See our [VPS setup guide](https://docs.ela.city) for details.
 
 ## Alternative: Terminal Install
 
-If you prefer using the terminal (or on a VPS):
+If you prefer using the terminal (Mac/Linux/Jetson):
 
 ```bash
+# Mac (interactive — handles password prompts properly):
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/Elacity/pc2.net/main/scripts/start-local.sh)"
+
+# Linux / Jetson (curl|bash works fine):
 curl -fsSL https://raw.githubusercontent.com/Elacity/pc2.net/main/scripts/start-local.sh | bash
 ```
 
 This installs Node.js, pm2, and PC2, then starts it with process management for 24/7 operation.
+
+## Recovery / forced upgrade
+
+If a node is stuck on an old version (v1.0/v1.1/v1.2.0) or the in-app updater fails, run this in a terminal on the node:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Elacity/pc2.net/main/scripts/update.sh | bash
+```
+
+This is idempotent, fail-loud, and self-checking — it stops PC2 cleanly, pulls the latest code, rebuilds native modules against your current Node ABI, and restarts pm2 with a health check.
 
 ## Support
 

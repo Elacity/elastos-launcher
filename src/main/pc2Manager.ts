@@ -763,19 +763,25 @@ export async function installPC2(onProgress: (message: string) => void): Promise
   const npmCmd = `"${npmPath}"`;
   const nodeCmd = `"${nodePath}"`;
   
+  // npm rebuild --build-from-source forces every native module (better-sqlite3,
+  // sharp, bcrypt, usb, canvas, ed25519-to-x25519.wasm, …) to recompile against
+  // the bundled Node ABI — fixes the recurring NODE_MODULE_VERSION mismatch
+  // (ERR_DLOPEN_FAILED) that crashed every fresh install on Node 22 because
+  // older deps only ship Node ≤ 20 prebuilds.
+  // HUSKY=0 neutralises the `prepare` script so the root install never bombs
+  // with "sh: husky: not found" on a fresh, dev-tools-free user box.
+  const npmEnvPrefix = IS_WINDOWS ? '' : 'HUSKY=0 ';
   const steps = IS_WINDOWS ? [
     { cmd: wslCmd(`git clone https://github.com/Elacity/pc2.net "${pc2Dir}"`), msg: 'Cloning repository...' },
-    { cmd: wslCmd(`cd "${pc2Dir}" && npm install --legacy-peer-deps --ignore-scripts`), msg: 'Installing dependencies...' },
-    { cmd: wslCmd(`cd "${nodeDir}" && npm install --legacy-peer-deps`), msg: 'Installing node dependencies...' },
-    // Force rebuild better-sqlite3 for correct Node.js version to avoid NODE_MODULE_VERSION mismatch (ERR_DLOPEN_FAILED)
-    { cmd: wslCmd(`cd "${nodeDir}" && npm rebuild better-sqlite3 --build-from-source`), msg: 'Building native modules...' },
+    { cmd: wslCmd(`cd "${pc2Dir}" && HUSKY=0 npm install --legacy-peer-deps --ignore-scripts`), msg: 'Installing dependencies...' },
+    { cmd: wslCmd(`cd "${nodeDir}" && HUSKY=0 npm install --legacy-peer-deps`), msg: 'Installing node dependencies...' },
+    { cmd: wslCmd(`cd "${nodeDir}" && HUSKY=0 npm rebuild --build-from-source`), msg: 'Building native modules (this can take a few minutes)...' },
     { cmd: wslCmd(`cd "${nodeDir}" && npm run build`), msg: 'Building PC2...' },
   ] : [
     { cmd: `git clone https://github.com/Elacity/pc2.net "${pc2Dir}"`, msg: 'Cloning repository...' },
-    { cmd: `cd "${pc2Dir}" && ${npmCmd} install --legacy-peer-deps --ignore-scripts`, msg: 'Installing dependencies...' },
-    { cmd: `cd "${nodeDir}" && ${npmCmd} install --legacy-peer-deps`, msg: 'Installing node dependencies...' },
-    // Force rebuild better-sqlite3 for correct Node.js version to avoid NODE_MODULE_VERSION mismatch (ERR_DLOPEN_FAILED)
-    { cmd: `cd "${nodeDir}" && ${nodeCmd} -e "console.log('Building native modules for Node.js ' + process.version + ' (MODULE_VERSION ' + process.versions.modules + ')')" && ${npmCmd} rebuild better-sqlite3 --build-from-source`, msg: 'Building native modules...' },
+    { cmd: `cd "${pc2Dir}" && ${npmEnvPrefix}${npmCmd} install --legacy-peer-deps --ignore-scripts`, msg: 'Installing dependencies...' },
+    { cmd: `cd "${nodeDir}" && ${npmEnvPrefix}${npmCmd} install --legacy-peer-deps`, msg: 'Installing node dependencies...' },
+    { cmd: `cd "${nodeDir}" && ${nodeCmd} -e "console.log('Building native modules for Node.js ' + process.version + ' (MODULE_VERSION ' + process.versions.modules + ')')" && ${npmEnvPrefix}${npmCmd} rebuild --build-from-source`, msg: 'Building native modules (this can take a few minutes)...' },
     { cmd: `cd "${nodeDir}" && ${npmCmd} run build`, msg: 'Building PC2...' },
   ];
 
@@ -979,14 +985,23 @@ export async function updatePC2(onProgress: (msg: string) => void): Promise<void
     await new Promise(r => setTimeout(r, 1000));
   }
 
+  // Update flow mirrors the install flow: must include root deps (for the
+  // GUI build), the native-module rebuild (in case the pulled package.json
+  // changed any native dep ABI), and HUSKY=0 to defend against legacy
+  // package.json versions that lacked the husky-tolerant prepare script.
   const gitPull = `cd "${pc2Dir}" && git fetch origin && git reset --hard origin/main`;
+  const npmEnvPrefix = IS_WINDOWS ? '' : 'HUSKY=0 ';
   const steps = IS_WINDOWS ? [
     { cmd: wslCmd(gitPull), msg: 'Pulling latest code...' },
-    { cmd: wslCmd(`cd "${nodeDir}" && npm install --legacy-peer-deps`), msg: 'Installing dependencies...' },
+    { cmd: wslCmd(`cd "${pc2Dir}" && HUSKY=0 npm install --legacy-peer-deps --ignore-scripts`), msg: 'Updating root dependencies...' },
+    { cmd: wslCmd(`cd "${nodeDir}" && HUSKY=0 npm install --legacy-peer-deps`), msg: 'Installing dependencies...' },
+    { cmd: wslCmd(`cd "${nodeDir}" && HUSKY=0 npm rebuild --build-from-source`), msg: 'Rebuilding native modules...' },
     { cmd: wslCmd(`cd "${nodeDir}" && npm run build`), msg: 'Building PC2...' },
   ] : [
     { cmd: gitPull, msg: 'Pulling latest code...' },
-    { cmd: `cd "${nodeDir}" && ${npmCmd} install --legacy-peer-deps`, msg: 'Installing dependencies...' },
+    { cmd: `cd "${pc2Dir}" && ${npmEnvPrefix}${npmCmd} install --legacy-peer-deps --ignore-scripts`, msg: 'Updating root dependencies...' },
+    { cmd: `cd "${nodeDir}" && ${npmEnvPrefix}${npmCmd} install --legacy-peer-deps`, msg: 'Installing dependencies...' },
+    { cmd: `cd "${nodeDir}" && ${npmEnvPrefix}${npmCmd} rebuild --build-from-source`, msg: 'Rebuilding native modules...' },
     { cmd: `cd "${nodeDir}" && ${npmCmd} run build`, msg: 'Building PC2...' },
   ];
 
