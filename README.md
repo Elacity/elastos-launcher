@@ -4,15 +4,15 @@ A one-click desktop app to run your Personal Cloud Computer (PC2).
 
 ## Download
 
-**[Download Latest Release](https://github.com/Elacity/elastos-launcher/releases/tag/v1.2.5)**
+**[Download Latest Release](https://github.com/Elacity/elastos-launcher/releases/tag/v1.2.6)**
 
 | Platform | Download | Status |
 |----------|----------|--------|
-| **macOS** (Apple Silicon M1/M2/M3/M4) | [ElastOS-1.2.5-arm64.dmg](https://github.com/Elacity/elastos-launcher/releases/download/v1.2.5/ElastOS-1.2.5-arm64.dmg) | Apple Notarized |
+| **macOS** (Apple Silicon M1/M2/M3/M4) | [ElastOS-1.2.6-arm64.dmg](https://github.com/Elacity/elastos-launcher/releases/download/v1.2.6/ElastOS-1.2.6-arm64.dmg) | Apple Notarized |
 | **macOS** (Intel) | Works via Rosetta 2 | Apple Notarized |
-| **Linux** (Ubuntu/Debian) | [elastos-launcher_1.2.5_amd64.deb](https://github.com/Elacity/elastos-launcher/releases/download/v1.2.5/elastos-launcher_1.2.5_amd64.deb) | Available |
-| **Linux** (Other) | [ElastOS-1.2.5.AppImage](https://github.com/Elacity/elastos-launcher/releases/download/v1.2.5/ElastOS-1.2.5.AppImage) | Available |
-| **Windows** | [ElastOS.Setup.1.2.5.exe](https://github.com/Elacity/elastos-launcher/releases/download/v1.2.5/ElastOS.Setup.1.2.5.exe) | Available |
+| **Linux** (Ubuntu/Debian) | [elastos-launcher_1.2.6_amd64.deb](https://github.com/Elacity/elastos-launcher/releases/download/v1.2.6/elastos-launcher_1.2.6_amd64.deb) | Available |
+| **Linux** (Other) | [ElastOS-1.2.6.AppImage](https://github.com/Elacity/elastos-launcher/releases/download/v1.2.6/ElastOS-1.2.6.AppImage) | Available |
+| **Windows** | [ElastOS.Setup.1.2.6.exe](https://github.com/Elacity/elastos-launcher/releases/download/v1.2.6/ElastOS.Setup.1.2.6.exe) | Available |
 
 ## macOS Installation
 
