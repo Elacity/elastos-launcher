@@ -318,6 +318,76 @@ export function getEnvironmentLabel(): string {
   return ENVIRONMENTS[currentEnv].label;
 }
 
+// ─────────────────────────────────────────────────────────────────────
+// SQLite-adapter probe (v1.2.6+)
+//
+// pc2-node v1.2.7 replaced `better-sqlite3` (V8-ABI-specific, requires
+// per-Node-major prebuild OR Xcode CLT to compile) with
+// `@photostructure/sqlite` (Node-API based, single prebuild bundled
+// inside the npm tarball, works across Node majors with no compiler).
+// pc2-node v1.2.6 and earlier still use `better-sqlite3`.
+//
+// The launcher must support BOTH (operator might update the launcher
+// before pc2.net, or roll back pc2.net to a pre-v1.2.7 release). We
+// detect which adapter is present by reading pc2-node's package.json
+// and build the right load-probe accordingly. If neither shows up
+// (corrupt install / missing package.json), we return null and the
+// caller falls back to a generic "node modules broken" error.
+// ─────────────────────────────────────────────────────────────────────
+export interface SqliteProbe {
+  readonly moduleName: string;
+  /** A Node `-e` script body that throws on failure to load. */
+  readonly loadCheckScript: string;
+  /** Human-readable hint shown to the user if the probe fails. */
+  readonly fixHint: string;
+}
+
+export function detectSqliteAdapter(pc2NodeDir: string): SqliteProbe | null {
+  try {
+    const pkgPath = path.join(pc2NodeDir, 'package.json');
+    if (!fs.existsSync(pkgPath)) {
+      return null;
+    }
+    const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
+    const deps: Record<string, string> = {
+      ...(pkg.dependencies || {}),
+      ...(pkg.devDependencies || {}),
+    };
+
+    // Prefer @photostructure/sqlite when both are listed (it's the v1.2.7+
+    // adapter; better-sqlite3 may linger in lockfile during transition).
+    if (deps['@photostructure/sqlite']) {
+      return {
+        moduleName: '@photostructure/sqlite',
+        loadCheckScript:
+          "const { DatabaseSync } = require('@photostructure/sqlite'); " +
+          "new DatabaseSync(':memory:').exec('SELECT 1');",
+        // @photostructure/sqlite ships prebuilds for darwin-arm64, darwin-x64,
+        // linux-x64, linux-arm64 (glibc + musl), win32-x64, win32-arm64 inside
+        // the npm tarball. If the prebuild somehow doesn't load, the most
+        // likely cause is a corrupt node_modules — full reinstall is the cure.
+        fixHint:
+          "Reinstall pc2.net: cd ~/.pc2 && rm -rf node_modules pc2-node/node_modules, " +
+          "then click Update in the launcher.",
+      };
+    }
+    if (deps['better-sqlite3']) {
+      return {
+        moduleName: 'better-sqlite3',
+        loadCheckScript:
+          "require('better-sqlite3')(':memory:').prepare('SELECT 1').get();",
+        fixHint:
+          "On macOS without Xcode Command Line Tools, install them with " +
+          "`xcode-select --install`. Better long-term fix: update pc2.net to " +
+          "v1.2.7 or later (uses @photostructure/sqlite, no compiler needed).",
+      };
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 let statusListeners: ((status: PC2Status) => void)[] = [];
 let logListeners: ((log: string) => void)[] = [];
 
@@ -407,6 +477,49 @@ export async function startPC2(): Promise<void> {
   if (pc2Process && !pc2Process.killed) {
     emitLog('PC2 is already running');
     return;
+  }
+
+  // Defensive pre-flight check (v1.2.6): verify the SQLite native module
+  // actually loads before we even try to spawn PC2. Without this, a half-
+  // installed state from a previous failed install would let startPC2
+  // happily spawn a doomed process (Sasha's Apr 30 2026 case — got a
+  // cryptic NODE_MODULE_VERSION 115 vs 127 crash because better-sqlite3's
+  // .node binary was for a different Node ABI than the bundled Node).
+  //
+  // v1.2.6 of the launcher is adapter-aware: probes whichever SQLite
+  // binding pc2-node's package.json declares (@photostructure/sqlite for
+  // pc2.net v1.2.7+, better-sqlite3 for v1.2.6 and earlier).
+  if (!IS_WINDOWS) {
+    const nodePath = findNodePath();
+    const sqliteProbe = detectSqliteAdapter(getPC2NodeDir());
+    if (sqliteProbe) {
+      const probe = `"${nodePath}" -e "${sqliteProbe.loadCheckScript.replace(/"/g, '\\"')}"`;
+      const probeFailed = await new Promise<string | null>((resolve) => {
+        exec(`cd "${getPC2NodeDir()}" && ${probe}`, { timeout: 5000, env: shellEnv }, (error, _stdout, stderr) => {
+          if (error) {
+            // Capture the most-relevant error line (usually mentions NODE_MODULE_VERSION
+            // or "no such file or directory" for missing prebuild, or ERR_DLOPEN for
+            // ABI mismatch on platforms with bundled prebuilds that didn't unpack).
+            const errLine = (stderr || error.message).split('\n').find(l => /NODE_MODULE_VERSION|MODULE_NOT_FOUND|ERR_DLOPEN|no such file/.test(l));
+            resolve(errLine || error.message.split('\n')[0]);
+          } else {
+            resolve(null);
+          }
+        });
+      });
+      if (probeFailed) {
+        emitStatus('error');
+        emitLog(`Cannot start PC2 — ${sqliteProbe.moduleName} failed to load: ${probeFailed}`);
+        emitLog(`Hint: ${sqliteProbe.fixHint}`);
+        emitLog('Or click "Update" / reinstall to repair the broken state.');
+        throw new Error(`PC2 install is incomplete or corrupt (${sqliteProbe.moduleName}). Click Update to repair. (${probeFailed})`);
+      }
+    }
+    // If sqliteProbe is null (no recognised SQLite dep in pc2-node/package.json),
+    // skip pre-flight rather than fail. The actual PC2 boot will surface any
+    // missing-deps error with full context, and a "no probe" state usually means
+    // brand-new install hasn't finished — startPC2 will then spawn and emit
+    // structured errors via stdout/stderr that we capture downstream.
   }
 
   emitStatus('starting');
@@ -747,48 +860,120 @@ export async function installPC2(onProgress: (message: string) => void): Promise
       }
     }
   } else {
+    // Smart "existing directory" handling (v1.2.6).
+    //
+    // Sasha hit this on Apr 30 2026: a previous install attempt failed
+    // mid-way. ~/.pc2 was left half-populated (with a package.json from
+    // the partial clone). When she clicked "Power On" again, installPC2
+    // ran `git clone` which immediately failed with "destination path
+    // already exists". The launcher's renderer then called startPC2
+    // anyway, which spawned PC2 against the broken half-installed state,
+    // crashing on better-sqlite3 ABI mismatch.
+    //
+    // Three states to handle:
+    //   (a) doesn't exist  → normal fresh install (clone)
+    //   (b) exists but no package.json → leftover junk → backup aside
+    //   (c) exists with package.json from OUR repo → repair existing
+    //       install (skip clone, run npm install + build to fix it)
+    //   (d) exists with package.json from SOME OTHER repo → backup aside
     if (fs.existsSync(getPC2Dir())) {
-      const hasPackageJson = fs.existsSync(path.join(getPC2Dir(), 'package.json'));
-      if (!hasPackageJson) {
+      const packageJsonPath = path.join(getPC2Dir(), 'package.json');
+      const hasPackageJson = fs.existsSync(packageJsonPath);
+
+      // Detect whether the existing install is OUR pc2.net repo
+      // (state c) or some other repo / corrupt state (state d).
+      let isOurRepo = false;
+      if (hasPackageJson) {
+        try {
+          const pkg = JSON.parse(fs.readFileSync(packageJsonPath, 'utf8'));
+          if (pkg.name === 'puter') {
+            isOurRepo = true;
+          }
+        } catch {
+          // Malformed package.json — treat as corrupt
+        }
+        // Also check for a .git pointing at our origin
+        if (isOurRepo) {
+          try {
+            const gitConfig = fs.readFileSync(
+              path.join(getPC2Dir(), '.git', 'config'),
+              'utf8'
+            );
+            if (!gitConfig.includes('Elacity/pc2.net')) {
+              isOurRepo = false;
+            }
+          } catch {
+            // No .git config — partial clone or non-git copy. Treat as corrupt.
+            isOurRepo = false;
+          }
+        }
+      }
+
+      if (isOurRepo) {
+        emitLog(`Found existing PC2 install at ${getPC2Dir()} — running repair (will skip git clone)`);
+      } else {
         const backupDir = `${getPC2Dir()}_backup_${Date.now()}`;
-        emitLog(`Backing up existing ${getPC2Dir()} to ${backupDir}`);
+        emitLog(`Backing up unrecognized ${getPC2Dir()} to ${backupDir}`);
         fs.renameSync(getPC2Dir(), backupDir);
       }
     }
   }
 
-  onProgress('Cloning repository...');
+  // Compute "should we skip clone?" — true if dir already exists and
+  // contains our repo (the "repair" path from the smart-existing-dir
+  // handler above). False otherwise (the normal fresh-install path).
+  const shouldSkipClone = !IS_WINDOWS && fs.existsSync(path.join(getPC2Dir(), 'package.json'));
+
+  onProgress(shouldSkipClone ? 'Repairing existing install...' : 'Cloning repository...');
 
   // Build commands - use our bundled npm for guaranteed compatibility
   const npmCmd = `"${npmPath}"`;
   const nodeCmd = `"${nodePath}"`;
   
-  // Rebuild strategy: only force --build-from-source for better-sqlite3 (the
-  // one module known to ship Node-22-incompatible prebuilds). For other
-  // native modules (sharp, bcrypt, node-pty, …) plain `npm rebuild` is enough
-  // — prebuild-install will pick up the right binary for the current Node ABI.
+  // Rebuild strategy (v1.2.6 launcher, supports both pc2.net v1.2.6 and v1.2.7+):
   //
-  // v1.2.4 forced --build-from-source for ALL modules, which exposed
-  // node-datachannel's cmake-js source-build path on macOS without cmake
-  // installed and crashed every fresh install at the rebuild step with
-  // "OMG CMake executable is not found" (reported by Sasha, Apr 30 2026).
-  // v1.2.5 reverts to the proven v1.2.3 strategy — only better-sqlite3
-  // gets force-built, everything else uses prebuilds when available.
+  // pc2-node v1.2.7 replaced `better-sqlite3` (V8-ABI specific, prebuild-install
+  // postinstall download, often required Xcode CLT on Mac when prebuilds for
+  // the user's Node major didn't match) with `@photostructure/sqlite` (Node-API
+  // based, single prebuild bundled inside the npm tarball, works across all
+  // Node majors with no compiler step).
+  //
+  // For the launcher's install pipeline this means:
+  //   - On pc2.net v1.2.7+: plain `npm install` is enough — the SQLite prebuild
+  //     is unpacked from the tarball and works immediately. No Xcode CLT, no
+  //     compile, no postinstall download. Genuinely zero-friction on Mac.
+  //   - On pc2.net v1.2.6: better-sqlite3@^11.10.0 ships Node 22 darwin-arm64
+  //     prebuilds; plain `npm install` works for that case too. The pre-v11
+  //     `--build-from-source` path is gone.
+  //
+  // The verification gauntlet below adapts to whichever SQLite adapter
+  // pc2-node's package.json declares (see `detectSqliteAdapter`). If a load
+  // fails (corrupt extract, partial tarball, edge case), it retries via clean
+  // reinstall before giving up with an actionable error.
   //
   // HUSKY=0 neutralises the `prepare` script so the root install never bombs
   // with "sh: husky: not found" on a fresh, dev-tools-free user box.
   const npmEnvPrefix = IS_WINDOWS ? '' : 'HUSKY=0 ';
+
+  // For "repair" runs (existing install detected), do `git fetch + reset --hard`
+  // instead of `git clone` to bring the existing tree to origin/main.
+  const cloneOrRepair = shouldSkipClone
+    ? `cd "${pc2Dir}" && git fetch origin && git reset --hard origin/main`
+    : `git clone https://github.com/Elacity/pc2.net "${pc2Dir}"`;
+  const cloneOrRepairMsg = shouldSkipClone
+    ? 'Syncing existing install with latest release...'
+    : 'Cloning repository...';
+
   const steps = IS_WINDOWS ? [
-    { cmd: wslCmd(`git clone https://github.com/Elacity/pc2.net "${pc2Dir}"`), msg: 'Cloning repository...' },
+    { cmd: wslCmd(cloneOrRepair), msg: cloneOrRepairMsg },
     { cmd: wslCmd(`cd "${pc2Dir}" && HUSKY=0 npm install --legacy-peer-deps --ignore-scripts`), msg: 'Installing dependencies...' },
     { cmd: wslCmd(`cd "${nodeDir}" && HUSKY=0 npm install --legacy-peer-deps`), msg: 'Installing node dependencies...' },
-    { cmd: wslCmd(`cd "${nodeDir}" && HUSKY=0 npm rebuild better-sqlite3 --build-from-source`), msg: 'Rebuilding better-sqlite3 against Node ABI...' },
     { cmd: wslCmd(`cd "${nodeDir}" && npm run build`), msg: 'Building PC2...' },
   ] : [
-    { cmd: `git clone https://github.com/Elacity/pc2.net "${pc2Dir}"`, msg: 'Cloning repository...' },
+    { cmd: cloneOrRepair, msg: cloneOrRepairMsg },
     { cmd: `cd "${pc2Dir}" && ${npmEnvPrefix}${npmCmd} install --legacy-peer-deps --ignore-scripts`, msg: 'Installing dependencies...' },
     { cmd: `cd "${nodeDir}" && ${npmEnvPrefix}${npmCmd} install --legacy-peer-deps`, msg: 'Installing node dependencies...' },
-    { cmd: `cd "${nodeDir}" && ${nodeCmd} -e "console.log('Building native modules for Node.js ' + process.version + ' (MODULE_VERSION ' + process.versions.modules + ')')" && ${npmEnvPrefix}${npmCmd} rebuild better-sqlite3 --build-from-source`, msg: 'Rebuilding better-sqlite3 against Node ABI...' },
+    { cmd: `cd "${nodeDir}" && ${nodeCmd} -e "console.log('Native modules for Node ' + process.version + ' (MODULE_VERSION ' + process.versions.modules + ') — using prebuilds, no compiler needed')"`, msg: 'Verifying Node ABI...' },
     { cmd: `cd "${nodeDir}" && ${npmCmd} run build`, msg: 'Building PC2...' },
   ];
 
@@ -840,12 +1025,25 @@ export async function installPC2(onProgress: (message: string) => void): Promise
 
 /**
  * Verify that critical native modules actually load against the bundled Node.
- * Three-attempt gauntlet:
+ * Three-attempt gauntlet per module:
  *   1. Plain load (works for clean prebuild-install case).
  *   2. Clean reinstall (rm -rf node_modules/MOD && npm install MOD) —
  *      forces prebuild-install to query fresh against the current Node ABI.
  *   3. If still failing, throw with module-specific fix instructions.
+ *
+ * v1.2.6 (sqlite-adapter aware): the SQLite module is detected from
+ * pc2-node's package.json — `@photostructure/sqlite` for pc2.net v1.2.7+
+ * (Node-API, no compiler) or `better-sqlite3` for v1.2.6 and earlier
+ * (V8-ABI, may need Xcode CLT on Mac). See `detectSqliteAdapter`.
  */
+interface NativeModuleSpec {
+  name: string;
+  /** Inline JS payload for `node -e "..."` (must throw on failure). */
+  loadCheckScript: string;
+  /** Human-readable hint shown to the user if the module won't load. */
+  fixHint: string;
+}
+
 async function verifyNativeModules(
   nodeDir: string,
   nodeCmd: string,
@@ -853,26 +1051,37 @@ async function verifyNativeModules(
   npmEnvPrefix: string,
   onProgress: (m: string) => void
 ): Promise<void> {
-  const modules: Array<{ name: string; isEsm: boolean; fixHint: string }> = [
-    {
-      name: 'better-sqlite3',
-      isEsm: false,
-      fixHint: 'Install Xcode Command Line Tools: xcode-select --install',
-    },
-    {
-      name: 'node-datachannel',
-      isEsm: true,
-      fixHint: 'Install cmake: brew install cmake',
-    },
-  ];
+  const modules: NativeModuleSpec[] = [];
+
+  // Add whichever SQLite adapter pc2-node's package.json declares. If
+  // package.json is missing or has neither, skip the SQLite check rather
+  // than guess — the actual pc2 boot will surface a clearer error.
+  const sqliteProbe = detectSqliteAdapter(nodeDir);
+  if (sqliteProbe) {
+    modules.push({
+      name: sqliteProbe.moduleName,
+      loadCheckScript: sqliteProbe.loadCheckScript,
+      fixHint: sqliteProbe.fixHint,
+    });
+  } else {
+    emitLog('⚠ Could not determine SQLite adapter from pc2-node/package.json — skipping SQLite verification');
+  }
+
+  // node-datachannel is consistent across pc2-node versions (NAPI module,
+  // no V8-ABI version coupling). Probe is ESM-style (dynamic import).
+  modules.push({
+    name: 'node-datachannel',
+    loadCheckScript:
+      "import('node-datachannel').then(m => { if (!m) throw new Error('null'); }).catch(e => { console.error(e.message); process.exit(1); })",
+    fixHint: 'Install cmake: brew install cmake (or apt-get install cmake on Linux)',
+  });
 
   for (const mod of modules) {
     onProgress(`Verifying ${mod.name}...`);
     emitLog(`Verifying ${mod.name} loads against bundled Node...`);
 
-    const loadProbe = mod.isEsm
-      ? `${nodeCmd} -e "import('${mod.name}').then(m => { if (!m) throw new Error('null'); }).catch(e => { console.error(e.message); process.exit(1); })"`
-      : `${nodeCmd} -e "require('${mod.name}')(':memory:').prepare('SELECT 1').get()"`;
+    // Escape double-quotes in the inline script so it survives shell quoting.
+    const loadProbe = `${nodeCmd} -e "${mod.loadCheckScript.replace(/"/g, '\\"')}"`;
 
     const tryLoad = (): Promise<boolean> =>
       new Promise((resolve) => {
@@ -1080,25 +1289,34 @@ export async function updatePC2(onProgress: (msg: string) => void): Promise<void
   }
 
   // Update flow mirrors the install flow: must include root deps (for the
-  // GUI build), the native-module rebuild (in case the pulled package.json
-  // changed any native dep ABI), and HUSKY=0 to defend against legacy
-  // package.json versions that lacked the husky-tolerant prepare script.
+  // GUI build) and HUSKY=0 to defend against legacy package.json versions
+  // that lacked the husky-tolerant prepare script.
   //
-  // Rebuild only better-sqlite3 from source (see install flow above for why
-  // we don't do --build-from-source for everything).
+  // v1.2.6 launcher: no --build-from-source step. Both supported pc2.net
+  // SQLite adapters (`better-sqlite3` on v1.2.6, `@photostructure/sqlite`
+  // on v1.2.7+) install without invoking a C++ compiler:
+  //   - better-sqlite3 ^11.10.0 → Node 22 prebuilt binary downloaded by
+  //     prebuild-install during postinstall.
+  //   - @photostructure/sqlite ^1.2.1 → prebuilt binary unpacked from the
+  //     npm tarball during `npm install`, no postinstall download needed.
+  // The verification gauntlet below catches any edge cases where neither
+  // path produces a loadable binary, and retries via clean reinstall.
+  //
+  // git reset --hard handles ALL drift (modified files, deleted files,
+  // build artifacts) without the safety-guard hassle — production launcher
+  // installs are managed entirely by us, so there's nothing legitimate the
+  // user could have edited.
   const gitPull = `cd "${pc2Dir}" && git fetch origin && git reset --hard origin/main`;
   const npmEnvPrefix = IS_WINDOWS ? '' : 'HUSKY=0 ';
   const steps = IS_WINDOWS ? [
     { cmd: wslCmd(gitPull), msg: 'Pulling latest code...' },
     { cmd: wslCmd(`cd "${pc2Dir}" && HUSKY=0 npm install --legacy-peer-deps --ignore-scripts`), msg: 'Updating root dependencies...' },
     { cmd: wslCmd(`cd "${nodeDir}" && HUSKY=0 npm install --legacy-peer-deps`), msg: 'Installing dependencies...' },
-    { cmd: wslCmd(`cd "${nodeDir}" && HUSKY=0 npm rebuild better-sqlite3 --build-from-source`), msg: 'Rebuilding better-sqlite3 against Node ABI...' },
     { cmd: wslCmd(`cd "${nodeDir}" && npm run build`), msg: 'Building PC2...' },
   ] : [
     { cmd: gitPull, msg: 'Pulling latest code...' },
     { cmd: `cd "${pc2Dir}" && ${npmEnvPrefix}${npmCmd} install --legacy-peer-deps --ignore-scripts`, msg: 'Updating root dependencies...' },
     { cmd: `cd "${nodeDir}" && ${npmEnvPrefix}${npmCmd} install --legacy-peer-deps`, msg: 'Installing dependencies...' },
-    { cmd: `cd "${nodeDir}" && ${npmEnvPrefix}${npmCmd} rebuild better-sqlite3 --build-from-source`, msg: 'Rebuilding better-sqlite3 against Node ABI...' },
     { cmd: `cd "${nodeDir}" && ${npmCmd} run build`, msg: 'Building PC2...' },
   ];
 
