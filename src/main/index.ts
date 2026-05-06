@@ -223,4 +223,9 @@ app.on('activate', () => {
 
 app.on('before-quit', () => {
   isQuitting = true;
+  // v1.2.7.13: clean up the heartbeat poller's interval timer so the
+  // event loop doesn't keep the app process alive after BrowserWindow
+  // closes. (The poller uses unref'd timers in pc2-node but Electron's
+  // setInterval doesn't auto-unref, so we stop it explicitly.)
+  pc2Manager.shutdownHeartbeatPoller();
 });

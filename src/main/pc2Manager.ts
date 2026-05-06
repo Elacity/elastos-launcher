@@ -4,6 +4,7 @@ import * as path from 'path';
 import * as fs from 'fs';
 import * as https from 'https';
 import log from 'electron-log';
+import { HeartbeatPoller, HeartbeatState } from './pc2Heartbeat';
 
 const HOME = os.homedir();
 const PC2_URL = 'http://localhost:4200';
@@ -28,6 +29,41 @@ const BUNDLED_NODE_DIR = path.join(HOME, '.elastos', 'node');
 let pc2Process: ChildProcess | null = null;
 let logBuffer: string[] = [];
 const MAX_LOG_LINES = 500;
+
+// ─────────────────────────────────────────────────────────────────────
+// v1.2.7.13: Heartbeat poller — single source of truth for "is pc2-node
+// alive?". Reads <pc2NodeDir>/data/runtime/heartbeat.json (written by
+// pc2-node every 2 s) instead of relying on the tracked child PID.
+//
+// Why: the launcher's previous PID-tracking approach broke whenever
+// pc2-node respawned without our spawn() call — most notably the macOS
+// in-app updater's `spawnDetachedRespawn`, manual `/api/system/restart`,
+// terminal `pm2 restart pc2`, and crash-and-supervisor scenarios. In all
+// of those, the original child died (so we lost track of the PID) but a
+// fresh pc2-node was happily running.
+//
+// Protocol contract: docs/wiki/Technical/RUNTIME_HEARTBEAT_PROTOCOL.md
+// in the pc2.net repo.
+//
+// Backward compat: against pre-v1.2.7.13 pc2-node (no heartbeat file
+// ever appears) the poller reports `not-running` indefinitely and
+// getStatus() falls through to the legacy `/health` polling.
+// ─────────────────────────────────────────────────────────────────────
+let heartbeatPoller: HeartbeatPoller | null = null;
+/**
+ * Set by pc2Process.on('exit', ...) to defer emitting 'stopped' for ~6 s
+ * — long enough for `spawnDetachedRespawn`'s 3 s sleep + the new pc2-node's
+ * first heartbeat write. If the poller sees a fresh heartbeat in that
+ * window it cancels the timer and the launcher status stays on 'running'.
+ */
+let pendingExitStoppedTimer: NodeJS.Timeout | null = null;
+/**
+ * Set by stopPC2() / restartPC2() to mark the next process exit as
+ * user-initiated. Skips the 6 s respawn-detection defer in the exit
+ * handler so the UI updates immediately for explicit Stop clicks.
+ * Cleared by the exit handler itself.
+ */
+let userInitiatedStopInFlight = false;
 
 // Get WSL home directory (for Windows)
 function getWSLHome(): string {
@@ -417,6 +453,120 @@ function emitLog(message: string): void {
   logListeners.forEach(cb => cb(logMessage));
 }
 
+/**
+ * Map a HeartbeatState to the launcher's PC2Status type.
+ *
+ * Returns `null` when the heartbeat says "not-running" — the caller
+ * should fall through to legacy detection (tracked PID + /health probe)
+ * because "no heartbeat" can mean either (a) pc2-node truly stopped, or
+ * (b) we're talking to an older pc2-node that never writes the file.
+ *
+ * `running`/`shutting-down`/`stale` are unambiguous: the file exists and
+ * has a recognised schema, so we trust the heartbeat over any other signal.
+ */
+function heartbeatStateToStatus(state: HeartbeatState): PC2Status | null {
+  switch (state.kind) {
+    case 'running':       return 'running';
+    case 'shutting-down': return 'stopping';
+    case 'stale':         return 'error';
+    case 'not-running':   return null;
+  }
+}
+
+/**
+ * Lazily instantiate the heartbeat poller for the current environment's
+ * pc2-node directory. Re-creates the poller if the directory has changed
+ * (env switch via setEnvironment) so we always read from the right path.
+ *
+ * Idempotent — safe to call multiple times.
+ */
+function ensureHeartbeatPoller(): HeartbeatPoller {
+  const expectedDir = getPC2NodeDir();
+  // No `getDir()` accessor on HeartbeatPoller — we cache the path in a
+  // closure-adjacent variable to detect env switches.
+  if (heartbeatPoller && heartbeatPollerForDir === expectedDir) {
+    return heartbeatPoller;
+  }
+  if (heartbeatPoller) {
+    log.info(`[pc2Manager] Environment changed (${heartbeatPollerForDir} → ${expectedDir}); recreating heartbeat poller`);
+    heartbeatPoller.stop();
+  }
+  heartbeatPollerForDir = expectedDir;
+  heartbeatPoller = new HeartbeatPoller(expectedDir);
+
+  // Wire poller state changes into the launcher's existing status emit
+  // path. The poller only fires on `kind` transitions so we won't spam
+  // emits at every 2 s tick.
+  heartbeatPoller.onStateChange((state) => {
+    const status = heartbeatStateToStatus(state);
+    if (status === null) {
+      // 'not-running' — don't override here. If pc2Process is still tracked
+      // (e.g. starting up before the first heartbeat write) we want to
+      // stay on 'starting'; if pc2Process is null we emit 'stopped' from
+      // the exit-handler timer below.
+      return;
+    }
+    // If a fresh heartbeat appears while we have a pending "stopped"
+    // timer (post-respawn handoff window), cancel it — pc2-node is back.
+    if (pendingExitStoppedTimer && status === 'running') {
+      clearTimeout(pendingExitStoppedTimer);
+      pendingExitStoppedTimer = null;
+      log.info('[pc2Manager] Cancelled pending stopped-emit; heartbeat shows running (respawn detected)');
+    }
+    emitStatus(status);
+  });
+
+  heartbeatPoller.start();
+  return heartbeatPoller;
+}
+let heartbeatPollerForDir: string | null = null;
+
+/**
+ * Stop the heartbeat poller. Called on app quit and during environment
+ * switches. The poller restart on env switch is handled inside
+ * ensureHeartbeatPoller, so callers normally don't need this.
+ */
+export function shutdownHeartbeatPoller(): void {
+  if (heartbeatPoller) {
+    heartbeatPoller.stop();
+    heartbeatPoller = null;
+    heartbeatPollerForDir = null;
+  }
+  if (pendingExitStoppedTimer) {
+    clearTimeout(pendingExitStoppedTimer);
+    pendingExitStoppedTimer = null;
+  }
+}
+
+/**
+ * Request a clean restart via the heartbeat protocol. pc2-node's
+ * `RuntimeHeartbeat` flag watcher consumes the flag, calls
+ * `spawnDetachedRespawn`, and the new pc2-node writes a fresh heartbeat
+ * within ~3 s. Falls back to the legacy stop+start path if the flag
+ * isn't acknowledged (older pc2-node without flag support).
+ *
+ * @param reason - tag surfaced in pc2-node's `lastRestartReason` for traceability.
+ */
+export async function restartPC2ViaHeartbeat(reason: string = 'gui-restart-button'): Promise<void> {
+  emitLog(`Requesting pc2-node restart via heartbeat flag (reason=${reason})...`);
+  emitStatus('starting');
+  try {
+    const poller = ensureHeartbeatPoller();
+    await poller.requestRestart(reason);
+    emitLog('Restart flag acknowledged — waiting for fresh heartbeat...');
+    // The poller's onStateChange will emit 'running' when the new
+    // pc2-node lands. Just wait briefly to confirm before returning.
+    await new Promise((resolve) => setTimeout(resolve, 4000));
+    return;
+  } catch (err) {
+    const msg = (err as Error).message;
+    emitLog(`Heartbeat-based restart failed (${msg}); falling back to stop+start`);
+    log.warn(`[pc2Manager] Heartbeat restart failed, falling back: ${msg}`);
+    // Legacy path: kills + respawns.
+    return restartPC2();
+  }
+}
+
 export async function isInstalled(): Promise<boolean> {
   if (IS_WINDOWS) {
     return new Promise((resolve) => {
@@ -438,16 +588,30 @@ export async function getStatus(): Promise<PC2Status> {
     return 'not-installed';
   }
 
-  // Try to hit the health endpoint
+  // v1.2.7.13: heartbeat poller is the primary source of truth.
+  // - 'running' / 'stopping' / 'error' (stale) — file exists with v1
+  //   schema, trust it absolutely.
+  // - 'not-running' (file missing) — could mean pc2-node really stopped,
+  //   OR we're talking to a pre-v1.2.7.13 pc2-node that never writes the
+  //   file. Fall through to the legacy /health probe to disambiguate.
+  const poller = ensureHeartbeatPoller();
+  const heartbeatStatus = heartbeatStateToStatus(poller.getLastState());
+  if (heartbeatStatus !== null) {
+    return heartbeatStatus;
+  }
+
+  // Legacy fallback path (pre-v1.2.7.13 pc2-node, or pc2-node truly
+  // stopped). Hit /health to distinguish "running but old version" from
+  // "actually stopped".
   try {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 2000);
-    
-    const response = await fetch(`${PC2_URL}/health`, { 
-      signal: controller.signal 
+
+    const response = await fetch(`${PC2_URL}/health`, {
+      signal: controller.signal
     });
     clearTimeout(timeoutId);
-    
+
     if (response.ok) {
       return 'running';
     }
@@ -463,6 +627,49 @@ export async function getStatus(): Promise<PC2Status> {
   return 'stopped';
 }
 
+/**
+ * Get the running pc2-node version reported by its heartbeat (v1.2.7.13+).
+ *
+ * Differs from `getPC2Version()` in a critical way: `getPC2Version()`
+ * reads the on-disk `package.json`, which can be NEWER than what's
+ * actually running in memory immediately after `git reset --hard` but
+ * before the new pc2-node has restarted. The heartbeat is the truth
+ * about what's currently in memory.
+ *
+ * Returns null if pc2-node isn't running or is on a pre-v1.2.7.13
+ * version (no heartbeat). Caller should fall back to `getPC2Version()`
+ * in that case.
+ */
+export function getRunningPC2Version(): string | null {
+  if (!heartbeatPoller) return null;
+  const state = heartbeatPoller.getLastState();
+  if (state.kind === 'running' || state.kind === 'shutting-down') {
+    return state.payload.version;
+  }
+  if (state.kind === 'stale') {
+    return state.lastSeen.version;
+  }
+  return null;
+}
+
+/**
+ * Get the running pc2-node PID reported by its heartbeat (v1.2.7.13+).
+ * Same caveat as getRunningPC2Version — this is the truth about what's
+ * actually running, vs the launcher's tracked `pc2Process.pid` which can
+ * be stale after a respawn. Returns null when there's no heartbeat.
+ */
+export function getRunningPC2Pid(): number | null {
+  if (!heartbeatPoller) return null;
+  const state = heartbeatPoller.getLastState();
+  if (state.kind === 'running' || state.kind === 'shutting-down') {
+    return state.payload.pid;
+  }
+  if (state.kind === 'stale') {
+    return state.lastSeen.pid;
+  }
+  return null;
+}
+
 export async function startPC2(): Promise<void> {
   const installed = await isInstalled();
   const nodeDir = IS_WINDOWS ? getWSLNodeDir() : getPC2NodeDir();
@@ -472,6 +679,12 @@ export async function startPC2(): Promise<void> {
     emitLog('PC2 is not installed. Please install first.');
     return;
   }
+
+  // v1.2.7.13: ensure the heartbeat poller is live BEFORE we spawn
+  // pc2-node so we catch the very first heartbeat write (~2 s after
+  // the server.listen callback fires). Without this, getStatus() calls
+  // during startup might transiently report the wrong state.
+  ensureHeartbeatPoller();
 
   // Check if already running
   if (pc2Process && !pc2Process.killed) {
@@ -571,7 +784,40 @@ export async function startPC2(): Promise<void> {
         emitLog(`PC2 was killed with signal ${signal}`);
       }
       pc2Process = null;
-      emitStatus('stopped');
+
+      // v1.2.7.13: distinguish two kinds of exits.
+      //   (a) User-initiated stop / restart → emit 'stopped' immediately
+      //       so the UI feels responsive. The flag is set by stopPC2()
+      //       and restartPC2() before they kill the process.
+      //   (b) Unexpected exit (crash, OR pc2-node calling
+      //       spawnDetachedRespawn from in-app update / manual restart /
+      //       heartbeat-flag respawn) → defer 6 s, then check whether
+      //       a fresh heartbeat appeared. The poller's onStateChange
+      //       handler cancels the deferred timer if it sees `running`
+      //       in the meantime, so the launcher status stays green
+      //       throughout the respawn.
+      //
+      // 6 s = spawnDetachedRespawn's 3 s sleep + 2 s heartbeat interval
+      // + 1 s slack. If the heartbeat is still missing/stale by then,
+      // pc2-node really is stopped.
+      if (userInitiatedStopInFlight) {
+        userInitiatedStopInFlight = false;
+        emitStatus('stopped');
+        return;
+      }
+      if (pendingExitStoppedTimer) {
+        clearTimeout(pendingExitStoppedTimer);
+      }
+      pendingExitStoppedTimer = setTimeout(() => {
+        pendingExitStoppedTimer = null;
+        const state = heartbeatPoller?.getLastState();
+        if (state && state.kind === 'running') {
+          // Respawn succeeded; the poller already emitted 'running'.
+          log.info('[pc2Manager] Process exited but heartbeat shows running — respawn detected, keeping status');
+          return;
+        }
+        emitStatus('stopped');
+      }, 6000);
     });
 
     // Wait for server to be ready
@@ -599,6 +845,10 @@ export async function stopPC2(): Promise<void> {
 
   return new Promise((resolve) => {
     if (pc2Process && !pc2Process.killed) {
+      // v1.2.7.13: mark this exit as user-initiated so the exit handler
+      // emits 'stopped' immediately rather than waiting 6 s for a
+      // potential respawn. (User clicked Stop — they want feedback now.)
+      userInitiatedStopInFlight = true;
       pc2Process.kill('SIGTERM');
       
       // Give it a moment to shut down gracefully
@@ -613,7 +863,26 @@ export async function stopPC2(): Promise<void> {
         resolve();
       }, 3000);
     } else {
-      // No tracked process -- kill PC2 on port 4200 but exclude our own Electron process
+      // No tracked process -- kill PC2 on port 4200 but exclude our own Electron process.
+      //
+      // v1.2.7.13: a heartbeat may still be ticking (this branch fires
+      // when the heartbeat-tracked pc2 was spawned outside our control,
+      // e.g. by a previous launcher session, or by spawnDetachedRespawn).
+      // SIGKILL doesn't give pc2-node a chance to remove the heartbeat
+      // cleanly, so the file would go stale → poller emits 'error' a few
+      // seconds after our 'stopped' emit (UX glitch). Pre-empt that by
+      // deleting the heartbeat file ourselves; the poller then transitions
+      // to 'not-running' (which doesn't emit, per heartbeatStateToStatus),
+      // and our explicit emitStatus('stopped') stands.
+      const heartbeatPath = path.join(getPC2NodeDir(), 'data', 'runtime', 'heartbeat.json');
+      try {
+        if (fs.existsSync(heartbeatPath)) {
+          fs.unlinkSync(heartbeatPath);
+        }
+      } catch {
+        /* best-effort */
+      }
+
       const selfPid = process.pid;
       if (IS_WINDOWS) {
         exec(wslCmd('fuser -k 4200/tcp 2>/dev/null || true'), () => {
