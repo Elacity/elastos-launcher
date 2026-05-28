@@ -1061,6 +1061,54 @@ async function setupNetworking(pc2Dir: string, onProgress: (msg: string) => void
     } catch (e: any) { emitLog(`sing-box install warning: ${e.message}`); }
   }
 
+  // FFmpeg — required by pc2-node's dashPackager for AV1/H.264 transcode at
+  // mint time. Without it, video minting fails with "FFmpeg not found" the
+  // moment the user uploads a video in the Creator app. start-local.sh and
+  // install-arm.sh both install it (see CONTRIBUTING.md Install Parity Rule);
+  // this block restores parity for launcher users.
+  if (!commandExists('ffmpeg')) {
+    onProgress('Installing FFmpeg (media encoder)...');
+    emitLog('Installing FFmpeg — required for video minting...');
+    try {
+      if (IS_MAC) {
+        execSync('brew install ffmpeg 2>&1', { env: shellEnv, timeout: 300000 });
+      } else {
+        await sudoExec('apt-get install -y ffmpeg');
+      }
+      if (commandExists('ffmpeg')) {
+        // libsvtav1 is included in modern ffmpeg builds and unlocks AV1
+        // encoding (smaller files, slower CPU). H.264 always works.
+        const hasAV1 = (() => {
+          try {
+            execSync('ffmpeg -encoders 2>&1 | grep -q libsvtav1', { env: shellEnv });
+            return true;
+          } catch { return false; }
+        })();
+        emitLog(`FFmpeg installed (${hasAV1 ? 'AV1 + H.264' : 'H.264 only'})`);
+      } else {
+        emitLog('FFmpeg install completed but binary not on PATH — video minting may not work');
+      }
+    } catch (e: any) { emitLog(`FFmpeg install warning: ${e.message} — video minting may not work`); }
+  }
+
+  // cmake — needed by node-datachannel's source-build fallback when no
+  // prebuild matches the user's Node ABI. Prebuilds usually cover us, but
+  // when they don't, the install dies with "OMG CMake executable is missing"
+  // and the user has to manually `brew install cmake` and retry. Same
+  // parity issue as ffmpeg: start-local.sh installs it, launcher didn't.
+  if (!commandExists('cmake')) {
+    onProgress('Installing cmake (native build dep)...');
+    emitLog('Installing cmake — fallback for native module compilation...');
+    try {
+      if (IS_MAC) {
+        execSync('brew install cmake 2>&1', { env: shellEnv, timeout: 120000 });
+      } else {
+        await sudoExec('apt-get install -y cmake');
+      }
+      if (commandExists('cmake')) emitLog('cmake installed');
+    } catch (e: any) { emitLog(`cmake install warning: ${e.message}`); }
+  }
+
   // Particle auth .env
   const particleEnv = path.join(pc2Dir, 'packages', 'particle-auth', '.env');
   if (!fs.existsSync(particleEnv)) {

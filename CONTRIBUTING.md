@@ -48,6 +48,8 @@ Before merging any change to the install scripts, verify:
 | Sudoers configs | Passwordless wg-quick/awg-quick | All |
 | Particle auth .env | Wallet integration | All |
 | Go compiler | Build AmneziaWG (if not present) | All |
+| FFmpeg | Video transcode at mint time (dashPackager) | All |
+| cmake | Fallback build dep for node-datachannel | All |
 
 ### Architecture Notes
 

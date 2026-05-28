@@ -60,6 +60,8 @@ The launcher automatically handles everything — identical to what the terminal
 - **WireGuard** - Fast encrypted tunnel for remote access via `.ela.city` domains
 - **AmneziaWG** - DPI-resistant stealth transport (built from source)
 - **sing-box 1.13.0** - VLESS Reality TCP stealth transport
+- **FFmpeg** - Media transcoder, required for video minting in the Creator app
+- **cmake** - Native build dependency for `node-datachannel` source-build fallback
 - **Sudoers configs** - Passwordless `wg-quick` and `awg-quick` for background operation
 - **Particle auth** - Wallet integration config
 
