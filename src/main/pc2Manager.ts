@@ -1314,6 +1314,15 @@ export async function installPC2(onProgress: (message: string) => void): Promise
   const nodeDir = IS_WINDOWS ? getWSLNodeDir() : getPC2NodeDir();
   
   emitLog(`Installing PC2 to ${pc2Dir}...`);
+
+  // macOS: ensure Command Line Tools (which provide `git`) exist BEFORE the
+  // first git step below. Without this, a clean Mac shows a false "Error" —
+  // `git clone` triggers Apple's CLT install dialog AND exits non-zero, the
+  // install loop rejects, and the UI flips to Error even though the tools are
+  // downloading fine in the background. ensureXcodeCommandLineTools() is
+  // idempotent (it also runs later in setupNetworking), so this is a no-op
+  // once CLT is present — and a no-op entirely on Windows/Linux.
+  await ensureXcodeCommandLineTools(onProgress);
   
   // Step 1: Ensure we have our bundled Node.js (guaranteed compatible)
   if (!hasBundledNode() && !IS_WINDOWS) {
