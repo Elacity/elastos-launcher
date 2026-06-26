@@ -4,15 +4,15 @@ const path = require("path");
 /**
  * electron-builder afterAllArtifactBuild hook.
  *
- * Submits macOS DMG/ZIP artifacts to Apple's notary service.
- * Does NOT block on --wait (Apple's in-depth analysis for new accounts
- * can exceed CI timeouts). Prints submission UUIDs for manual follow-up.
+ * Submits macOS DMG/ZIP artifacts to Apple's notary service and BLOCKS on
+ * --wait until Apple returns a verdict. A non-"Accepted" result (or any
+ * submission error, e.g. the HTTP 403 "agreement missing/expired" gate)
+ * throws and fails the build — we never want to silently publish an
+ * un-notarized release again.
  *
- * To check status later:
- *   xcrun notarytool info <UUID> --apple-id ... --team-id ... --password ...
- *
- * To staple after acceptance:
- *   xcrun stapler staple <artifact>
+ * The .dmg is stapled so Gatekeeper trusts it even offline. A .zip cannot be
+ * stapled directly; the notarized .app inside it still passes Gatekeeper's
+ * online check.
  *
  * Requires APPLE_ID, APPLE_APP_SPECIFIC_PASSWORD, APPLE_TEAM_ID env vars.
  */
@@ -36,41 +36,51 @@ module.exports = async function (context) {
     return artifacts;
   }
 
-  const submissionIds = [];
+  const creds = `--apple-id "${appleId}" --team-id "${teamId}" --password "${appPassword}"`;
 
   for (const artifactPath of artifacts) {
+    const name = path.basename(artifactPath);
+
+    // --wait blocks until Apple finishes its analysis and reports the final
+    // status. A genuine problem (expired agreement, signing fault, malware
+    // heuristic) surfaces here as a hard failure rather than a quietly
+    // un-notarized artifact. 30 min covers Apple's worst-case turnaround.
+    console.log(`[notarize] Submitting ${name} and waiting for Apple's verdict...`);
+    const out = execSync(
+      `xcrun notarytool submit "${artifactPath}" ${creds} --wait --output-format json`,
+      { encoding: "utf8", stdio: ["pipe", "pipe", "inherit"], timeout: 30 * 60 * 1000 }
+    );
+
+    let status = "";
+    let submissionId = "";
     try {
-      console.log(`[notarize] Submitting ${path.basename(artifactPath)} for notarization...`);
+      const parsed = JSON.parse(out);
+      status = (parsed.status || "").trim();
+      submissionId = parsed.id || "";
+    } catch {
+      // Fall through to the raw output for diagnostics.
+    }
+    console.log(`[notarize] ${name} → status: ${status || "unknown"}${submissionId ? ` (id: ${submissionId})` : ""}`);
 
-      const result = execSync(
-        `xcrun notarytool submit "${artifactPath}" ` +
-          `--apple-id "${appleId}" --team-id "${teamId}" --password "${appPassword}"`,
-        { encoding: "utf8", stdio: ["pipe", "pipe", "pipe"], timeout: 5 * 60 * 1000 }
-      );
-
-      const idMatch = result.match(/id:\s*([0-9a-f-]{36})/);
-      if (idMatch) {
-        submissionIds.push({ file: path.basename(artifactPath), id: idMatch[1] });
-        console.log(`[notarize] Submitted ${path.basename(artifactPath)} → UUID: ${idMatch[1]}`);
+    if (status !== "Accepted") {
+      // Surface Apple's per-issue log so a rejection is debuggable from CI.
+      if (submissionId) {
+        try {
+          console.error(execSync(`xcrun notarytool log "${submissionId}" ${creds}`, { encoding: "utf8" }));
+        } catch {
+          /* best-effort diagnostics only */
+        }
       }
-      console.log(result);
-    } catch (err) {
-      console.error(`[notarize] Submission failed for ${path.basename(artifactPath)}: ${err.message}`);
-      if (err.stdout) console.error(err.stdout);
-      if (err.stderr) console.error(err.stderr);
+      throw new Error(`[notarize] ${name} was not Accepted (status: ${status || "unknown"}); see log above.`);
+    }
+
+    // Staple the ticket into the .dmg so offline first-launch is friction-free.
+    if (artifactPath.endsWith(".dmg")) {
+      console.log(`[notarize] Stapling ${name}...`);
+      execSync(`xcrun stapler staple "${artifactPath}"`, { stdio: "inherit" });
     }
   }
 
-  if (submissionIds.length > 0) {
-    console.log("\n[notarize] ═══════════════════════════════════════════════");
-    console.log("[notarize] Submissions sent (check status manually):");
-    for (const s of submissionIds) {
-      console.log(`[notarize]   ${s.file} → ${s.id}`);
-    }
-    console.log("[notarize] Check:  xcrun notarytool info <UUID> --keychain-profile <profile>");
-    console.log("[notarize] Staple: xcrun stapler staple <artifact>");
-    console.log("[notarize] ═══════════════════════════════════════════════\n");
-  }
-
+  console.log("[notarize] ✅ All artifacts notarized by Apple; DMG stapled.");
   return artifacts;
 };
