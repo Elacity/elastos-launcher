@@ -53,15 +53,30 @@ chmod +x ElastOS-*.AppImage
 
 ## What Gets Installed
 
-The launcher automatically handles everything — identical to what the terminal install scripts (`start-local.sh` / `install-arm.sh`) provide:
+The launcher automatically handles everything — identical to what the terminal install scripts (`start-local.sh` / `install-arm.sh`) provide, with **zero terminal interaction required**:
 
+- **Xcode Command Line Tools** (macOS) - Auto-triggered via Apple's system dialog if not already present
+- **Homebrew** (macOS) - Auto-installed via a single GUI password prompt if not already present
 - **Node.js 20 LTS** - Bundled, independent of your system Node.js
 - **PC2** - Cloned and built from GitHub
 - **WireGuard** - Fast encrypted tunnel for remote access via `.ela.city` domains
 - **AmneziaWG** - DPI-resistant stealth transport (built from source)
 - **sing-box 1.13.0** - VLESS Reality TCP stealth transport
+- **FFmpeg** - Media transcoder, required for video minting in the Creator app
+- **cmake** - Native build dependency for `node-datachannel` source-build fallback
 - **Sudoers configs** - Passwordless `wg-quick` and `awg-quick` for background operation
 - **Particle auth** - Wallet integration config
+
+### Fresh macOS user experience (v1.2.9+)
+
+The first time you install PC2 on a brand-new Mac, you see exactly two interactions:
+
+1. **Apple "Install Command Line Tools?" dialog** → click **Install** (no password, ~5 minutes for Apple to download/install CLT in the background)
+2. **One macOS password prompt** ("ElastOS wants to install software") → type your Mac password, click **OK**
+
+After that, the launcher runs unattended for ~10 minutes installing Homebrew, FFmpeg, WireGuard, AmneziaWG, sing-box, and all PC2 dependencies. When it's done, PC2 is fully functional — mint videos, browse content, run VPN features — all without ever opening Terminal.
+
+If you already have Homebrew installed, the password prompt is silently skipped.
 
 On macOS, a native password dialog appears during first install for the networking tools that require admin access.
 
