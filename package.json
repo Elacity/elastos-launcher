@@ -43,8 +43,14 @@
       "category": "public.app-category.utilities",
       "icon": "resources/icon.icns",
       "target": [
-        "dmg",
-        "zip"
+        {
+          "target": "dmg",
+          "arch": "universal"
+        },
+        {
+          "target": "zip",
+          "arch": "universal"
+        }
       ],
       "hardenedRuntime": true,
       "gatekeeperAssess": false,
