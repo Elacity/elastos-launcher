@@ -1,5 +1,6 @@
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
 
@@ -65,4 +66,31 @@ test('reset refuses PC2, a live foreign host, and a misnamed stage file', async 
   assert.match(html, /id="reset-btn"/);
   assert.match(app, /resetRuntime/);
   assert.match(app, /resetCopy/);
+});
+
+test('reset refuses a symlink and a forward-slash PC2 path', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'elastos-reset-'));
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'elastos-outside-'));
+  const data = path.join(root, 'elastos');
+  fs.mkdirSync(data);
+  const link = path.join(root, 'link');
+  fs.symlinkSync(outside, link);
+  const removed = [];
+  await assert.rejects(() => resetRuntime({
+    binary: path.join(link, 'elastos'),
+    dataDir: data,
+    stageFile: path.join(root, 'install-stage.json'),
+    stop: async () => {},
+    remove: (target) => { removed.push(target); },
+  }), /symlink/);
+  assert.deepEqual(removed, []);
+
+  await assert.rejects(() => resetRuntime({
+    binary: path.join(root, 'elastos'),
+    dataDir: 'C:/Users/tester/.pc2/elastos',
+    stageFile: path.join(root, 'install-stage.json'),
+    stop: async () => { throw new Error('stop should not run'); },
+    remove: (target) => { removed.push(target); },
+  }), /PC2/);
+  assert.deepEqual(removed, []);
 });
