@@ -1,6 +1,7 @@
 import * as pc2 from './pc2Manager';
 import { applyOpenAtLogin, readOpenAtLogin } from './targets/openAtLogin';
-import { buildDiagnostics, collectPreflight, PreflightReport } from './targets/preflight';
+import { buildDiagnostics, collectPreflight, PreflightReport, saveCollectedSupportBundle } from './targets/preflight';
+import { HEALTH_URL, isHealthOk } from './targets/runtimeGateway';
 import { collectFailureFacts, failureScreen, FailureScreen, fixCollectedFailure } from './targets/runtimeRecovery';
 import { createLaunchTargetStore, LaunchTargetPreferenceStore, resolveLaunchTargetId } from './targets/preferences';
 import { createLaunchTarget } from './targets';
@@ -38,6 +39,7 @@ export interface LaunchController {
   getLaunchInfo(): Promise<LaunchInfo>;
   getPreflight(): Promise<PreflightReport>;
   getDiagnostics(): Promise<string>;
+  saveSupportBundle(): Promise<string>;
   describeFailure(): Promise<FailureScreen>;
   fixFailure(): Promise<'ready' | 'still-blocked'>;
   setOpenAtLogin(enabled: boolean): void;
@@ -132,6 +134,58 @@ export function createLaunchController(options: LaunchControllerOptions = {}): L
     return pc2Mode ? active.getStatus() : runRuntime(() => active.getStatus());
   }
 
+  async function diagnosticsText(): Promise<string> {
+    const preflight = active.id === 'runtime' ? await collectPreflight() : { ok: true, checks: [] };
+    let channel = '';
+    let pinVersion: string | null = null;
+    try {
+      const pin = loadActiveRuntimePin();
+      channel = pin.channel;
+      pinVersion = pin.version;
+    } catch {
+      channel = 'unknown';
+    }
+    const logs = pc2Mode
+      ? await active.getLogs(200)
+      : runtimeLogs.slice(-200).join('\n');
+    let status = 'unknown';
+    try {
+      status = await currentStatus();
+    } catch {
+      status = 'error';
+    }
+    let runtimeVersion = 'unknown';
+    try {
+      runtimeVersion = active.getVersion();
+    } catch {
+      runtimeVersion = 'unknown';
+    }
+    let health = 'unknown';
+    if (active.id === 'runtime') {
+      try {
+        const response = await fetch(HEALTH_URL, { signal: AbortSignal.timeout(800) });
+        const body = await response.text();
+        health = isHealthOk({ status: response.status, body }) ? 'OK' : 'not answering';
+      } catch {
+        health = 'not answering';
+      }
+    }
+    return buildDiagnostics({
+      launcherVersion: '1.4.0',
+      runtimeVersion,
+      target: active.id,
+      channel,
+      pinVersion,
+      platform: process.platform,
+      arch: process.arch,
+      status,
+      health,
+      error: lastError,
+      logs,
+      checks: preflight.checks,
+    });
+  }
+
   return {
     get target() {
       return active;
@@ -209,39 +263,8 @@ export function createLaunchController(options: LaunchControllerOptions = {}): L
       const preflight = active.id === 'runtime' ? await collectPreflight() : { ok: true, checks: [] };
       return fixCollectedFailure(collectFailureFacts(lastError, preflight.checks));
     },
-    async getDiagnostics() {
-      const preflight = active.id === 'runtime' ? await collectPreflight() : { ok: true, checks: [] };
-      let channel = '';
-      let pinVersion: string | null = null;
-      try {
-        const pin = loadActiveRuntimePin();
-        channel = pin.channel;
-        pinVersion = pin.version;
-      } catch {
-        channel = 'unknown';
-      }
-      const logs = pc2Mode
-        ? await active.getLogs(200)
-        : runtimeLogs.slice(-200).join('\n');
-      let status = 'unknown';
-      try {
-        status = await currentStatus();
-      } catch {
-        status = 'error';
-      }
-      return buildDiagnostics({
-        launcherVersion: '1.4.0',
-        target: active.id,
-        channel,
-        pinVersion,
-        platform: process.platform,
-        arch: process.arch,
-        status,
-        error: lastError,
-        logs,
-        checks: preflight.checks,
-      });
-    },
+    getDiagnostics: () => diagnosticsText(),
+    saveSupportBundle: async () => saveCollectedSupportBundle(await diagnosticsText()),
     setOpenAtLogin(enabled: boolean) {
       applyOpenAtLogin(enabled);
     },

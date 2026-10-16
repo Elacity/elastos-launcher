@@ -1,5 +1,7 @@
 import * as fs from 'fs';
 import * as net from 'net';
+import * as os from 'os';
+import * as path from 'path';
 import { HEALTH_URL } from './runtimeGateway';
 import { loadActiveRuntimePin } from './runtimePin';
 import { runtimeInstallBlock, wslKvmMessage, detectWsl } from './runtimeSupport';
@@ -63,12 +65,14 @@ export function evaluatePreflight(input: PreflightInput): PreflightReport {
 
 export function buildDiagnostics(info: {
   launcherVersion: string;
+  runtimeVersion?: string;
   target: string;
   channel: string;
   pinVersion: string | null;
   platform: string;
   arch: string;
   status: string;
+  health?: string;
   error: string;
   logs: string;
   checks: PreflightCheck[];
@@ -77,11 +81,13 @@ export function buildDiagnostics(info: {
   const body = [
     'ElastOS diagnostics',
     `launcher: ${info.launcherVersion}`,
+    `runtime: ${info.runtimeVersion || 'unknown'}`,
     `target: ${info.target}`,
     `channel: ${info.channel}`,
     `pin: ${info.pinVersion ?? 'none'}`,
     `computer: ${info.platform}/${info.arch}`,
     `status: ${info.status}`,
+    `health: ${info.health || 'unknown'}`,
     `error: ${info.error || 'none'}`,
     '',
     'checks:',
@@ -91,10 +97,56 @@ export function buildDiagnostics(info: {
     info.logs || 'none',
     '',
   ].join('\n');
-  return body
+  return scrubSupportText(body);
+}
+
+/** Drop secret-bearing lines. The bundle is meant to be pasted or emailed. */
+export function scrubSupportText(text: string): string {
+  return text
     .split('\n')
-    .filter((line) => !/attach_secret|runtime-coords\.json|gateway-runtime-coords|home-runtime-coords/i.test(line))
+    .filter((line) => !/attach_secret|runtime-coords\.json|gateway-runtime-coords|home-runtime-coords|private key|BEGIN [A-Z ]*PRIVATE KEY/i.test(line))
+    .map((line) => line
+      .replace(/bearer\s+\S+/gi, 'bearer [removed]')
+      .replace(/password\s*[:=]\s*\S+/gi, 'password [removed]'))
     .join('\n');
+}
+
+export const SUPPORT_BUNDLE_NAME = 'ElastOS-support.txt';
+
+export function supportBundlePath(homeDir: string, desktopExists: boolean): string {
+  const dir = desktopExists ? path.join(homeDir, 'Desktop') : homeDir;
+  return path.join(dir, SUPPORT_BUNDLE_NAME);
+}
+
+export function saveSupportBundle(
+  file: string,
+  text: string,
+  write: (file: string, contents: string) => void,
+): string {
+  if (path.basename(file) !== SUPPORT_BUNDLE_NAME) {
+    throw new Error('Refusing to write the support bundle under another name.');
+  }
+  const normalized = file.split(path.sep).join('/');
+  if (normalized.includes('/.pc2/') || normalized.includes('/pc2.net/') || /\/elastos\//.test(normalized)) {
+    throw new Error('Refusing to store the support bundle inside ElastOS or PC2 data.');
+  }
+  write(file, scrubSupportText(text));
+  return file;
+}
+
+export function saveCollectedSupportBundle(text: string, homeDir = os.homedir()): string {
+  const desktop = path.join(homeDir, 'Desktop');
+  let desktopExists = false;
+  try {
+    desktopExists = fs.statSync(desktop).isDirectory();
+  } catch {
+    desktopExists = false;
+  }
+  const file = supportBundlePath(homeDir, desktopExists);
+  return saveSupportBundle(file, text, (target, contents) => {
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.writeFileSync(target, contents, { mode: 0o600 });
+  });
 }
 
 export function freeBytes(dir: string): number | null {

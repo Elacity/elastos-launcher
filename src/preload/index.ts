@@ -32,6 +32,7 @@ contextBridge.exposeInMainWorld('pc2', {
   setLaunchTarget: (id: string) => ipcRenderer.invoke('pc2:setLaunchTarget', id),
   getPreflight: () => ipcRenderer.invoke('pc2:getPreflight'),
   getDiagnostics: () => ipcRenderer.invoke('pc2:getDiagnostics'),
+  saveSupportBundle: () => ipcRenderer.invoke('pc2:saveSupportBundle'),
   describeFailure: () => ipcRenderer.invoke('pc2:describeFailure'),
   fixFailure: () => ipcRenderer.invoke('pc2:fixFailure'),
   setOpenAtLogin: (enabled: boolean) => ipcRenderer.invoke('pc2:setOpenAtLogin', enabled),
@@ -92,6 +93,7 @@ declare global {
       setLaunchTarget: (id: string) => Promise<string>;
       getPreflight: () => Promise<{ ok: boolean; checks: Array<{ id: string; level: string; message: string }> }>;
       getDiagnostics: () => Promise<string>;
+      saveSupportBundle: () => Promise<string>;
       describeFailure: () => Promise<{
         kind: string;
         title: string;
