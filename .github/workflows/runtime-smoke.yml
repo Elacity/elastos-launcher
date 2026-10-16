@@ -2,9 +2,9 @@ name: Runtime smoke
 
 # Linux x64, macOS arm64, and the ElastOS WSL2 distro are required.
 # A red run fails the pull request. Each job installs the active pin
-# (canary until stable is published) or falls back to the hosted installer,
-# then checks gateway /healthz and /home/. The Windows job imports distro
-# ElastOS as WSL2. It does not skip.
+# (canary until stable is published). If that pin does not match the
+# publisher, install stops. The job then checks gateway /healthz and
+# /home/. The Windows job imports distro ElastOS as WSL2. It does not skip.
 on:
   pull_request:
   workflow_dispatch:

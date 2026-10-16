@@ -31,6 +31,16 @@ test('a missing wsl.exe fails the Windows job', () => {
   assert.match(windows, /if \(\$null -eq \$unixRaw\) \{\s*Write-Host 'wslpath did not return a Linux path\.'\s*exit 1\s*\}/);
 });
 
+test('the smoke header does not describe a fallback install', () => {
+  const script = fs.readFileSync(path.join(root, 'scripts/runtime-smoke.sh'), 'utf8');
+  const workflowHead = workflow.split('\n').slice(0, 8).join('\n');
+  const scriptHead = script.split('\n').slice(0, 8).join('\n');
+  assert.equal(/falls back/i.test(workflowHead), false);
+  assert.equal(/falls back/i.test(scriptHead), false);
+  assert.match(workflowHead, /install stops/);
+  assert.match(scriptHead, /install stops/);
+});
+
 test('the flattened smoke pin keeps the installer hash', () => {
   const script = fs.readFileSync(path.join(root, 'scripts/runtime-smoke.sh'), 'utf8');
   const match = script.match(/python3 - "\$\{raw_pin\}" "\$\{work\}\/pin\.json" <<'PY'\n([\s\S]*?)\nPY/);
