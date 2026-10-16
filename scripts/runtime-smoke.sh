@@ -2,16 +2,15 @@
 # Install a pinned ElastOS runtime, start `elastos gateway` on 127.0.0.1:8090,
 # require /healthz to be OK and /home/ to return 200, then stop the process group.
 #
-# The product pin (resources/runtime-pin.json) is channel stable and is empty
-# until a stable head is published. This script uses the testing pin
-# (resources/runtime-smoke-pin.json, canary). If that pin does not match the
-# publisher, it falls back to the stamped hosted install.sh --install-only.
+# Reads resources/runtime-pin.json. "active" selects canary or stable.
+# If that pin does not match the publisher, the script falls back to the
+# stamped hosted install.sh --install-only.
 #
 # Uses an isolated HOME so it does not touch the runner's real data dir.
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-pin_file="${ELASTOS_SMOKE_PIN:-${root}/resources/runtime-smoke-pin.json}"
+raw_pin="${ELASTOS_SMOKE_PIN:-${root}/resources/runtime-pin.json}"
 # The runtime installer rejects a data directory whose parents are group- or
 # world-writable (/tmp is). Keep the isolated home under the real user home.
 real_home="${HOME}"
@@ -53,6 +52,33 @@ cleanup() {
   exit "${status}"
 }
 trap cleanup EXIT
+
+python3 - "${raw_pin}" "${work}/pin.json" <<'PY'
+import json, sys
+pin = json.load(open(sys.argv[1]))
+if "channels" in pin:
+    name = pin["active"]
+    channel = pin["channels"][name]
+    flat = {
+        "channel": name,
+        "version": channel.get("version"),
+        "headCid": channel.get("headCid"),
+        "maintainerDid": pin.get("maintainerDid"),
+        "publisherGateway": pin.get("publisherGateway"),
+        "fallbackInstallerUrl": pin.get("fallbackInstallerUrl"),
+    }
+else:
+    flat = pin
+json.dump(flat, open(sys.argv[2], "w"))
+print(f"smoke pin channel={flat.get('channel')} version={flat.get('version')}")
+PY
+pin_file="${work}/pin.json"
+
+pc2_dir="${real_home}/.pc2"
+pc2_stamp=""
+if [[ -e "${pc2_dir}" ]]; then
+  pc2_stamp="$(stat -c %Y "${pc2_dir}" 2>/dev/null || stat -f %m "${pc2_dir}")"
+fi
 
 python3 - "${pin_file}" "${work}/pin.match" <<'PY'
 import json, sys, urllib.request
@@ -105,6 +131,26 @@ fi
 
 echo "Running elastos setup"
 "${runtime_bin}" setup </dev/null
+
+if [[ "$(uname -s)" == "Darwin" ]]; then
+  components="${HOME}/Library/Application Support/elastos/components.json"
+else
+  components="${XDG_DATA_HOME}/elastos/components.json"
+fi
+if [[ ! -f "${components}" ]]; then
+  echo "components.json missing at ${components}" >&2
+  exit 1
+fi
+echo "components.json is present"
+
+if [[ -n "${pc2_stamp}" ]]; then
+  pc2_now="$(stat -c %Y "${pc2_dir}" 2>/dev/null || stat -f %m "${pc2_dir}")"
+  if [[ "${pc2_now}" != "${pc2_stamp}" ]]; then
+    echo "PC2 directory changed during the runtime install" >&2
+    exit 1
+  fi
+  echo "PC2 directory was left unchanged"
+fi
 
 echo "Starting elastos gateway --addr 127.0.0.1:8090"
 "${runtime_bin}" gateway --addr 127.0.0.1:8090 >"${gw_log}" 2>&1 &

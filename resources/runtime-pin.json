@@ -1,9 +1,17 @@
 {
-  "channel": "stable",
-  "version": null,
-  "headCid": null,
-  "maintainerDid": "did:key:z6MkgwHd2BCWe1jHMXPiR6H1q1RFPcv1YzhMbK5G1kBarbfe",
+  "active": "canary",
   "publisherGateway": "https://elastos.elacitylabs.com",
   "fallbackInstallerUrl": "https://elastos.elacitylabs.com/install.sh",
-  "note": "Product pin. stable is published from runtime main. version and headCid stay null until a stable head exists. The smoke workflow uses resources/runtime-smoke-pin.json (canary, testing only)."
+  "maintainerDid": "did:key:z6MkgwHd2BCWe1jHMXPiR6H1q1RFPcv1YzhMbK5G1kBarbfe",
+  "channels": {
+    "stable": {
+      "version": null,
+      "headCid": null
+    },
+    "canary": {
+      "version": "0.8.0-alpha.20",
+      "headCid": "QmTAEJ8DAprsv5PbWcudofQwXrzL7ZjSgmhRmU8nqmwirf"
+    }
+  },
+  "note": "Testing pin. Change \"active\" from canary to stable when a stable head is published, and fill channels.stable in that same edit. That active field is the channel switch. Intel Mac has no signed release in this pin."
 }

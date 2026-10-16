@@ -100,10 +100,21 @@ test('forcing runtime logs the stable error and does not install PC2', async () 
       store: { get: () => undefined, set() {}, delete() {} },
     });
     controller.onLog((line) => logs.push(line));
-    await assert.rejects(() => controller.install(() => {}), /cannot install yet/);
+    const runtimeInstall = require('../dist/main/targets/runtimeInstall');
+    const originalInstall = runtimeInstall.installRuntimeOnThisComputer;
+    let runtimeInstalls = 0;
+    runtimeInstall.installRuntimeOnThisComputer = async () => {
+      runtimeInstalls += 1;
+    };
+    try {
+      await controller.install(() => {});
+    } finally {
+      runtimeInstall.installRuntimeOnThisComputer = originalInstall;
+    }
     assert.equal(installs, 0);
-    assert.match(logs.join('\n'), /cannot install yet/);
-    assert.match(await controller.getLogs(), /cannot install yet/);
+    assert.equal(runtimeInstalls, 1);
+    await assert.rejects(() => controller.start(), /cannot start yet/);
+    assert.match(logs.join('\n'), /cannot start yet/);
     assert.equal(controller.target.id, 'runtime');
 
     const stored = createLaunchController({
