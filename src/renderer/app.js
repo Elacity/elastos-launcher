@@ -31,6 +31,7 @@ const errorText = document.getElementById('error-text');
 const retryBtn = document.getElementById('retry-btn');
 const fixBtn = document.getElementById('fix-btn');
 const diagnosticsBtn = document.getElementById('diagnostics-btn');
+const supportBtn = document.getElementById('support-btn');
 const loginCheckbox = document.getElementById('login-checkbox');
 const loginRow = document.getElementById('login-row');
 const urlValue = document.getElementById('url-value');
@@ -199,7 +200,18 @@ diagnosticsBtn.addEventListener('click', async () => {
     diagnosticsBtn.textContent = 'Copied';
     setTimeout(() => { diagnosticsBtn.textContent = 'Copy diagnostics'; }, 2000);
   } catch (err) {
-    addLog(text);
+    addLog('Could not copy diagnostics.');
+  }
+});
+
+supportBtn.addEventListener('click', async () => {
+  try {
+    await window.pc2.saveSupportBundle();
+    supportBtn.textContent = 'Saved';
+    addLog('Saved ElastOS-support.txt on the Desktop, or in the home folder if there is no Desktop.');
+    setTimeout(() => { supportBtn.textContent = 'Save support bundle'; }, 2000);
+  } catch (err) {
+    showError(err && err.message ? err.message : 'Could not save the support bundle.');
   }
 });
 
