@@ -84,15 +84,29 @@ test('Windows asks once to enable Linux support and does not show a command', as
   assert.deepEqual(seen[0].args, ['--install', '--no-distribution']);
   assert.equal(seen[0].options.windowsHide, true);
 
+  const { windowsFixResult } = require('../dist/main/targets/runtimeRecovery');
   let enabled = false;
+  const enable = async () => { enabled = true; };
+  assert.equal(await windowsFixResult(enable, async () => null), 'still-blocked');
+  assert.equal(enabled, true);
+  assert.equal(await windowsFixResult(async () => {}, async () => ({ status: 200, body: 'not ok' })), 'still-blocked');
+  assert.equal(await windowsFixResult(async () => {}, async () => ({ status: 200, body: 'OK' })), 'ready');
   assert.equal(await applyFix(input, {
     recheckPort: async () => 'busy',
     recheckOnline: async () => false,
     resumeSetup: async () => { throw new Error('should not set up a download'); },
     removeLock: () => { throw new Error('should not remove a lock'); },
-    enableWindows: async () => { enabled = true; },
+    enableWindows: async () => {},
+    healthOk: async () => false,
+  }), 'still-blocked');
+  assert.equal(await applyFix(input, {
+    recheckPort: async () => 'busy',
+    recheckOnline: async () => false,
+    resumeSetup: async () => { throw new Error('should not set up a download'); },
+    removeLock: () => { throw new Error('should not remove a lock'); },
+    enableWindows: async () => {},
+    healthOk: async () => true,
   }), 'ready');
-  assert.equal(enabled, true);
 });
 
 test('a missing ElastOS distro is one Set up action, and a ready host does not ask for a command', async () => {
