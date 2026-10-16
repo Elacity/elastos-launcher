@@ -1,9 +1,10 @@
 name: Runtime smoke
 
-# Linux x64 and macOS arm64 are required. A red run fails the pull request.
-# Those two jobs install the active pin (canary until stable is published)
-# or fall back to the hosted installer, then check gateway /healthz and /home/.
-# The Windows job is still a skip until the dedicated ElastOS distro lands.
+# Linux x64, macOS arm64, and the ElastOS WSL2 distro are required.
+# A red run fails the pull request. Each job installs the active pin
+# (canary until stable is published) or falls back to the hosted installer,
+# then checks gateway /healthz and /home/. The Windows job imports distro
+# ElastOS as WSL2. It does not skip.
 on:
   pull_request:
   workflow_dispatch:
@@ -30,25 +31,12 @@ jobs:
 
   windows-wsl:
     name: smoke (windows-wsl)
-    continue-on-error: true
-    timeout-minutes: 45
-    runs-on: windows-latest
+    timeout-minutes: 60
+    runs-on: windows-2025
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Run the click path in WSL2, or skip
+      - name: Import the ElastOS WSL2 distro and require /healthz
         shell: pwsh
-        run: |
-          if (-not (Get-Command wsl -ErrorAction SilentlyContinue)) {
-            Write-Host "SMOKE_SKIPPED: wsl is not on this runner."
-            exit 0
-          }
-          wsl -e uname -a
-          if ($LASTEXITCODE -ne 0) {
-            Write-Host "SMOKE_SKIPPED: no WSL2 distro is installed. A dedicated ElastOS distro is ticket 11, not this job."
-            exit 0
-          }
-          wsl -e bash -lc "if test -e /dev/kvm; then echo 'kvm=yes'; else echo 'kvm=no — the local Browser needs /dev/kvm'; fi"
-          $unix = wsl -e wslpath -a $PWD
-          wsl -e bash -lc "cd '$unix' && bash scripts/runtime-smoke.sh"
+        run: pwsh -File scripts/windows-elastos-distro.ps1
