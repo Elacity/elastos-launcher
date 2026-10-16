@@ -30,7 +30,7 @@ fi
 
 pin_file="${root}/resources/runtime-pin.json"
 python3 - "${pin_file}" "${work}/release-head.json" "${work}/prev-head.json" "${work}/rollback.env" <<'PY'
-import json, sys, urllib.request
+import json, re, sys, urllib.request
 
 def varint(value):
     out = bytearray()
@@ -68,7 +68,7 @@ if current_doc["payload"]["version"] != "0.8.0-alpha.20":
 if current_cid != channel["headCid"]:
     sys.exit(f"publisher head {current_cid} is not the pin {channel['headCid']}")
 prev = current_doc["payload"].get("prev_head_cid") or ""
-if not prev.startswith("Qm"):
+if not re.fullmatch(r"Qm[1-9A-HJ-NP-Za-km-z]{20,}", prev):
     sys.exit("publisher release head has no previous head CID")
 prev_raw = urllib.request.urlopen(gateway + "/ipfs/" + prev, timeout=60).read()
 open(sys.argv[3], "wb").write(prev_raw)
