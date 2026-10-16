@@ -124,7 +124,14 @@ async function main() {
   }
 }
 
-main().catch((err) => {
+setTimeout(() => {
+  console.error('e2e did not finish within 22 minutes');
+  process.exit(1);
+}, 22 * 60 * 1000);
+
+main().then(() => {
+  process.exit(0);
+}).catch((err) => {
   console.error(err && err.stack ? err.stack : err);
   process.exit(1);
 });
