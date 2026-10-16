@@ -3,8 +3,7 @@
 # require /healthz to be OK and /home/ to return 200, then stop the process group.
 #
 # Reads resources/runtime-pin.json. "active" selects canary or stable.
-# If that pin does not match the publisher, the script falls back to the
-# stamped hosted install.sh --install-only.
+# If that pin does not match the publisher, install stops.
 #
 # Uses an isolated HOME so it does not touch the runner's real data dir.
 set -euo pipefail
@@ -66,6 +65,7 @@ if "channels" in pin:
         "maintainerDid": pin.get("maintainerDid"),
         "publisherGateway": pin.get("publisherGateway"),
         "fallbackInstallerUrl": pin.get("fallbackInstallerUrl"),
+        "installerSha256": pin.get("installerSha256"),
     }
 else:
     flat = pin
