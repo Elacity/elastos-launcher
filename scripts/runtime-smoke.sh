@@ -135,6 +135,7 @@ maintainer="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["m
 head_cid="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["headCid"])' "${pin_file}")"
 want_sha="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["installerSha256"])' "${pin_file}")"
 python3 "${root}/scripts/verify-release-head.py" "${work}/release-head.json" elastos.release.head.v1 "${maintainer}"
+echo "Release head signature matches the pinned maintainer"
 
 curl -fsSL --max-time 60 "${fallback}" -o "${installer}"
 if command -v sha256sum >/dev/null 2>&1; then
@@ -147,10 +148,13 @@ if [[ "${got_sha}" != "${want_sha}" ]]; then
   exit 1
 fi
 echo "install.sh SHA-256 matches the pin"
-# --install-only avoids opening a browser. The child environment cannot
-# override the head, the maintainer, or the publisher gateway.
-env -u ELASTOS_MAINTAINER_DID -u ELASTOS_PUBLISHER_GATEWAY -u ELASTOS_HEAD_CID \
-  bash "${installer}" --install-only --head-cid "${head_cid}" --maintainer-did "${maintainer}"
+# --install-only avoids opening a browser. The pinned install.sh records the
+# head from ELASTOS_HEAD_CID. That value is the pin, not whatever the caller
+# had in the environment. The maintainer and publisher gateway stay on the
+# installer's stamped trust root.
+env -u ELASTOS_MAINTAINER_DID -u ELASTOS_PUBLISHER_GATEWAY \
+  ELASTOS_HEAD_CID="${head_cid}" \
+  bash "${installer}" --install-only --maintainer-did "${maintainer}"
 
 runtime_bin="${HOME}/.local/bin/elastos"
 if [[ ! -x "${runtime_bin}" ]]; then

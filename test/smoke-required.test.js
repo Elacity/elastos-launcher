@@ -41,6 +41,16 @@ test('the smoke header does not describe a fallback install', () => {
   assert.match(scriptHead, /install stops/);
 });
 
+test('the smoke passes the pinned head the way the pinned installer accepts it', () => {
+  const script = fs.readFileSync(path.join(root, 'scripts/runtime-smoke.sh'), 'utf8');
+  assert.match(script, /Release head signature matches the pinned maintainer/);
+  assert.match(
+    script,
+    /env -u ELASTOS_MAINTAINER_DID -u ELASTOS_PUBLISHER_GATEWAY \\\n {2}ELASTOS_HEAD_CID="\$\{head_cid\}" \\\n {2}bash "\$\{installer\}" --install-only --maintainer-did "\$\{maintainer\}"/,
+  );
+  assert.equal(/--head-cid/.test(script), false);
+});
+
 test('the flattened smoke pin keeps the installer hash', () => {
   const script = fs.readFileSync(path.join(root, 'scripts/runtime-smoke.sh'), 'utf8');
   const match = script.match(/python3 - "\$\{raw_pin\}" "\$\{work\}\/pin\.json" <<'PY'\n([\s\S]*?)\nPY/);
