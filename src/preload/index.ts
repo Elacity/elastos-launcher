@@ -23,6 +23,8 @@ contextBridge.exposeInMainWorld('elastos', {
   getPreflight: () => ipcRenderer.invoke('elastos:getPreflight'),
   getDiagnostics: () => ipcRenderer.invoke('elastos:getDiagnostics'),
   saveSupportBundle: () => ipcRenderer.invoke('elastos:saveSupportBundle'),
+  describeLegacyPc2: () => ipcRenderer.invoke('elastos:describeLegacyPc2'),
+  removeLegacyPc2: (backup: boolean) => ipcRenderer.invoke('elastos:removeLegacyPc2', backup === true),
   describeFailure: () => ipcRenderer.invoke('elastos:describeFailure'),
   fixFailure: () => ipcRenderer.invoke('elastos:fixFailure'),
   setOpenAtLogin: (enabled: boolean) => ipcRenderer.invoke('elastos:setOpenAtLogin', enabled),
@@ -82,6 +84,10 @@ declare global {
       getPreflight: () => Promise<{ ok: boolean; checks: Array<{ id: string; level: string; message: string }> }>;
       getDiagnostics: () => Promise<string>;
       saveSupportBundle: () => Promise<string>;
+      describeLegacyPc2: () => Promise<{
+        items: Array<{ scope: string; path: string; label: string; bytes: number | null }>;
+      }>;
+      removeLegacyPc2: (backup: boolean) => Promise<{ ok: boolean; message: string }>;
       describeFailure: () => Promise<{
         kind: string;
         title: string;

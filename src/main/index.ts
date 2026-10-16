@@ -2,6 +2,7 @@ import { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage, shell } from 'ele
 import * as path from 'path';
 import log from 'electron-log';
 import { createDefaultLaunchController, TargetStatus } from './launchController';
+import { describeLegacyPc2OnThisComputer, removeLegacyPc2OnThisComputer, withSupportBundle } from './legacyPc2Removal';
 
 const launch = createDefaultLaunchController(process.env);
 
@@ -185,6 +186,19 @@ ipcMain.handle('elastos:getLaunchInfo', () => launch.getLaunchInfo());
 ipcMain.handle('elastos:getPreflight', () => launch.getPreflight());
 ipcMain.handle('elastos:getDiagnostics', () => launch.getDiagnostics());
 ipcMain.handle('elastos:saveSupportBundle', () => launch.saveSupportBundle());
+ipcMain.handle('elastos:describeLegacyPc2', () => ({ items: describeLegacyPc2OnThisComputer() }));
+ipcMain.handle('elastos:removeLegacyPc2', async (_event, backup: unknown) => {
+  const result = await removeLegacyPc2OnThisComputer({ backup: backup === true });
+  if (result.ok) return result;
+  let bundle = '';
+  try {
+    bundle = await launch.saveSupportBundle();
+  } catch {
+    bundle = '';
+  }
+  const message = bundle ? withSupportBundle(result.message, bundle) : result.message;
+  throw new Error(message);
+});
 ipcMain.handle('elastos:describeFailure', () => launch.describeFailure());
 ipcMain.handle('elastos:fixFailure', () => launch.fixFailure());
 ipcMain.handle('elastos:setOpenAtLogin', (_, enabled: boolean) => {

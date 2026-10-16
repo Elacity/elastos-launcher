@@ -32,9 +32,13 @@ const diagnosticsBtn = document.getElementById('diagnostics-btn');
 const supportBtn = document.getElementById('support-btn');
 const loginCheckbox = document.getElementById('login-checkbox');
 const urlValue = document.getElementById('url-value');
+const removePc2Btn = document.getElementById('remove-pc2-btn');
+const confirmBackupRow = document.getElementById('confirm-backup-row');
+const confirmBackup = document.getElementById('confirm-backup');
 
 let currentStatus = 'stopped';
 let confirmMode = 'uninstall';
+let legacyItems = [];
 let targetId = 'runtime';
 let openUrl = 'http://127.0.0.1:8090/home/';
 let busy = false;
@@ -67,6 +71,25 @@ async function showError(message) {
     if (screen.fixLabel) fixBtn.textContent = screen.fixLabel;
   } catch {
     fixBtn.classList.add('hidden');
+  }
+}
+
+function hidePc2Backup() {
+  confirmBackupRow.classList.add('hidden');
+  confirmBackup.checked = false;
+}
+
+function showLegacyPc2(items) {
+  legacyItems = Array.isArray(items) ? items : [];
+  removePc2Btn.classList.toggle('hidden', legacyItems.length === 0);
+}
+
+async function refreshLegacyPc2() {
+  try {
+    const found = await window.elastos.describeLegacyPc2();
+    showLegacyPc2(found && found.items);
+  } catch {
+    showLegacyPc2([]);
   }
 }
 
@@ -247,6 +270,7 @@ copyLogsBtn.addEventListener('click', async () => {
 resetBtn.addEventListener('click', () => {
   const copy = flow.resetCopy();
   confirmMode = 'reset';
+  hidePc2Backup();
   confirmTitle.textContent = copy.title;
   confirmBody.textContent = copy.body;
   confirmPath.textContent = 'The ElastOS program and its data folder';
@@ -256,6 +280,7 @@ resetBtn.addEventListener('click', () => {
 
 uninstallBtn.addEventListener('click', async () => {
   confirmMode = 'uninstall';
+  hidePc2Backup();
   confirmDelete.textContent = 'Delete';
   const copy = flow.confirmCopy(targetId, []);
   confirmTitle.textContent = copy.title;
@@ -264,10 +289,39 @@ uninstallBtn.addEventListener('click', async () => {
   confirmModal.classList.remove('hidden');
 });
 
+removePc2Btn.addEventListener('click', () => {
+  if (!legacyItems.length) return;
+  const copy = flow.legacyPc2Copy(legacyItems);
+  confirmMode = 'pc2';
+  confirmTitle.textContent = copy.title;
+  confirmBody.textContent = copy.body;
+  confirmPath.textContent = copy.list;
+  confirmDelete.textContent = copy.confirm;
+  const canBackup = legacyItems.some((entry) => String(entry.path).endsWith('/.pc2') || String(entry.path).endsWith('\\.pc2'));
+  confirmBackupRow.classList.toggle('hidden', !canBackup);
+  confirmBackup.checked = false;
+  confirmModal.classList.remove('hidden');
+});
+
 confirmCancel.addEventListener('click', () => confirmModal.classList.add('hidden'));
 
 confirmDelete.addEventListener('click', async () => {
   confirmModal.classList.add('hidden');
+  if (confirmMode === 'pc2') {
+    const backup = confirmBackup.checked;
+    hidePc2Backup();
+    statusText.textContent = 'Removing PC2...';
+    try {
+      const result = await window.elastos.removeLegacyPc2(backup);
+      addLog(result && result.message ? result.message : 'PC2 removed');
+      clearError();
+    } catch (err) {
+      showError(err && err.message ? err.message : 'PC2 could not be removed.');
+    }
+    await refreshLegacyPc2();
+    updateStatus(currentStatus);
+    return;
+  }
   const resetting = confirmMode === 'reset';
   statusText.textContent = resetting ? 'Resetting...' : 'Removing...';
   try {
@@ -375,6 +429,7 @@ async function refreshLaunch() {
   updateStatus(info.status || await window.elastos.getStatus());
   await refreshVersion();
   checkForUpdate();
+  await refreshLegacyPc2();
 }
 
 async function init() {
