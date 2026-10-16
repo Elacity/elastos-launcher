@@ -315,6 +315,10 @@ With no explicit id, no `ELASTOS_LAUNCH_TARGET`, and no stored preference, the c
 
 `probeRuntimeInstallation` in `src/main/targets/runtimeProbe.ts` runs only `elastos version`, and only after the platform check. Native Windows returns `unsupported-platform` without exec. `darwin/x64` is probed the same way as Apple silicon, because that runtime build is coming. A missing binary is `not-installed` and does not exec. The Electron process does not call the probe yet.
 
+`.github/workflows/runtime-smoke.yml` is non-blocking (`continue-on-error`) and runs `scripts/runtime-smoke.sh` on `ubuntu-24.04` and `macos-14`. `resources/runtime-pin.json` selects the channel with `"active"`. That field is the one-line switch from `canary` to `stable`. Canary is `0.8.0-alpha.20`. Stable stays null until a stable head is published, and an empty active channel does not become the default for new users. If the active pin does not match the publisher, the install falls back to the hosted `install.sh --install-only`. A local Linux x64 run on 2026-10-16 installed canary `0.8.0-alpha.20`, got `/healthz` `OK`, `/home/` 200, and a clean stop.
+
+The runtime contract is [Elacity/elastos-runtime PR #394](https://github.com/Elacity/elastos-runtime/pull/394) (`docs/LAUNCHER_CONTRACT.md`). Binary `~/.local/bin/elastos`. Data dir `~/Library/Application Support/elastos` on macOS and `~/.local/share/elastos` (or `$XDG_DATA_HOME/elastos`) on Linux. Lock file `{data}/host-process.lock`. A second host exits 1 with `another ElastOS host already owns`. Stop is `SIGTERM` to the gateway, then 15 seconds, then `SIGKILL`. Exit 75 means the binary was replaced and the launcher starts the gateway again. `elastos update --check` exits 0 either way; the launcher reads stdout. Intel Mac has no signed release, so the installer shows “not yet supported on Intel Macs” and does not run `install.sh`. A WSL2 distro can run the Linux build; if `/dev/kvm` is missing the launcher says the local Browser needs it.
+
 ## 5. Ticket plan
 
 Each ticket is one PR. Done means the check is green, not that the code exists.

@@ -35,6 +35,29 @@ export {
   UnsupportedRuntimePlatformError,
   unsupportedPlatformError,
 } from './runtimeProbe';
+export {
+  activeRuntimePin,
+  defaultLaunchTargetForPin,
+  loadActiveRuntimePin,
+  parseRuntimePin,
+} from './runtimePin';
+export type { ActiveRuntimePin, RuntimePinFile } from './runtimePin';
+export {
+  assertSignedInstaller,
+  installRuntime,
+  parseReleaseHead,
+  planRuntimeInstall,
+  publisherMatchesPin,
+  UNSIGNED_INSTALLER_MARKERS,
+  UnsignedInstallerError,
+} from './runtimeInstall';
+export { INTEL_MAC_MESSAGE, KVM_MESSAGE, runtimeInstallBlock, wslKvmMessage } from './runtimeSupport';
+export {
+  runtimeBinaryPath,
+  runtimeComponentsPath,
+  runtimeDataDir,
+  runtimeHostLockPath,
+} from './runtimePaths';
 export type { RuntimeProbe, RuntimeProbeRequest } from './runtimeProbe';
 export type { HealthProbe, LaunchTarget, LaunchTargetDescriptor, LaunchTargetId, TargetStatus, UpdateCheck } from './types';
 

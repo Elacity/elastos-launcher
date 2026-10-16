@@ -69,6 +69,12 @@
       "category": "Utility"
     },
     "afterAllArtifactBuild": "scripts/notarize.js",
+    "extraResources": [
+      {
+        "from": "resources/runtime-pin.json",
+        "to": "runtime-pin.json"
+      }
+    ],
     "nsis": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true

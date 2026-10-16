@@ -1,8 +1,8 @@
 name: Runtime smoke
 
 # Non-blocking. A red run does not fail the pull request.
-# Installs the testing pin (canary) or falls back to the hosted installer,
-# then checks gateway /healthz and /home/.
+# Installs the active pin (canary until stable is published) or falls back
+# to the hosted installer, then checks gateway /healthz and /home/.
 on:
   pull_request:
   workflow_dispatch:
