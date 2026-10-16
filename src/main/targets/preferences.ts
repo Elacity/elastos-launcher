@@ -1,50 +1,11 @@
-import ElectronStore from 'electron-store';
-import { defaultLaunchTargetForPin, loadActiveRuntimePin } from './runtimePin';
 import { DEFAULT_LAUNCH_TARGET, LAUNCH_TARGET_ENV, parseLaunchTargetId } from './registry';
 import { LaunchTargetId } from './types';
 
-export const LAUNCH_TARGET_STORE_KEY = 'launchTarget';
-
-export interface LaunchTargetPreferenceStore {
-  get(): string | undefined;
-  set(value: string): void;
-  delete(): void;
-}
-
-type LaunchTargetFile = {
-  launchTarget?: string;
-};
-
-/**
- * electron-store file `launch-target.json`.
- * Pass an absolute `cwd` in tests. The Electron main process omits it and
- * uses the app userData directory.
- */
-export function createLaunchTargetStore(cwd?: string): LaunchTargetPreferenceStore {
-  const store = new ElectronStore<LaunchTargetFile>({
-    name: 'launch-target',
-    ...(cwd ? { cwd } : {}),
-  });
-  return {
-    get() {
-      const value = store.get(LAUNCH_TARGET_STORE_KEY);
-      return typeof value === 'string' ? value : undefined;
-    },
-    set(value: string) {
-      store.set(LAUNCH_TARGET_STORE_KEY, value);
-    },
-    delete() {
-      store.delete(LAUNCH_TARGET_STORE_KEY);
-    },
-  };
-}
-
 export interface LaunchTargetSelection {
-  /** One-shot override. Wins over the environment and the store. */
+  /** One-shot override. Wins over the environment. */
   explicit?: string | null;
   /** Pass `process.env` from the app. Omitted means no environment override. */
   env?: NodeJS.ProcessEnv;
-  store?: LaunchTargetPreferenceStore;
 }
 
 function present(raw: string | null | undefined): string | undefined {
@@ -53,10 +14,8 @@ function present(raw: string | null | undefined): string | undefined {
 }
 
 /**
- * explicit, then ELASTOS_LAUNCH_TARGET, then the store, then the published pin.
+ * explicit, then ELASTOS_LAUNCH_TARGET, then the runtime.
  * A blank layer is skipped. An unknown non-blank value throws.
- * New users get the runtime when the active pin has a version. An empty
- * stable pin keeps PC2. A stored choice still wins over that default.
  */
 export function resolveLaunchTargetId(selection: LaunchTargetSelection = {}): LaunchTargetId {
   const explicit = present(selection.explicit);
@@ -65,12 +24,5 @@ export function resolveLaunchTargetId(selection: LaunchTargetSelection = {}): La
   const fromEnv = present(selection.env?.[LAUNCH_TARGET_ENV]);
   if (fromEnv !== undefined) return parseLaunchTargetId(fromEnv);
 
-  const stored = selection.store ? present(selection.store.get()) : undefined;
-  if (stored !== undefined) return parseLaunchTargetId(stored);
-
-  try {
-    return defaultLaunchTargetForPin(loadActiveRuntimePin(selection.env));
-  } catch {
-    return DEFAULT_LAUNCH_TARGET;
-  }
+  return DEFAULT_LAUNCH_TARGET;
 }

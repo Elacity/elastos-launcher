@@ -52,3 +52,15 @@ export function runtimeHostLockPath(dataDir: string): string {
 export function runtimeInstallStagePath(homeDir: string): string {
   return runtimeJoin(homeDir, '.elastos-launcher', 'install-stage.json');
 }
+
+const ALLOWED_DOTTED_DIRS = new Set(['.local', '.elastos-launcher']);
+
+/**
+ * A removable path may use a dotted directory only for the runtime layout
+ * (`.local` and `.elastos-launcher`). Other dotted directories stay on disk.
+ */
+export function launcherOwnedDirectories(file: string): boolean {
+  const segments = file.replace(/\\/g, '/').split('/').filter(Boolean);
+  const dirs = segments.slice(0, -1);
+  return dirs.every((segment) => !segment.includes('.') || ALLOWED_DOTTED_DIRS.has(segment));
+}

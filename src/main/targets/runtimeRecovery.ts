@@ -3,7 +3,7 @@ import * as os from 'os';
 import * as path from 'path';
 import { HEALTH_URL, isHealthOk } from './runtimeGateway';
 import { installRuntimeOnThisComputer } from './runtimeInstall';
-import { runtimeBinaryPath, runtimeComponentsPath, runtimeDataDir, runtimeHostLockPath } from './runtimePaths';
+import { launcherOwnedDirectories, runtimeBinaryPath, runtimeComponentsPath, runtimeDataDir, runtimeHostLockPath } from './runtimePaths';
 import { loadActiveRuntimePin } from './runtimePin';
 import { portBusy } from './preflight';
 
@@ -67,12 +67,8 @@ export function assertStaleLockPath(lockPath: string): void {
   if (path.basename(lockPath) !== 'host-process.lock') {
     throw new Error('Refusing to remove a file that is not the ElastOS host lock.');
   }
-  if (path.basename(path.dirname(lockPath)) !== 'elastos') {
+  if (path.basename(path.dirname(lockPath)) !== 'elastos' || !launcherOwnedDirectories(lockPath)) {
     throw new Error('Refusing to remove a lock outside the ElastOS data directory.');
-  }
-  const normalized = lockPath.split('\\').join('/');
-  if (normalized.includes('/.pc2/') || normalized.includes('/pc2.net/')) {
-    throw new Error('Refusing to remove the PC2 directory.');
   }
 }
 

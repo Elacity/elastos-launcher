@@ -95,12 +95,9 @@ function emptyToNull(value: string | null | undefined): string | null {
   return trimmed ? trimmed : null;
 }
 
-/**
- * New users follow the runtime only when the active channel has a published
- * version. An empty stable pin keeps PC2 as the default.
- */
-export function defaultLaunchTargetForPin(pin: ActiveRuntimePin): LaunchTargetId {
-  return pin.publishable ? 'runtime' : 'pc2';
+/** The launcher has one target. An unpublished pin still does not select another product. */
+export function defaultLaunchTargetForPin(_pin: ActiveRuntimePin): LaunchTargetId {
+  return 'runtime';
 }
 
 export function runtimePinCandidates(

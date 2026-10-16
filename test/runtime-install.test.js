@@ -25,7 +25,6 @@ const {
 } = require('../dist/main/targets');
 
 const HOME = '/home/tester';
-const PC2 = `${HOME}/.pc2`;
 const COMPONENTS = `${HOME}/.local/share/elastos/components.json`;
 const VERSION = '0.8.0-alpha.20';
 const CID = 'QmUmMZD3yNs4C7JvtichoZ727gN2ntXNnCDF1QTHkNKhXt';
@@ -60,7 +59,7 @@ function releaseHead() {
 
 function harness(overrides = {}) {
   const files = new Map();
-  const mtimes = new Map([[PC2, 1000]]);
+  const mtimes = new Map();
   const calls = [];
   let probes = 0;
   const deps = {
@@ -74,7 +73,6 @@ function harness(overrides = {}) {
       ELASTOS_PUBLISHER_GATEWAY: 'https://evil.example',
     },
     pin: canaryPin(),
-    pc2Dir: PC2,
     probe: async () => {
       probes += 1;
       if (probes === 1) return { kind: 'not-installed' };
@@ -129,7 +127,7 @@ test('the active field is the one-line channel switch', () => {
 
   const stable = activeRuntimePin(parseRuntimePin({ ...file, active: 'stable' }));
   assert.equal(stable.publishable, false);
-  assert.equal(defaultLaunchTargetForPin(stable), 'pc2');
+  assert.equal(defaultLaunchTargetForPin(stable), 'runtime');
 });
 
 test('data dir and host lock follow the launcher contract', () => {
@@ -216,8 +214,8 @@ test('install.sh bytes must match the pinned hash before they run', async () => 
   assert.equal(ran, false);
 });
 
-test('a matching pin installs with --install-only, then setup, and leaves PC2 alone', async () => {
-  const { deps, calls, mtimes } = harness();
+test('a matching pin installs with --install-only, then setup', async () => {
+  const { deps, calls } = harness();
   const progress = [];
   await installRuntime(deps, (message) => progress.push(message));
   const install = calls.filter((call) => call[0] === 'installer');
@@ -242,7 +240,6 @@ test('a matching pin installs with --install-only, then setup, and leaves PC2 al
   );
   assert.equal(calls.some((call) => call[0] === 'setup'), true);
   assert.equal(JSON.stringify(calls).includes('clone'), false);
-  assert.equal(mtimes.get(PC2), 1000);
   assert.match(progress.join('\n'), /about 1 minute/);
   assert.match(progress.join('\n'), /about 2 minutes/);
 });
@@ -392,16 +389,6 @@ test('a publisher mismatch does not install', async () => {
   await assert.rejects(() => installRuntime(deps, () => {}), /version/);
   assert.equal(calls.some((call) => call[0] === 'installer'), false);
   assert.equal(calls.some((call) => call[0] === 'fetch' && String(call[1]).endsWith('/install.sh')), false);
-});
-
-test('changing the PC2 directory fails the install', async () => {
-  const { deps, mtimes } = harness({
-    runInstaller: async () => {
-      mtimes.set(PC2, 2000);
-      return { stdout: '', stderr: '' };
-    },
-  });
-  await assert.rejects(() => installRuntime(deps, () => {}), /must not modify the PC2 directory/);
 });
 
 test('the pinned install.sh accepts the Install button invocation and rejects a head flag', () => {

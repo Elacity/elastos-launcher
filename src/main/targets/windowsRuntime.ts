@@ -279,7 +279,6 @@ function distroInstallDeps(): RuntimeInstallDeps {
     homeDir: DISTRO_HOME,
     env: {},
     pin,
-    pc2Dir: path.join(os.homedir(), '.pc2'),
     probe: async () => {
       const binary = '/root/.local/bin/elastos';
       const exists = runWslSync(fileArgs('exists', binary));

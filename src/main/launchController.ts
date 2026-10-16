@@ -1,11 +1,9 @@
-import * as pc2 from './pc2Manager';
 import { applyOpenAtLogin, readOpenAtLogin } from './targets/openAtLogin';
 import { buildDiagnostics, collectPreflight, PreflightReport, saveCollectedSupportBundle } from './targets/preflight';
 import { confirmInstalledGateway, HEALTH_URL, isHealthOk } from './targets/runtimeGateway';
 import { collectFailureFacts, failureScreen, FailureScreen, fixCollectedFailure, windowsFixResult } from './targets/runtimeRecovery';
-import { createLaunchTargetStore, LaunchTargetPreferenceStore, resolveLaunchTargetId } from './targets/preferences';
+import { resolveLaunchTargetId } from './targets/preferences';
 import { createLaunchTarget } from './targets';
-import { parseLaunchTargetId } from './targets/registry';
 import { setRuntimeLogSink } from './targets/runtimeGateway';
 import { loadActiveRuntimePin } from './targets/runtimePin';
 import { runtimeHeadStore } from './targets/runtimeUpdate';
@@ -14,10 +12,11 @@ import { resetRuntimeOnThisComputer } from './targets/runtimeUninstall';
 import { fixWindowsOnThisComputer } from './targets/windowsHost';
 import { LaunchTarget, LaunchTargetId, TargetStatus, UpdateCheck } from './targets/types';
 
+export type { TargetStatus };
+
 export interface LaunchControllerOptions {
   explicit?: string | null;
   env?: NodeJS.ProcessEnv;
-  store?: LaunchTargetPreferenceStore;
 }
 
 export interface LaunchController {
@@ -38,7 +37,6 @@ export interface LaunchController {
   openInBrowser(): void;
   getLogs(lines?: number): Promise<string>;
   isInstalled(): Promise<boolean>;
-  setLaunchTarget(id: string): LaunchTargetId;
   getLaunchInfo(): Promise<LaunchInfo>;
   getPreflight(): Promise<PreflightReport>;
   getDiagnostics(): Promise<string>;
@@ -65,26 +63,17 @@ function messageOf(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
-/**
- * IPC-facing supervisor. PC2 methods are the pc2Manager functions.
- * Runtime errors are logged and are not turned into a PC2 install.
- */
+/** IPC-facing supervisor for the ElastOS runtime. */
 export function createDefaultLaunchController(env: NodeJS.ProcessEnv = process.env): LaunchController {
-  return createLaunchController({
-    env,
-    store: createLaunchTargetStore(),
-  });
+  return createLaunchController({ env });
 }
 
 export function createLaunchController(options: LaunchControllerOptions = {}): LaunchController {
   const id = resolveLaunchTargetId({
     explicit: options.explicit,
     env: options.env,
-    store: options.store,
   });
-  let active = createLaunchTarget(id);
-  let pc2Mode = id === 'pc2';
-  let pc2Subscribed = false;
+  const active = createLaunchTarget(id);
   let lastError = '';
   const statusListeners: Array<(status: TargetStatus) => void> = [];
   const logListeners: Array<(line: string) => void> = [];
@@ -98,18 +87,7 @@ export function createLaunchController(options: LaunchControllerOptions = {}): L
     for (const listener of logListeners) listener(line);
   };
 
-  function attachTarget(): void {
-    if (pc2Mode) {
-      if (!pc2Subscribed) {
-        pc2.onStatusChange(emitStatus);
-        pc2.onLog(emitLog);
-        pc2Subscribed = true;
-      }
-      return;
-    }
-    setRuntimeLogSink(emitLog);
-  }
-  attachTarget();
+  setRuntimeLogSink(emitLog);
 
   async function runRuntime<T>(action: () => Promise<T>): Promise<T> {
     try {
@@ -134,11 +112,11 @@ export function createLaunchController(options: LaunchControllerOptions = {}): L
   }
 
   async function currentStatus(): Promise<TargetStatus> {
-    return pc2Mode ? active.getStatus() : runRuntime(() => active.getStatus());
+    return runRuntime(() => active.getStatus());
   }
 
   async function diagnosticsText(): Promise<string> {
-    const preflight = active.id === 'runtime' ? await collectPreflight() : { ok: true, checks: [] };
+    const preflight = await collectPreflight();
     let channel = '';
     let pinVersion: string | null = null;
     try {
@@ -148,9 +126,7 @@ export function createLaunchController(options: LaunchControllerOptions = {}): L
     } catch {
       channel = 'unknown';
     }
-    const logs = pc2Mode
-      ? await active.getLogs(200)
-      : runtimeLogs.slice(-200).join('\n');
+    const logs = runtimeLogs.slice(-200).join('\n');
     let status = 'unknown';
     try {
       status = await currentStatus();
@@ -164,14 +140,12 @@ export function createLaunchController(options: LaunchControllerOptions = {}): L
       runtimeVersion = 'unknown';
     }
     let health = 'unknown';
-    if (active.id === 'runtime') {
-      try {
-        const response = await fetch(HEALTH_URL, { signal: AbortSignal.timeout(800) });
-        const body = await response.text();
-        health = isHealthOk({ status: response.status, body }) ? 'OK' : 'not answering';
-      } catch {
-        health = 'not answering';
-      }
+    try {
+      const response = await fetch(HEALTH_URL, { signal: AbortSignal.timeout(800) });
+      const body = await response.text();
+      health = isHealthOk({ status: response.status, body }) ? 'OK' : 'not answering';
+    } catch {
+      health = 'not answering';
     }
     return buildDiagnostics({
       launcherVersion: '1.4.0',
@@ -200,44 +174,24 @@ export function createLaunchController(options: LaunchControllerOptions = {}): L
       logListeners.push(listener);
     },
     getStatus: () => currentStatus(),
-    start: () => (pc2Mode ? active.start() : runRuntime(() => active.start())),
-    stop: () => (pc2Mode ? active.stop() : runRuntime(() => active.stop())),
-    restart: () => (pc2Mode ? active.restart() : runRuntime(() => active.restart())),
-    install: (onProgress) => (pc2Mode ? active.install(onProgress) : runRuntime(() => active.install(onProgress))),
-    update: (onProgress) => (pc2Mode ? active.update(onProgress) : runRuntime(() => active.update(onProgress))),
-    uninstall: () => (pc2Mode ? active.uninstall() : runRuntime(() => active.uninstall())),
-    resetRuntime: () => (pc2Mode
-      ? Promise.reject(new Error('Reset is for ElastOS.'))
-      : runRuntime(() => resetRuntimeOnThisComputer(() => active.stop()))),
-    rollback: (onProgress) => (
-      pc2Mode
-        ? Promise.reject(new Error('PC2 does not roll back through the runtime.'))
-        : runRuntime(() => rollbackRuntimeUpdate(onProgress))
-    ),
-    getVersion: () => (pc2Mode ? active.getVersion() : runRuntimeSync(() => active.getVersion())),
-    checkForUpdate: () => (pc2Mode ? active.checkForUpdate() : runRuntime(() => active.checkForUpdate())),
+    start: () => runRuntime(() => active.start()),
+    stop: () => runRuntime(() => active.stop()),
+    restart: () => runRuntime(() => active.restart()),
+    install: (onProgress) => runRuntime(() => active.install(onProgress)),
+    update: (onProgress) => runRuntime(() => active.update(onProgress)),
+    uninstall: () => runRuntime(() => active.uninstall()),
+    resetRuntime: () => runRuntime(() => resetRuntimeOnThisComputer(() => active.stop())),
+    rollback: (onProgress) => runRuntime(() => rollbackRuntimeUpdate(onProgress)),
+    getVersion: () => runRuntimeSync(() => active.getVersion()),
+    checkForUpdate: () => runRuntime(() => active.checkForUpdate()),
     openInBrowser: () => {
-      if (pc2Mode) {
-        active.openInBrowser();
-        return;
-      }
       runRuntimeSync(() => active.openInBrowser());
     },
     getLogs: (lines) => {
-      if (pc2Mode) return active.getLogs(lines);
       const count = lines ?? runtimeLogs.length;
       return Promise.resolve(runtimeLogs.slice(-count).join('\n'));
     },
-    isInstalled: () => (pc2Mode ? active.isInstalled() : runRuntime(() => active.isInstalled())),
-    setLaunchTarget(raw: string) {
-      const next = parseLaunchTargetId(raw);
-      options.store?.set(next);
-      active = createLaunchTarget(next);
-      pc2Mode = next === 'pc2';
-      lastError = '';
-      attachTarget();
-      return next;
-    },
+    isInstalled: () => runRuntime(() => active.isInstalled()),
     async getLaunchInfo() {
       let status: TargetStatus = 'stopped';
       try {
@@ -245,9 +199,7 @@ export function createLaunchController(options: LaunchControllerOptions = {}): L
       } catch {
         status = 'error';
       }
-      const preflight = active.id === 'runtime'
-        ? await collectPreflight()
-        : { ok: true, checks: [] };
+      const preflight = await collectPreflight();
       const platform = preflight.checks.find((check) => check.id === 'platform' && check.level === 'block');
       return {
         id: active.id,
@@ -257,16 +209,16 @@ export function createLaunchController(options: LaunchControllerOptions = {}): L
         platformNote: platform?.message ?? null,
         preflight,
         openAtLogin: readOpenAtLogin(),
-        canRollback: active.id === 'runtime' && Boolean(runtimeHeadStore().get()),
+        canRollback: Boolean(runtimeHeadStore().get()),
       };
     },
     getPreflight: () => collectPreflight(),
     async describeFailure() {
-      const preflight = active.id === 'runtime' ? await collectPreflight() : { ok: true, checks: [] };
+      const preflight = await collectPreflight();
       return failureScreen(collectFailureFacts(lastError, preflight.checks));
     },
     async fixFailure() {
-      const preflight = active.id === 'runtime' ? await collectPreflight() : { ok: true, checks: [] };
+      const preflight = await collectPreflight();
       const facts = collectFailureFacts(lastError, preflight.checks);
       if (failureScreen(facts).kind === 'windows') {
         return windowsFixResult(
@@ -293,10 +245,7 @@ export function createLaunchController(options: LaunchControllerOptions = {}): L
       return readOpenAtLogin();
     },
     shutdown() {
-      pc2.shutdownHeartbeatPoller();
-      if (!pc2Mode) {
-        void active.stop().catch(() => {});
-      }
+      void active.stop().catch(() => {});
     },
   };
 }

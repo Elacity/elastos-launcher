@@ -21,13 +21,6 @@
     <div class="unit">
       <p class="first-run" id="first-run"></p>
       <div class="note hidden" id="platform-note"></div>
-      <label class="target-row">
-        <span class="info-label">Computer</span>
-        <select id="target-select" class="env-dropdown">
-          <option value="runtime">ElastOS</option>
-          <option value="pc2">PC2.net (older)</option>
-        </select>
-      </label>
       <ol class="steps hidden" id="steps"></ol>
       <div class="error-box hidden" id="error-box">
         <h3 id="error-title">ElastOS needs attention</h3>
@@ -141,8 +134,8 @@
             </svg>
           </div>
           <h3 id="confirm-title">Uninstall ElastOS?</h3>
-          <p id="confirm-body">This removes ElastOS from this computer. It does not delete PC2.</p>
-          <p class="confirm-path" id="confirm-path">~/.pc2</p>
+          <p id="confirm-body">This removes the ElastOS program and its data from this computer.</p>
+          <p class="confirm-path" id="confirm-path">The ElastOS program and its data folder</p>
           <p class="confirm-warning">This action cannot be undone!</p>
           <div class="confirm-buttons">
             <button class="confirm-btn cancel" id="confirm-cancel">Cancel</button>
@@ -158,13 +151,6 @@
         <input type="checkbox" id="login-checkbox">
         <span>Open ElastOS when I sign in</span>
       </label>
-      <div class="env-selector" id="location-row">
-        <span class="env-label">Location</span>
-        <select id="env-select" class="env-dropdown">
-          <option value="default">~/.pc2</option>
-          <option value="dev">~/pc2.net</option>
-        </select>
-      </div>
       <div class="brand-section">
         <span class="presented-by">Presented by</span>
         <img src="elacity-labs-logo.svg" alt="Elacity Labs" class="brand-logo">

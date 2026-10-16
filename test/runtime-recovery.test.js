@@ -137,10 +137,10 @@ test('a stale host lock is removed and a live one is left alone', async () => {
   assert.equal(await applyFix(live, untouched), 'still-blocked');
   assert.deepEqual(untouched.calls, []);
 
-  const pc2 = path.join('/home/tester/.pc2/elastos', 'host-process.lock');
+  const foreign = path.join('/home/tester/.other/elastos', 'host-process.lock');
   await assert.rejects(
-    () => applyFix(facts({ lockText: LOCK_TEXT, lockPath: pc2, pidAlive: () => false }), deps()),
-    /PC2/,
+    () => applyFix(facts({ lockText: LOCK_TEXT, lockPath: foreign, pidAlive: () => false }), deps()),
+    /ElastOS data directory/,
   );
   assert.throws(
     () => assertStaleLockPath(path.join('/home/tester/.local/share/elastos', 'sources.json')),

@@ -1,73 +1,60 @@
 import { contextBridge, ipcRenderer } from 'electron';
 
-export type PC2Status = 'running' | 'stopped' | 'starting' | 'stopping' | 'error' | 'not-installed';
+export type RuntimeStatus = 'running' | 'stopped' | 'starting' | 'stopping' | 'error' | 'not-installed';
 
-// Expose protected methods to renderer
-contextBridge.exposeInMainWorld('pc2', {
-  // Commands
-  start: () => ipcRenderer.invoke('pc2:start'),
-  stop: () => ipcRenderer.invoke('pc2:stop'),
-  restart: () => ipcRenderer.invoke('pc2:restart'),
-  openBrowser: () => ipcRenderer.invoke('pc2:openBrowser'),
-  install: () => ipcRenderer.invoke('pc2:install'),
-  uninstall: () => ipcRenderer.invoke('pc2:uninstall'),
-  resetRuntime: () => ipcRenderer.invoke('pc2:resetRuntime'),
-  
-  // Environment
-  setEnvironment: (env: string, customPath?: string) => ipcRenderer.invoke('pc2:setEnvironment', env, customPath),
-  getEnvironment: () => ipcRenderer.invoke('pc2:getEnvironment'),
-  
-  // Queries
-  getStatus: () => ipcRenderer.invoke('pc2:getStatus'),
-  getLogs: (lines: number) => ipcRenderer.invoke('pc2:getLogs', lines),
-  isInstalled: () => ipcRenderer.invoke('pc2:isInstalled'),
-  getLanURL: () => ipcRenderer.invoke('pc2:getLanURL'),
-  getQRCode: () => ipcRenderer.invoke('pc2:getQRCode'),
+contextBridge.exposeInMainWorld('elastos', {
+  start: () => ipcRenderer.invoke('elastos:start'),
+  stop: () => ipcRenderer.invoke('elastos:stop'),
+  restart: () => ipcRenderer.invoke('elastos:restart'),
+  openBrowser: () => ipcRenderer.invoke('elastos:openBrowser'),
+  install: () => ipcRenderer.invoke('elastos:install'),
+  uninstall: () => ipcRenderer.invoke('elastos:uninstall'),
+  resetRuntime: () => ipcRenderer.invoke('elastos:resetRuntime'),
 
-  // Version and updates
-  getVersion: () => ipcRenderer.invoke('pc2:getVersion'),
-  checkForUpdate: () => ipcRenderer.invoke('pc2:checkForUpdate'),
-  update: () => ipcRenderer.invoke('pc2:update'),
-  rollback: () => ipcRenderer.invoke('pc2:rollback'),
-  getLaunchInfo: () => ipcRenderer.invoke('pc2:getLaunchInfo'),
-  setLaunchTarget: (id: string) => ipcRenderer.invoke('pc2:setLaunchTarget', id),
-  getPreflight: () => ipcRenderer.invoke('pc2:getPreflight'),
-  getDiagnostics: () => ipcRenderer.invoke('pc2:getDiagnostics'),
-  saveSupportBundle: () => ipcRenderer.invoke('pc2:saveSupportBundle'),
-  describeFailure: () => ipcRenderer.invoke('pc2:describeFailure'),
-  fixFailure: () => ipcRenderer.invoke('pc2:fixFailure'),
-  setOpenAtLogin: (enabled: boolean) => ipcRenderer.invoke('pc2:setOpenAtLogin', enabled),
-  
-  // Event listeners
-  onStatus: (callback: (status: PC2Status) => void) => {
-    const listener = (_event: Electron.IpcRendererEvent, status: PC2Status) => callback(status);
-    ipcRenderer.on('pc2:status', listener);
-    return () => ipcRenderer.removeListener('pc2:status', listener);
+  getStatus: () => ipcRenderer.invoke('elastos:getStatus'),
+  getLogs: (lines: number) => ipcRenderer.invoke('elastos:getLogs', lines),
+  isInstalled: () => ipcRenderer.invoke('elastos:isInstalled'),
+
+  getVersion: () => ipcRenderer.invoke('elastos:getVersion'),
+  checkForUpdate: () => ipcRenderer.invoke('elastos:checkForUpdate'),
+  update: () => ipcRenderer.invoke('elastos:update'),
+  rollback: () => ipcRenderer.invoke('elastos:rollback'),
+  getLaunchInfo: () => ipcRenderer.invoke('elastos:getLaunchInfo'),
+  getPreflight: () => ipcRenderer.invoke('elastos:getPreflight'),
+  getDiagnostics: () => ipcRenderer.invoke('elastos:getDiagnostics'),
+  saveSupportBundle: () => ipcRenderer.invoke('elastos:saveSupportBundle'),
+  describeFailure: () => ipcRenderer.invoke('elastos:describeFailure'),
+  fixFailure: () => ipcRenderer.invoke('elastos:fixFailure'),
+  setOpenAtLogin: (enabled: boolean) => ipcRenderer.invoke('elastos:setOpenAtLogin', enabled),
+
+  onStatus: (callback: (status: RuntimeStatus) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, status: RuntimeStatus) => callback(status);
+    ipcRenderer.on('elastos:status', listener);
+    return () => ipcRenderer.removeListener('elastos:status', listener);
   },
-  
+
   onLog: (callback: (log: string) => void) => {
     const listener = (_event: Electron.IpcRendererEvent, log: string) => callback(log);
-    ipcRenderer.on('pc2:log', listener);
-    return () => ipcRenderer.removeListener('pc2:log', listener);
+    ipcRenderer.on('elastos:log', listener);
+    return () => ipcRenderer.removeListener('elastos:log', listener);
   },
-  
+
   onInstallProgress: (callback: (message: string) => void) => {
     const listener = (_event: Electron.IpcRendererEvent, message: string) => callback(message);
-    ipcRenderer.on('pc2:installProgress', listener);
-    return () => ipcRenderer.removeListener('pc2:installProgress', listener);
+    ipcRenderer.on('elastos:installProgress', listener);
+    return () => ipcRenderer.removeListener('elastos:installProgress', listener);
   },
 
   onUpdateProgress: (callback: (message: string) => void) => {
     const listener = (_event: Electron.IpcRendererEvent, message: string) => callback(message);
-    ipcRenderer.on('pc2:updateProgress', listener);
-    return () => ipcRenderer.removeListener('pc2:updateProgress', listener);
+    ipcRenderer.on('elastos:updateProgress', listener);
+    return () => ipcRenderer.removeListener('elastos:updateProgress', listener);
   }
 });
 
-// Type declaration for renderer
 declare global {
   interface Window {
-    pc2: {
+    elastos: {
       start: () => Promise<void>;
       stop: () => Promise<void>;
       restart: () => Promise<void>;
@@ -75,7 +62,7 @@ declare global {
       install: () => Promise<void>;
       uninstall: () => Promise<void>;
       resetRuntime: () => Promise<void>;
-      getStatus: () => Promise<PC2Status>;
+      getStatus: () => Promise<RuntimeStatus>;
       getLogs: (lines: number) => Promise<string>;
       isInstalled: () => Promise<boolean>;
       getVersion: () => Promise<string>;
@@ -86,13 +73,12 @@ declare global {
         id: string;
         displayName: string;
         openUrl: string;
-        status: PC2Status;
+        status: RuntimeStatus;
         platformNote: string | null;
         preflight: { ok: boolean; checks: Array<{ id: string; level: string; message: string }> };
         openAtLogin: boolean;
         canRollback: boolean;
       }>;
-      setLaunchTarget: (id: string) => Promise<string>;
       getPreflight: () => Promise<{ ok: boolean; checks: Array<{ id: string; level: string; message: string }> }>;
       getDiagnostics: () => Promise<string>;
       saveSupportBundle: () => Promise<string>;
@@ -105,7 +91,7 @@ declare global {
       }>;
       fixFailure: () => Promise<'ready' | 'still-blocked'>;
       setOpenAtLogin: (enabled: boolean) => Promise<boolean>;
-      onStatus: (callback: (status: PC2Status) => void) => () => void;
+      onStatus: (callback: (status: RuntimeStatus) => void) => () => void;
       onLog: (callback: (log: string) => void) => () => void;
       onInstallProgress: (callback: (message: string) => void) => () => void;
       onUpdateProgress: (callback: (message: string) => void) => () => void;

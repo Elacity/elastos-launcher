@@ -1,37 +1,12 @@
 import { LaunchTargetDescriptor } from './types';
 
 /**
- * Facts taken from the running launcher (src/main/pc2Manager.ts).
- * Port 4200 and /health are hardcoded there today.
- */
-export const PC2_TARGET: LaunchTargetDescriptor = {
-  id: 'pc2',
-  displayName: 'PC2.net',
-  implemented: true,
-  installDir: '~/.pc2',
-  binary: '~/.pc2/pc2-node/dist/index.js',
-  startArgs: ['dist/index.js'],
-  health: {
-    url: 'http://localhost:4200/health',
-    expectBodyIncludes: '',
-  },
-  openUrl: 'http://localhost:4200',
-  platforms: [
-    { platform: 'darwin', arch: 'arm64' },
-    { platform: 'darwin', arch: 'x64' },
-    { platform: 'linux', arch: 'x64' },
-    { platform: 'linux', arch: 'arm64' },
-    { platform: 'win32', arch: 'x64' },
-  ],
-};
-
-/**
- * Facts taken from elastos-runtime as of workspace 0.7.1 / main.
+ * Facts taken from elastos-runtime.
  * `elastos gateway` is the supervised entry: `elastos home --browser`
- * also opens the system browser itself (gateway_entry.rs).
- * Health is GET /healthz → "OK" on the gateway, not PC2's /health.
+ * also opens the system browser itself.
+ * Health is GET /healthz → "OK" on the gateway.
  * darwin/x64 is included because a runtime build for Intel Mac is planned.
- * Native win32 is absent: Windows uses a WSL2 distro (ticket 11).
+ * Native win32 is absent: Windows uses a WSL2 distro.
  */
 export const RUNTIME_TARGET: LaunchTargetDescriptor = {
   id: 'runtime',
