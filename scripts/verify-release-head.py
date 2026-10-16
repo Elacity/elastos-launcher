@@ -128,9 +128,38 @@ def verify_envelope(json_file, domain, expected_did):
     verify_ed25519(decode_did_key(signer), digest, bytes.fromhex(signature))
 
 
+def _varint(value):
+    out = bytearray()
+    while True:
+        byte = value & 0x7F
+        value >>= 7
+        if value:
+            out.append(byte | 0x80)
+        else:
+            out.append(byte)
+            return bytes(out)
+
+
+def release_head_cid(data):
+    """CIDv0 of a UnixFS file, matching Kubo's default ipfs add of release-head.json."""
+    unixfs = bytes([0x08, 0x02]) + bytes([0x12]) + _varint(len(data)) + data + bytes([0x18]) + _varint(len(data))
+    dag = bytes([0x0A]) + _varint(len(unixfs)) + unixfs
+    digest = hashlib.sha256(dag).digest()
+    number = int.from_bytes(b"\x12\x20" + digest, "big")
+    alphabet = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+    encoded = ""
+    while number:
+        number, digit = divmod(number, 58)
+        encoded = alphabet[digit] + encoded
+    return encoded
+
+
 if __name__ == "__main__":
     try:
-        verify_envelope(*sys.argv[1:])
+        if len(sys.argv) == 3 and sys.argv[1] == "--cid":
+            print(release_head_cid(open(sys.argv[2], "rb").read()))
+        else:
+            verify_envelope(*sys.argv[1:])
     except (ValueError, TypeError, KeyError, OSError, AttributeError) as error:
         print("Signature verification failed: " + str(error), file=sys.stderr)
         sys.exit(1)

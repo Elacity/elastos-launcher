@@ -9,6 +9,7 @@ import {
   runtimeComponentsPath,
   runtimeDataDir,
   runtimeInstallStagePath,
+  runtimeSourcesPath,
 } from './runtimePaths';
 import { probeRuntimeInstallation, RuntimeProbe, RuntimeProbeRequest } from './runtimeProbe';
 import { runtimeInstallBlock } from './runtimeSupport';
@@ -18,6 +19,15 @@ export interface ReleaseHead {
   version: string;
   latestReleaseCid: string;
   signerDid: string;
+  /** CID of the release-head bytes. Not latest_release_cid. */
+  headCid: string;
+}
+
+/** `elastos version` prints `ElastOS Runtime v<version>`. Prefixes do not count. */
+export function installedVersionMatches(reported: string | null, pinVersion: string | null): boolean {
+  if (!reported || !pinVersion) return false;
+  const line = reported.trim();
+  return line === pinVersion || line === `ElastOS Runtime v${pinVersion}`;
 }
 
 export function parseReleaseHead(body: string): ReleaseHead {
@@ -36,15 +46,12 @@ export function parseReleaseHead(body: string): ReleaseHead {
     version: String(payload.version ?? ''),
     latestReleaseCid: String(payload.latest_release_cid ?? ''),
     signerDid: String(json.signer_did ?? payload.signer_did ?? ''),
+    headCid: '',
   };
 }
 
 export function publisherMatchesPin(pin: ActiveRuntimePin, head: ReleaseHead | null): boolean {
-  if (!head || !pin.publishable || !pin.version || !pin.headCid) return false;
-  return head.channel === pin.channel
-    && head.version === pin.version
-    && head.latestReleaseCid === pin.headCid
-    && head.signerDid === pin.maintainerDid;
+  return pinMismatchField(pin, head) === null;
 }
 
 export class PinMismatchError extends Error {
@@ -66,7 +73,7 @@ export function pinMismatchField(pin: ActiveRuntimePin, head: ReleaseHead | null
   if (!head) return 'release-head';
   if (head.channel !== pin.channel) return 'channel';
   if (head.version !== pin.version) return 'version';
-  if (head.latestReleaseCid !== pin.headCid) return 'headCid';
+  if (!head.headCid || head.headCid !== pin.headCid) return 'headCid';
   if (head.signerDid !== pin.maintainerDid) return 'signerDid';
   return null;
 }
@@ -83,17 +90,17 @@ export function planRuntimeInstall(input: {
   platform: string;
   arch: string;
   installedVersion: string | null;
+  installedHeadCid: string | null;
   componentsPresent: boolean;
   pin: ActiveRuntimePin;
   publisher: ReleaseHead | null;
 }): InstallPlan {
   const blocked = runtimeInstallBlock(input.platform, input.arch);
   if (blocked) return { action: 'blocked', message: blocked };
-  const versionOk = Boolean(
-    input.pin.version && input.installedVersion && input.installedVersion.includes(input.pin.version),
-  );
-  if (versionOk && input.componentsPresent) return { action: 'already-installed' };
-  if (versionOk && !input.componentsPresent) return { action: 'resume-setup' };
+  const versionOk = installedVersionMatches(input.installedVersion, input.pin.version);
+  const headOk = Boolean(input.pin.headCid && input.installedHeadCid === input.pin.headCid);
+  if (versionOk && headOk && input.componentsPresent) return { action: 'already-installed' };
+  if (versionOk && headOk && !input.componentsPresent) return { action: 'resume-setup' };
   // No publisher yet. This is not permission to install.
   if (input.publisher === null && input.pin.publishable) return { action: 'unchecked' };
   const field = pinMismatchField(input.pin, input.publisher);
@@ -156,6 +163,7 @@ export async function installRuntime(
       platform: deps.platform,
       arch: deps.arch,
       installedVersion: probed,
+      installedHeadCid: readInstalledHeadCid(deps),
       componentsPresent: deps.exists(components),
       pin: deps.pin,
       publisher: null,
@@ -188,6 +196,7 @@ export async function installRuntime(
       platform: deps.platform,
       arch: deps.arch,
       installedVersion: probed,
+      installedHeadCid: readInstalledHeadCid(deps),
       componentsPresent: deps.exists(components),
       pin: deps.pin,
       publisher,
@@ -199,10 +208,11 @@ export async function installRuntime(
 
     await runInstallerStep(deps, onProgress);
     const installed = await probeInstalled(deps);
-    if (!deps.pin.version || !installed?.includes(deps.pin.version)) {
-      throw new Error(
-        `Installed ElastOS does not match the pinned release ${deps.pin.version ?? ''}.`,
-      );
+    if (!installedVersionMatches(installed, deps.pin.version)) {
+      throw new PinMismatchError('version');
+    }
+    if (readInstalledHeadCid(deps) !== deps.pin.headCid) {
+      throw new PinMismatchError('headCid');
     }
 
     if (!deps.exists(components)) {
@@ -214,6 +224,22 @@ export async function installRuntime(
   } catch (err) {
     assertPc2Untouched(deps, pc2Before);
     throw err;
+  }
+}
+
+function readInstalledHeadCid(deps: RuntimeInstallDeps): string | null {
+  const file = runtimeSourcesPath(runtimeDataDir(deps.platform, deps.homeDir, deps.env));
+  if (!deps.exists(file)) return null;
+  try {
+    const parsed = JSON.parse(deps.readFile(file)) as {
+      default_source?: string;
+      sources?: Array<{ name?: string; head_cid?: string }>;
+    };
+    const sources = parsed.sources ?? [];
+    const named = sources.find((source) => source.name === parsed.default_source) ?? sources[0];
+    return typeof named?.head_cid === 'string' && named.head_cid ? named.head_cid : null;
+  } catch {
+    return null;
   }
 }
 

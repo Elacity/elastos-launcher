@@ -32,6 +32,7 @@ export function verifyReleaseHead(text: string, expectedDid: string): {
   version: string;
   latestReleaseCid: string;
   signerDid: string;
+  headCid: string;
 } {
   let envelope: unknown;
   try {
@@ -71,7 +72,66 @@ export function verifyReleaseHead(text: string, expectedDid: string): {
     version: typeof body.version === 'string' ? body.version : '',
     latestReleaseCid: typeof body.latest_release_cid === 'string' ? body.latest_release_cid : '',
     signerDid: signer,
+    headCid: releaseHeadCid(text),
   };
+}
+
+/**
+ * CIDv0 of the release-head bytes, the value publish-release.sh stores as HEAD_CID.
+ * Kubo's default add wraps the file in a UnixFS dag-pb node. This is not
+ * latest_release_cid, which is the CID of release.json.
+ */
+export function releaseHeadCid(text: string): string {
+  return unixfsCidV0(Buffer.from(text, 'utf8'));
+}
+
+function unixfsCidV0(data: Buffer): string {
+  const unixfs = Buffer.concat([
+    varintField(1, 2),
+    bytesField(2, data),
+    varintField(3, data.length),
+  ]);
+  const dag = bytesField(1, unixfs);
+  const multihash = Buffer.concat([Buffer.from([0x12, 0x20]), createHash('sha256').update(dag).digest()]);
+  return base58(multihash);
+}
+
+function varintField(field: number, value: number): Buffer {
+  return Buffer.concat([Buffer.from([(field << 3) | 0]), varint(value)]);
+}
+
+function bytesField(field: number, data: Buffer): Buffer {
+  return Buffer.concat([Buffer.from([(field << 3) | 2]), varint(data.length), data]);
+}
+
+function varint(value: number): Buffer {
+  const out: number[] = [];
+  let rest = value;
+  for (;;) {
+    const byte = rest & 0x7f;
+    rest = Math.floor(rest / 128);
+    if (rest) out.push(byte | 0x80);
+    else {
+      out.push(byte);
+      return Buffer.from(out);
+    }
+  }
+}
+
+function base58(bytes: Buffer): string {
+  let number = 0n;
+  for (const byte of bytes) number = number * 256n + BigInt(byte);
+  let out = '';
+  while (number > 0n) {
+    const digit = number % 58n;
+    number /= 58n;
+    out = BASE58[Number(digit)] + out;
+  }
+  for (const byte of bytes) {
+    if (byte !== 0) break;
+    out = `1${out}`;
+  }
+  return out;
 }
 
 /** Compact sorted JSON, matching the publisher's json.dumps(sort_keys=True, separators). */

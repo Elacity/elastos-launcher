@@ -13,8 +13,10 @@ const {
   activeRuntimePin,
   defaultLaunchTargetForPin,
   installRuntime,
+  installedVersionMatches,
   installerChildEnv,
   parseRuntimePin,
+  releaseHeadCid,
   planRuntimeInstall,
   runtimeDataDir,
   runtimeHostLockPath,
@@ -26,7 +28,8 @@ const HOME = '/home/tester';
 const PC2 = `${HOME}/.pc2`;
 const COMPONENTS = `${HOME}/.local/share/elastos/components.json`;
 const VERSION = '0.8.0-alpha.20';
-const CID = 'QmTAEJ8DAprsv5PbWcudofQwXrzL7ZjSgmhRmU8nqmwirf';
+const CID = 'QmUmMZD3yNs4C7JvtichoZ727gN2ntXNnCDF1QTHkNKhXt';
+const RELEASE_CID = 'QmTAEJ8DAprsv5PbWcudofQwXrzL7ZjSgmhRmU8nqmwirf';
 const DID = 'did:key:z6MkgwHd2BCWe1jHMXPiR6H1q1RFPcv1YzhMbK5G1kBarbfe';
 const FIXTURE_DID = 'did:key:z6MkvDqGT54cXesYGvABpF1UapVNwjCqRcafi4Px6Thv5T3Z';
 const FIXTURE_VERSION = '0.7.1';
@@ -34,12 +37,14 @@ const FIXTURE_RELEASE_CID = 'release-a';
 const SIGNED_HEAD = '{"payload":{"channel":"stable","latest_release_cid":"release-a","release_sha256":"3dcb060f99a9b300ace45ae82ac722189a9740a349fa631bbd7eb1fd9e0dcd36","schema":"elastos.release.head/v1","version":"0.7.1"},"signature":"8a248801f576beb6b053fa2f52637b2d3087f2804e44434c4d18abea47007dd24e81781f8c390d414d1b8b34055a06b81f0bd78dc83afa2ce152b59a8fce1101","signer_did":"did:key:z6MkvDqGT54cXesYGvABpF1UapVNwjCqRcafi4Px6Thv5T3Z"}';
 const SCRIPT = '#!/bin/bash\necho stamped-installer\n';
 const SCRIPT_SHA = crypto.createHash('sha256').update(SCRIPT).digest('hex');
+const FIXTURE_HEAD_CID = releaseHeadCid(SIGNED_HEAD);
+const SOURCES = `${HOME}/.local/share/elastos/sources.json`;
 
 function canaryPin(overrides = {}) {
   return {
     channel: 'stable',
     version: FIXTURE_VERSION,
-    headCid: FIXTURE_RELEASE_CID,
+    headCid: FIXTURE_HEAD_CID,
     maintainerDid: FIXTURE_DID,
     publisherGateway: 'https://publisher.example',
     fallbackInstallerUrl: 'https://publisher.example/install.sh',
@@ -86,6 +91,11 @@ function harness(overrides = {}) {
     },
     runInstaller: async (script, args, env) => {
       calls.push(['installer', script, [...args], env]);
+      const headFlag = args.indexOf('--head-cid');
+      files.set(SOURCES, JSON.stringify({
+        default_source: 'default',
+        sources: [{ name: 'default', head_cid: args[headFlag + 1] }],
+      }));
       return { stdout: '', stderr: '' };
     },
     runSetup: async (binary) => {
@@ -108,6 +118,7 @@ test('the active field is the one-line channel switch', () => {
   assert.equal(file.active, 'canary');
   assert.equal(file.channels.canary.version, VERSION);
   assert.equal(file.channels.canary.headCid, CID);
+  assert.notEqual(file.channels.canary.headCid, RELEASE_CID);
   assert.equal(file.installerSha256, '18768ef071a9f921fe0c1d902926c138e86f925dbaf5dfb9185fecb8789d6714');
   assert.equal(file.channels.stable.version, null);
   assert.equal(file.channels.stable.headCid, null);
@@ -217,7 +228,7 @@ test('a matching pin installs with --install-only, then setup, and leaves PC2 al
   assert.deepEqual(install[0][2], [
     '--install-only',
     '--head-cid',
-    FIXTURE_RELEASE_CID,
+    FIXTURE_HEAD_CID,
     '--maintainer-did',
     FIXTURE_DID,
   ]);
@@ -238,13 +249,17 @@ test('a matching pin installs with --install-only, then setup, and leaves PC2 al
 });
 
 test('an interrupted install resumes at setup and does not download again', async () => {
-  const { deps, calls } = harness({
+  const { deps, calls, files } = harness({
     probe: async () => ({
       kind: 'version',
       version: `ElastOS Runtime v${FIXTURE_VERSION}`,
       binaryPath: `${HOME}/.local/bin/elastos`,
     }),
   });
+  files.set(SOURCES, JSON.stringify({
+    default_source: 'default',
+    sources: [{ name: 'default', head_cid: FIXTURE_HEAD_CID }],
+  }));
   await installRuntime(deps, () => {});
   assert.equal(calls.some((call) => call[0] === 'fetch'), false);
   assert.equal(calls.some((call) => call[0] === 'installer'), false);
@@ -260,6 +275,10 @@ test('a finished install does not download again', async () => {
     }),
   });
   files.set(COMPONENTS, '{}');
+  files.set(SOURCES, JSON.stringify({
+    default_source: 'default',
+    sources: [{ name: 'default', head_cid: FIXTURE_HEAD_CID }],
+  }));
   await installRuntime(deps, () => {});
   assert.deepEqual(calls, []);
 });
@@ -283,6 +302,7 @@ test('Intel Mac gets a friendly message and does not download', async () => {
     componentsPresent: false,
     pin: canaryPin(),
     publisher: null,
+    installedHeadCid: null,
   });
   assert.equal(plan.action, 'blocked');
   assert.equal(plan.message, INTEL_MAC_MESSAGE);
@@ -304,6 +324,38 @@ test('a pinned install failure does not run a second installer', async () => {
   assert.equal(installs.length, 1);
   assert.equal(scriptFetches.length, 1);
   assert.equal(installs[0][1].includes('fallback'), false);
+});
+
+test('a version prefix collision does not install', async () => {
+  assert.equal(installedVersionMatches('ElastOS Runtime v0.8.0-alpha.20', '0.8.0-alpha.2'), false);
+  assert.equal(installedVersionMatches('ElastOS Runtime v0.8.0-alpha.20', '0.8.0-alpha.20'), true);
+  const { deps, calls, files } = harness({
+    pin: canaryPin({ version: '0.7' }),
+    probe: async () => ({
+      kind: 'version',
+      version: 'ElastOS Runtime v0.7.1',
+      binaryPath: `${HOME}/.local/bin/elastos`,
+    }),
+  });
+  files.set(COMPONENTS, '{}');
+  files.set(SOURCES, JSON.stringify({
+    default_source: 'default',
+    sources: [{ name: 'default', head_cid: FIXTURE_HEAD_CID }],
+  }));
+  await assert.rejects(() => installRuntime(deps, () => {}), /version/);
+  assert.equal(calls.some((call) => call[0] === 'installer'), false);
+});
+
+test('the release CID is not accepted as the head CID', async () => {
+  const headCid = releaseHeadCid(SIGNED_HEAD);
+  assert.notEqual(headCid, FIXTURE_RELEASE_CID);
+  assert.equal(releaseHeadCid('{"a":1}\n'), 'QmesNfBa5gMx91CKmvELgz2MzeLyDWs9PX2h4LuUqvLY4K');
+  const { deps, calls } = harness({
+    pin: canaryPin({ headCid: FIXTURE_RELEASE_CID }),
+  });
+  await assert.rejects(() => installRuntime(deps, () => {}), /headCid/);
+  assert.equal(calls.some((call) => call[0] === 'installer'), false);
+  assert.equal(calls.some((call) => String(call[1]).endsWith('/install.sh')), false);
 });
 
 test('a publisher mismatch does not install', async () => {

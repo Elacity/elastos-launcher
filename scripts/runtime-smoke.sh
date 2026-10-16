@@ -89,12 +89,34 @@ with urllib.request.urlopen(url, timeout=30) as response:
 open(sys.argv[3], "wb").write(raw)
 head = json.loads(raw.decode())
 payload = head["payload"]
-print(f"publisher channel={payload.get('channel')} version={payload.get('version')} cid={payload.get('latest_release_cid')}")
-print(f"pin       channel={pin.get('channel')} version={pin.get('version')} cid={pin.get('headCid')}")
+
+def varint(value):
+    out = bytearray()
+    while True:
+        byte = value & 0x7F
+        value >>= 7
+        if value:
+            out.append(byte | 0x80)
+        else:
+            out.append(byte)
+            return bytes(out)
+
+unixfs = bytes([0x08, 0x02]) + bytes([0x12]) + varint(len(raw)) + raw + bytes([0x18]) + varint(len(raw))
+dag = bytes([0x0A]) + varint(len(unixfs)) + unixfs
+import hashlib
+digest = hashlib.sha256(dag).digest()
+number = int.from_bytes(b"\x12\x20" + digest, "big")
+alphabet = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+head_cid = ""
+while number:
+    number, digit = divmod(number, 58)
+    head_cid = alphabet[digit] + head_cid
+print(f"publisher channel={payload.get('channel')} version={payload.get('version')} release_cid={payload.get('latest_release_cid')} head_cid={head_cid}")
+print(f"pin       channel={pin.get('channel')} version={pin.get('version')} head_cid={pin.get('headCid')}")
 matched = (
     payload.get("channel") == pin.get("channel")
     and payload.get("version") == pin.get("version")
-    and payload.get("latest_release_cid") == pin.get("headCid")
+    and head_cid == pin.get("headCid")
     and head.get("signer_did") == pin.get("maintainerDid")
 )
 open(sys.argv[2], "w").write("yes\n" if matched else "no\n")
@@ -138,12 +160,10 @@ fi
 
 installed_version="$("${runtime_bin}" version)"
 echo "Installed version: ${installed_version}"
-if [[ "${matched}" == "yes" ]]; then
-  want="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["version"])' "${pin_file}")"
-  if [[ "${installed_version}" != *"${want}"* ]]; then
-    echo "Installed version does not contain pinned ${want}: ${installed_version}" >&2
-    exit 1
-  fi
+want="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["version"])' "${pin_file}")"
+if [[ "${installed_version}" != "ElastOS Runtime v${want}" && "${installed_version}" != "${want}" ]]; then
+  echo "Installed version is not exactly ${want}: ${installed_version}" >&2
+  exit 1
 fi
 
 echo "Running elastos setup"
@@ -159,6 +179,13 @@ if [[ ! -f "${components}" ]]; then
   exit 1
 fi
 echo "components.json is present"
+sources="$(dirname "${components}")/sources.json"
+installed_head="$(python3 -c 'import json,sys; doc=json.load(open(sys.argv[1])); sources=doc.get("sources") or []; named=next((item for item in sources if item.get("name")==doc.get("default_source")), sources[0] if sources else {}); print(named.get("head_cid",""))' "${sources}")"
+if [[ "${installed_head}" != "${head_cid}" ]]; then
+  echo "Installed head CID ${installed_head} is not the pinned head ${head_cid}" >&2
+  exit 1
+fi
+echo "Installed head CID matches the pin"
 
 if [[ -n "${pc2_stamp}" ]]; then
   pc2_now="$(stat -c %Y "${pc2_dir}" 2>/dev/null || stat -f %m "${pc2_dir}")"
