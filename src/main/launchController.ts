@@ -1,6 +1,7 @@
 import * as pc2 from './pc2Manager';
 import { createLaunchTargetStore, LaunchTargetPreferenceStore, resolveLaunchTargetId } from './targets/preferences';
 import { createLaunchTarget } from './targets';
+import { setRuntimeLogSink } from './targets/runtimeGateway';
 import { LaunchTarget, TargetStatus, UpdateCheck } from './targets/types';
 
 export interface LaunchControllerOptions {
@@ -67,6 +68,8 @@ export function createLaunchController(options: LaunchControllerOptions = {}): L
   if (pc2Mode) {
     pc2.onStatusChange(emitStatus);
     pc2.onLog(emitLog);
+  } else {
+    setRuntimeLogSink(emitLog);
   }
 
   async function runRuntime<T>(action: () => Promise<T>): Promise<T> {
@@ -121,6 +124,9 @@ export function createLaunchController(options: LaunchControllerOptions = {}): L
     isInstalled: () => (pc2Mode ? target.isInstalled() : runRuntime(() => target.isInstalled())),
     shutdown() {
       pc2.shutdownHeartbeatPoller();
+      if (!pc2Mode) {
+        void target.stop().catch(() => {});
+      }
     },
   };
 }
