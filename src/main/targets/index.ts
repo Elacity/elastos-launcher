@@ -1,10 +1,10 @@
 /**
  * Launch-target registry.
  *
- * src/main/index.ts does not import this module. The app still calls
- * pc2Manager directly, so an unset ELASTOS_LAUNCH_TARGET changes nothing
- * a user can see. Wiring the IPC handlers through createLaunchTarget is
- * a later ticket (docs/RUNTIME_MIGRATION.md).
+ * src/main/index.ts talks to src/main/launchController.ts, which calls
+ * createLaunchTarget. With no explicit id, no ELASTOS_LAUNCH_TARGET, and
+ * no stored preference, that target is PC2 and its methods are the
+ * pc2Manager functions.
  */
 
 import { createPc2Target } from './pc2Target';

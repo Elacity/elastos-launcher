@@ -2,6 +2,9 @@ import { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage, shell } from 'ele
 import * as path from 'path';
 import log from 'electron-log';
 import * as pc2Manager from './pc2Manager';
+import { createDefaultLaunchController } from './launchController';
+
+const launch = createDefaultLaunchController(process.env);
 
 // Set app name for dock/taskbar and menu bar
 app.setName('ElastOS');
@@ -54,7 +57,7 @@ function createWindow(): void {
     mainWindow?.show();
     
     // Check initial status
-    currentStatus = await pc2Manager.getStatus();
+    currentStatus = await launch.getStatus();
     mainWindow?.webContents.send('pc2:status', currentStatus);
   });
 
@@ -114,18 +117,18 @@ function updateTrayMenu(): void {
     {
       label: 'Start PC2',
       enabled: currentStatus === 'stopped' || currentStatus === 'error',
-      click: () => pc2Manager.startPC2()
+      click: () => { void launch.start(); }
     },
     {
       label: 'Stop PC2',
       enabled: currentStatus === 'running',
-      click: () => pc2Manager.stopPC2()
+      click: () => { void launch.stop(); }
     },
     { type: 'separator' },
     {
       label: 'Open in Browser',
       enabled: currentStatus === 'running',
-      click: () => pc2Manager.openInBrowser()
+      click: () => launch.openInBrowser()
     },
     { type: 'separator' },
     { label: 'Show Window', click: () => mainWindow?.show() },
@@ -142,38 +145,39 @@ function updateTrayMenu(): void {
 }
 
 // Set up status change listener
-pc2Manager.onStatusChange((status) => {
+launch.onStatusChange((status) => {
   currentStatus = status;
   mainWindow?.webContents.send('pc2:status', status);
   updateTrayMenu();
 });
 
 // Set up log listener
-pc2Manager.onLog((logMessage) => {
+launch.onLog((logMessage) => {
   mainWindow?.webContents.send('pc2:log', logMessage);
 });
 
-// IPC Handlers
-ipcMain.handle('pc2:getStatus', () => pc2Manager.getStatus());
-ipcMain.handle('pc2:start', () => pc2Manager.startPC2());
-ipcMain.handle('pc2:stop', () => pc2Manager.stopPC2());
-ipcMain.handle('pc2:restart', () => pc2Manager.restartPC2());
-ipcMain.handle('pc2:getLogs', (_, lines) => pc2Manager.getLogs(lines));
-ipcMain.handle('pc2:isInstalled', () => pc2Manager.isInstalled());
-ipcMain.handle('pc2:openBrowser', () => pc2Manager.openInBrowser());
+// IPC Handlers. Preload keeps the pc2:* channel names; the controller
+// chooses the target. Default target methods are the pc2Manager functions.
+ipcMain.handle('pc2:getStatus', () => launch.getStatus());
+ipcMain.handle('pc2:start', () => launch.start());
+ipcMain.handle('pc2:stop', () => launch.stop());
+ipcMain.handle('pc2:restart', () => launch.restart());
+ipcMain.handle('pc2:getLogs', (_, lines) => launch.getLogs(lines));
+ipcMain.handle('pc2:isInstalled', () => launch.isInstalled());
+ipcMain.handle('pc2:openBrowser', () => launch.openInBrowser());
 ipcMain.handle('pc2:install', async (event) => {
-  return pc2Manager.installPC2((msg) => {
+  return launch.install((msg) => {
     event.sender.send('pc2:installProgress', msg);
   });
 });
 
-ipcMain.handle('pc2:uninstall', () => pc2Manager.uninstallPC2());
+ipcMain.handle('pc2:uninstall', () => launch.uninstall());
 
 // Version and updates
-ipcMain.handle('pc2:getVersion', () => pc2Manager.getPC2Version());
-ipcMain.handle('pc2:checkForUpdate', () => pc2Manager.checkForUpdate());
+ipcMain.handle('pc2:getVersion', () => launch.getVersion());
+ipcMain.handle('pc2:checkForUpdate', () => launch.checkForUpdate());
 ipcMain.handle('pc2:update', async (event) => {
-  return pc2Manager.updatePC2((msg) => {
+  return launch.update((msg) => {
     event.sender.send('pc2:updateProgress', msg);
   });
 });
@@ -181,7 +185,7 @@ ipcMain.handle('pc2:update', async (event) => {
 // Environment management
 ipcMain.handle('pc2:setEnvironment', async (_, env: string, customPath?: string) => {
   pc2Manager.setEnvironment(env as pc2Manager.PC2Environment, customPath);
-  const status = await pc2Manager.getStatus();
+  const status = await launch.getStatus();
   mainWindow?.webContents.send('pc2:status', status);
   return {
     env,
@@ -227,5 +231,5 @@ app.on('before-quit', () => {
   // event loop doesn't keep the app process alive after BrowserWindow
   // closes. (The poller uses unref'd timers in pc2-node but Electron's
   // setInterval doesn't auto-unref, so we stop it explicitly.)
-  pc2Manager.shutdownHeartbeatPoller();
+  launch.shutdown();
 });
