@@ -27,3 +27,28 @@ jobs:
 
       - name: Install pinned runtime and require a healthy Home
         run: bash scripts/runtime-smoke.sh
+
+  windows-wsl:
+    name: smoke (windows-wsl)
+    continue-on-error: true
+    timeout-minutes: 45
+    runs-on: windows-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run the click path in WSL2, or skip
+        shell: pwsh
+        run: |
+          if (-not (Get-Command wsl -ErrorAction SilentlyContinue)) {
+            Write-Host "SMOKE_SKIPPED: wsl is not on this runner."
+            exit 0
+          }
+          wsl -e uname -a
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "SMOKE_SKIPPED: no WSL2 distro is installed. A dedicated ElastOS distro is ticket 11, not this job."
+            exit 0
+          }
+          wsl -e bash -lc "if test -e /dev/kvm; then echo 'kvm=yes'; else echo 'kvm=no — the local Browser needs /dev/kvm'; fi"
+          $unix = wsl -e wslpath -a $PWD
+          wsl -e bash -lc "cd '$unix' && bash scripts/runtime-smoke.sh"
