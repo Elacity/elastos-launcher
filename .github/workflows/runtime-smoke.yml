@@ -129,6 +129,7 @@ jobs:
         env:
           PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1'
           ELASTOS_LAUNCH_TARGET: runtime
+          DEBUG: pw:browser
         run: npm run e2e
 
   windows-app:

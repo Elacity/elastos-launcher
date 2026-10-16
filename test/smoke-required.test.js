@@ -95,6 +95,9 @@ test('the electron e2e clicks Install and waits for Open my computer', () => {
   assert.match(script, /app\.exit\(0\)/);
   assert.match(script, /ELASTOS_LAUNCH_TARGET: 'runtime'/);
   assert.match(script, /ELASTOS_HIDE_HOST_TOOLS: '1'/);
+  assert.match(script, /--disable-gpu-sandbox/);
+  assert.match(script, /APPDATA/);
+  assert.match(script, /LOCALAPPDATA/);
 });
 
 test('the flattened smoke pin keeps the installer hash', () => {
