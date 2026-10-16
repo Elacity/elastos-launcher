@@ -120,3 +120,54 @@ jobs:
 
       - name: Install inside the ElastOS distro and require /healthz
         run: node scripts/windows-app-install.js
+
+  clean-machine-linux:
+    name: clean machine (ubuntu)
+    timeout-minutes: 45
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - name: Install dependencies
+        env:
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1'
+        run: npm ci
+
+      - name: Compile
+        run: npx tsc
+
+      - name: Install on Ubuntu without curl, python3, or gcc
+        run: bash scripts/clean-machine-linux.sh
+
+  clean-machine-windows:
+    name: clean machine (windows-wsl)
+    timeout-minutes: 20
+    runs-on: windows-2025
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - name: Install dependencies
+        env:
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1'
+        run: npm ci
+
+      - name: Compile
+        run: npx tsc
+
+      - name: Record WSL state and the reboot message
+        shell: pwsh
+        run: pwsh -File scripts/windows-clean-machine.ps1

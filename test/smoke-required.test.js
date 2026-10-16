@@ -22,6 +22,8 @@ test('the runtime smoke workflow has no continue-on-error', () => {
   assert.match(workflow, /xvfb-run/);
   assert.match(workflow, /macos-14/);
   assert.match(workflow, /node scripts\/windows-app-install\.js/);
+  assert.match(workflow, /bash scripts\/clean-machine-linux\.sh/);
+  assert.match(workflow, /scripts\/windows-clean-machine\.ps1/);
   assert.equal(/windows-elastos-distro\.ps1/.test(
     workflow.split('windows-app:')[1] || '',
   ), false);
@@ -79,6 +81,7 @@ test('the electron e2e clicks Install and waits for Open my computer', () => {
   assert.match(script, /Installed head CID matches the pin/);
   assert.match(script, /app\.exit\(0\)/);
   assert.match(script, /ELASTOS_LAUNCH_TARGET: 'runtime'/);
+  assert.match(script, /ELASTOS_HIDE_HOST_TOOLS: '1'/);
 });
 
 test('the flattened smoke pin keeps the installer hash', () => {

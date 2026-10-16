@@ -21,6 +21,8 @@ The launcher is an Electron 28 shell. It does not embed the runtime. It download
 
 `ELASTOS_HEAD_CID=<pin> bash install.sh --install-only --maintainer-did <did>`
 
+Before that command, the app puts its own `curl` and `sha256sum` on `PATH`, and a pinned CPython when this computer cannot run `python3 -c ''`. It does not ask for Xcode Command Line Tools. The click-by-click first run, including the Windows permission prompt and a possible restart, is `docs/FIRST_RUN.md`.
+
 | Piece | File | Role |
 |---|---|---|
 | Main process | `src/main/index.ts` | Window, tray, and `elastos:*` IPC. It does not import `./targets`. |

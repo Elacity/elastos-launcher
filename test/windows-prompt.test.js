@@ -16,6 +16,7 @@ const {
   ensureElastosRootfs,
   hostPrompt,
   importDistroArgs,
+  WINDOWS_REBOOT_MESSAGE,
 } = require('../dist/main/targets/windowsHost');
 
 const base = {
@@ -224,6 +225,26 @@ test('distro detection and the rootfs download are explicit', async () => {
   assert.equal(replaced, true);
   assert.equal(downloaded.includes('/current/'), false);
   assert.match(downloaded, /\/20240423\//);
+});
+
+test('enabling Linux support says to restart when Windows asks for a reboot', async () => {
+  await assert.rejects(
+    () => applyWindowsFix(
+      { platform: 'win32', arch: 'x64', wslInstalled: false, distroReady: false },
+      {
+        spawnHidden: async (file, args) => {
+          assert.equal(file, 'wsl.exe');
+          assert.deepEqual([...args], ['--install', '--no-distribution']);
+          return { code: 1, stdout: 'A reboot is required to finish this operation.\n', stderr: '' };
+        },
+      },
+    ),
+    (err) => {
+      assert.equal(err.message, WINDOWS_REBOOT_MESSAGE);
+      assert.equal(/wsl\.exe|powershell|terminal|sudo /.test(err.message), false);
+      return true;
+    },
+  );
 });
 
 test('a rootfs with the wrong size or hash is refused', () => {

@@ -81,8 +81,24 @@ export function importDistroArgs(installDir: string, rootfs: string): readonly s
   return ['--import', 'ElastOS', installDir, rootfs, '--version', '2'];
 }
 
+export const WINDOWS_REBOOT_MESSAGE = 'Restart Windows, then open ElastOS and click Install.';
+
+export interface HiddenSpawnOutput {
+  code: number;
+  stdout?: string;
+  stderr?: string;
+}
+
 export interface HiddenSpawn {
-  (file: string, args: readonly string[], options: { windowsHide: true }): Promise<number>;
+  (
+    file: string,
+    args: readonly string[],
+    options: { windowsHide: true },
+  ): Promise<number | HiddenSpawnOutput>;
+}
+
+export function windowsEnableNeedsReboot(text: string): boolean {
+  return /\breboot\b|\brestart\b/i.test(text);
 }
 
 export async function runHostAction(
@@ -99,7 +115,12 @@ export async function runHostAction(
   const args = kind === 'enable-wsl'
     ? enableWslArgs()
     : importDistroArgs(deps.installDir ?? 'C:\\ElastOS\\distro', deps.rootfs ?? '');
-  const code = await deps.spawnHidden('wsl.exe', args, { windowsHide: true });
+  const result = await deps.spawnHidden('wsl.exe', args, { windowsHide: true });
+  const code = typeof result === 'number' ? result : result.code;
+  const text = typeof result === 'number' ? '' : `${result.stdout ?? ''}\n${result.stderr ?? ''}`;
+  if (kind === 'enable-wsl' && windowsEnableNeedsReboot(text)) {
+    throw new Error(WINDOWS_REBOOT_MESSAGE);
+  }
   if (code !== 0) {
     throw new Error(kind === 'enable-wsl'
       ? 'Windows did not turn on Linux support. Click Enable to try again.'
@@ -171,11 +192,22 @@ export function spawnHidden(
   file: string,
   args: readonly string[],
   options: { windowsHide: true },
-): Promise<number> {
-  return new Promise((resolve, reject) => {
-    const child = spawn(file, [...args], { windowsHide: options.windowsHide, stdio: 'ignore' });
-    child.on('error', () => resolve(1));
-    child.on('exit', (code) => resolve(code ?? 1));
+): Promise<HiddenSpawnOutput> {
+  return new Promise((resolve) => {
+    const child = spawn(file, [...args], {
+      windowsHide: options.windowsHide,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    const stdout: Buffer[] = [];
+    const stderr: Buffer[] = [];
+    child.stdout?.on('data', (chunk: Buffer) => stdout.push(chunk));
+    child.stderr?.on('data', (chunk: Buffer) => stderr.push(chunk));
+    child.on('error', () => resolve({ code: 1, stdout: '', stderr: '' }));
+    child.on('exit', (code) => resolve({
+      code: code ?? 1,
+      stdout: Buffer.concat(stdout).toString('utf8'),
+      stderr: Buffer.concat(stderr).toString('utf8'),
+    }));
   });
 }
 

@@ -29,6 +29,7 @@ function isolatedHome() {
 async function main() {
   const home = isolatedHome();
   console.log(`e2e home ${home}`);
+  console.log('host tools hidden: curl and python3 come from the app');
   const electronApp = await electron.launch({
     executablePath: electronPath,
     cwd: root,
@@ -41,6 +42,7 @@ async function main() {
       XDG_DATA_HOME: path.join(home, '.local', 'share'),
       XDG_CONFIG_HOME: path.join(home, '.config'),
       ELASTOS_LAUNCH_TARGET: 'runtime',
+      ELASTOS_HIDE_HOST_TOOLS: '1',
       PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1',
     },
   });
