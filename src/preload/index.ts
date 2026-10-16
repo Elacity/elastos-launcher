@@ -27,6 +27,12 @@ contextBridge.exposeInMainWorld('pc2', {
   getVersion: () => ipcRenderer.invoke('pc2:getVersion'),
   checkForUpdate: () => ipcRenderer.invoke('pc2:checkForUpdate'),
   update: () => ipcRenderer.invoke('pc2:update'),
+  rollback: () => ipcRenderer.invoke('pc2:rollback'),
+  getLaunchInfo: () => ipcRenderer.invoke('pc2:getLaunchInfo'),
+  setLaunchTarget: (id: string) => ipcRenderer.invoke('pc2:setLaunchTarget', id),
+  getPreflight: () => ipcRenderer.invoke('pc2:getPreflight'),
+  getDiagnostics: () => ipcRenderer.invoke('pc2:getDiagnostics'),
+  setOpenAtLogin: (enabled: boolean) => ipcRenderer.invoke('pc2:setOpenAtLogin', enabled),
   
   // Event listeners
   onStatus: (callback: (status: PC2Status) => void) => {
@@ -70,6 +76,21 @@ declare global {
       getVersion: () => Promise<string>;
       checkForUpdate: () => Promise<{ current: string; latest: string; updateAvailable: boolean; releaseUrl: string }>;
       update: () => Promise<void>;
+      rollback: () => Promise<void>;
+      getLaunchInfo: () => Promise<{
+        id: string;
+        displayName: string;
+        openUrl: string;
+        status: PC2Status;
+        platformNote: string | null;
+        preflight: { ok: boolean; checks: Array<{ id: string; level: string; message: string }> };
+        openAtLogin: boolean;
+        canRollback: boolean;
+      }>;
+      setLaunchTarget: (id: string) => Promise<string>;
+      getPreflight: () => Promise<{ ok: boolean; checks: Array<{ id: string; level: string; message: string }> }>;
+      getDiagnostics: () => Promise<string>;
+      setOpenAtLogin: (enabled: boolean) => Promise<boolean>;
       onStatus: (callback: (status: PC2Status) => void) => () => void;
       onLog: (callback: (log: string) => void) => () => void;
       onInstallProgress: (callback: (message: string) => void) => () => void;

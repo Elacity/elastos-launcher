@@ -1,4 +1,5 @@
 import ElectronStore from 'electron-store';
+import { defaultLaunchTargetForPin, loadActiveRuntimePin } from './runtimePin';
 import { DEFAULT_LAUNCH_TARGET, LAUNCH_TARGET_ENV, parseLaunchTargetId } from './registry';
 import { LaunchTargetId } from './types';
 
@@ -52,8 +53,10 @@ function present(raw: string | null | undefined): string | undefined {
 }
 
 /**
- * explicit, then ELASTOS_LAUNCH_TARGET, then the store, then PC2.
+ * explicit, then ELASTOS_LAUNCH_TARGET, then the store, then the published pin.
  * A blank layer is skipped. An unknown non-blank value throws.
+ * New users get the runtime when the active pin has a version. An empty
+ * stable pin keeps PC2. A stored choice still wins over that default.
  */
 export function resolveLaunchTargetId(selection: LaunchTargetSelection = {}): LaunchTargetId {
   const explicit = present(selection.explicit);
@@ -65,5 +68,9 @@ export function resolveLaunchTargetId(selection: LaunchTargetSelection = {}): La
   const stored = selection.store ? present(selection.store.get()) : undefined;
   if (stored !== undefined) return parseLaunchTargetId(stored);
 
-  return DEFAULT_LAUNCH_TARGET;
+  try {
+    return defaultLaunchTargetForPin(loadActiveRuntimePin(selection.env));
+  } catch {
+    return DEFAULT_LAUNCH_TARGET;
+  }
 }

@@ -1,15 +1,18 @@
-// UI Elements
 const statusLed = document.getElementById('status-led');
 const statusText = document.getElementById('status-text');
 const powerBtn = document.getElementById('power-btn');
 const openBtn = document.getElementById('open-btn');
+const openLabel = document.getElementById('open-label');
 const logsBtn = document.getElementById('logs-btn');
 const uninstallBtn = document.getElementById('uninstall-btn');
 const logsPanel = document.getElementById('logs-panel');
 const logsContent = document.getElementById('logs-content');
 const closeLogsBtn = document.getElementById('close-logs');
 const envSelect = document.getElementById('env-select');
+const locationRow = document.getElementById('location-row');
 const confirmModal = document.getElementById('confirm-modal');
+const confirmTitle = document.getElementById('confirm-title');
+const confirmBody = document.getElementById('confirm-body');
 const confirmPath = document.getElementById('confirm-path');
 const confirmCancel = document.getElementById('confirm-cancel');
 const confirmDelete = document.getElementById('confirm-delete');
@@ -17,87 +20,170 @@ const copyLogsBtn = document.getElementById('copy-logs');
 const versionEl = document.getElementById('version');
 const updateBtn = document.getElementById('update-btn');
 const updateBtnLabel = document.getElementById('update-btn-label');
+const rollbackBtn = document.getElementById('rollback-btn');
+const firstRun = document.getElementById('first-run');
+const platformNote = document.getElementById('platform-note');
+const targetSelect = document.getElementById('target-select');
+const stepsEl = document.getElementById('steps');
+const errorBox = document.getElementById('error-box');
+const errorText = document.getElementById('error-text');
+const retryBtn = document.getElementById('retry-btn');
+const diagnosticsBtn = document.getElementById('diagnostics-btn');
+const loginCheckbox = document.getElementById('login-checkbox');
+const loginRow = document.getElementById('login-row');
+const urlValue = document.getElementById('url-value');
 
 let currentStatus = 'stopped';
+let targetId = 'runtime';
+let openUrl = 'http://127.0.0.1:8090/home/';
+let busy = false;
 let isUpdating = false;
 let logs = [];
 const MAX_LOGS = 200;
+const flow = window.elastosFlow;
 
-// Status labels
 const statusLabels = {
-  'running': 'Running',
-  'stopped': 'Stopped',
-  'starting': 'Starting...',
-  'stopping': 'Stopping...',
-  'error': 'Error',
-  'not-installed': 'Not Installed'
+  running: 'Running',
+  stopped: 'Stopped',
+  starting: 'Starting...',
+  stopping: 'Stopping...',
+  error: 'Needs attention',
+  'not-installed': 'Not installed'
 };
 
-// Update UI based on status
-function updateStatus(status) {
-  currentStatus = status;
-  
-  // Update LED
-  statusLed.className = 'led ' + status;
-  
-  // Update text
-  statusText.textContent = statusLabels[status] || status;
-  
-  // Update power button
-  powerBtn.className = 'power-button' + (status === 'running' ? ' running' : '');
-  powerBtn.disabled = status === 'starting' || status === 'stopping';
-  
-  // Update buttons - enable when running
-  const isRunning = status === 'running';
-  openBtn.disabled = !isRunning;
-  
-  // Enable uninstall only when stopped and installed
-  const isInstalled = status !== 'not-installed';
-  uninstallBtn.disabled = !isInstalled || isRunning;
+function showError(message) {
+  errorText.textContent = message;
+  errorBox.classList.remove('hidden');
+  addLog(message);
 }
 
-// Add log message
+function clearError() {
+  errorBox.classList.add('hidden');
+  errorText.textContent = '';
+}
+
+function renderSteps(message) {
+  const states = flow.stepStates(message || '');
+  stepsEl.classList.remove('hidden');
+  stepsEl.innerHTML = '';
+  for (const step of states) {
+    const item = document.createElement('li');
+    item.className = step.state;
+    const mark = step.state === 'done' ? 'Done' : step.state === 'active' ? 'Now' : 'Next';
+    item.textContent = `${mark} — ${step.label} (${step.estimate})`;
+    stepsEl.appendChild(item);
+  }
+}
+
+function updateStatus(status) {
+  currentStatus = status;
+  statusLed.className = 'led ' + status;
+  statusText.textContent = statusLabels[status] || status;
+
+  const action = flow.primaryAction({ targetId, status, busy });
+  openLabel.textContent = action.label;
+  openBtn.disabled = !action.enabled;
+  openBtn.dataset.action = action.id;
+
+  powerBtn.className = 'power-button' + (status === 'running' ? ' running' : '');
+  powerBtn.disabled = busy || status === 'starting' || status === 'stopping' || status === 'not-installed';
+
+  const isInstalled = status !== 'not-installed';
+  uninstallBtn.disabled = !isInstalled || status === 'running' || busy;
+
+  firstRun.textContent = flow.firstRunCopy(targetId, status);
+  urlValue.textContent = flow.urlLabel(openUrl);
+  if (locationRow) locationRow.classList.toggle('hidden', targetId === 'runtime');
+  if (loginRow) loginRow.classList.toggle('hidden', targetId !== 'runtime');
+  if (status !== 'error') {
+    // Keep a visible error until the next successful action.
+  }
+}
+
 function addLog(message) {
   logs.push(message);
-  if (logs.length > MAX_LOGS) {
-    logs.shift();
-  }
-  
+  if (logs.length > MAX_LOGS) logs.shift();
   logsContent.textContent = logs.join('\n');
   logsContent.scrollTop = logsContent.scrollHeight;
 }
 
-// Power button click - starts or stops, installs if needed
-powerBtn.addEventListener('click', async () => {
-  if (currentStatus === 'running') {
-    await window.pc2.stop();
-  } else if (currentStatus === 'stopped' || currentStatus === 'error') {
+async function runInstall() {
+  clearError();
+  busy = true;
+  updateStatus(currentStatus);
+  try {
+    const preflight = await window.pc2.getPreflight();
+    const blocked = (preflight.checks || []).filter((check) => check.level === 'block');
+    const warnings = (preflight.checks || []).filter((check) => check.level === 'warn');
+    if (warnings.length) {
+      platformNote.textContent = warnings.map((check) => check.message).join(' ');
+      platformNote.classList.remove('hidden');
+    }
+    if (!preflight.ok) {
+      showError(blocked.map((check) => check.message).join(' '));
+      return;
+    }
+    renderSteps('Checking this computer');
+    await window.pc2.install();
+    renderSteps('Starting');
     await window.pc2.start();
-  } else if (currentStatus === 'not-installed') {
-    // Install and start
-    updateStatus('starting');
-    statusText.textContent = 'Installing...';
+    renderSteps('Your computer is ready');
+    await window.pc2.openBrowser();
+  } catch (err) {
+    showError(err && err.message ? err.message : 'Something went wrong. Try again.');
+    updateStatus('error');
+  } finally {
+    busy = false;
+    const status = await window.pc2.getStatus().catch(() => currentStatus);
+    updateStatus(status);
+  }
+}
+
+openBtn.addEventListener('click', async () => {
+  const action = openBtn.dataset.action;
+  if (action === 'install' || action === 'retry') {
+    await runInstall();
+    return;
+  }
+  if (action === 'open') {
+    window.pc2.openBrowser();
+    return;
+  }
+  if (action === 'start') {
     try {
-      await window.pc2.install();
       await window.pc2.start();
     } catch (err) {
-      updateStatus('error');
-      addLog('Installation failed: ' + err.message);
+      showError(err.message);
     }
   }
 });
 
-// Open browser button
-openBtn.addEventListener('click', () => {
-  window.pc2.openBrowser();
+retryBtn.addEventListener('click', () => runInstall());
+
+diagnosticsBtn.addEventListener('click', async () => {
+  const text = await window.pc2.getDiagnostics();
+  try {
+    await navigator.clipboard.writeText(text);
+    diagnosticsBtn.textContent = 'Copied';
+    setTimeout(() => { diagnosticsBtn.textContent = 'Copy diagnostics'; }, 2000);
+  } catch (err) {
+    addLog(text);
+  }
 });
 
-// Toggle logs panel
+powerBtn.addEventListener('click', async () => {
+  try {
+    if (currentStatus === 'running') await window.pc2.stop();
+    else if (currentStatus === 'stopped' || currentStatus === 'error') await window.pc2.start();
+  } catch (err) {
+    showError(err.message);
+  }
+});
+
 logsBtn.addEventListener('click', async () => {
   if (logsPanel.classList.contains('hidden')) {
-    // Load logs
     const logText = await window.pc2.getLogs(100);
-    logs = logText.split('\n').filter(l => l.trim());
+    logs = logText.split('\n').filter((line) => line.trim());
     logsContent.textContent = logs.join('\n');
     logsContent.scrollTop = logsContent.scrollHeight;
     logsPanel.classList.remove('hidden');
@@ -106,16 +192,11 @@ logsBtn.addEventListener('click', async () => {
   }
 });
 
-// Close logs
-closeLogsBtn.addEventListener('click', () => {
-  logsPanel.classList.add('hidden');
-});
+closeLogsBtn.addEventListener('click', () => logsPanel.classList.add('hidden'));
 
-// Copy logs
 copyLogsBtn.addEventListener('click', async () => {
-  const logText = logsContent.textContent;
   try {
-    await navigator.clipboard.writeText(logText);
+    await navigator.clipboard.writeText(logsContent.textContent);
     copyLogsBtn.classList.add('copied');
     setTimeout(() => copyLogsBtn.classList.remove('copied'), 2000);
   } catch (err) {
@@ -123,83 +204,78 @@ copyLogsBtn.addEventListener('click', async () => {
   }
 });
 
-// Uninstall button - show confirmation
 uninstallBtn.addEventListener('click', async () => {
-  const envInfo = await window.pc2.getEnvironment();
-  confirmPath.textContent = envInfo.path.replace(/^\/Users\/[^/]+/, '~');
+  const copy = flow.confirmCopy(targetId, []);
+  confirmTitle.textContent = copy.title;
+  confirmBody.textContent = copy.body;
+  if (targetId === 'runtime') {
+    confirmPath.textContent = 'The ElastOS program and its data folder';
+  } else {
+    const envInfo = await window.pc2.getEnvironment();
+    confirmPath.textContent = envInfo.path.replace(/^\/Users\/[^/]+/, '~').replace(/^\/home\/[^/]+/, '~');
+  }
   confirmModal.classList.remove('hidden');
 });
 
-// Confirm cancel
-confirmCancel.addEventListener('click', () => {
-  confirmModal.classList.add('hidden');
-});
+confirmCancel.addEventListener('click', () => confirmModal.classList.add('hidden'));
 
-// Confirm delete
 confirmDelete.addEventListener('click', async () => {
   confirmModal.classList.add('hidden');
-  statusText.textContent = 'Uninstalling...';
+  statusText.textContent = 'Removing...';
   try {
     await window.pc2.uninstall();
-    addLog('PC2 uninstalled successfully');
+    addLog(targetId === 'runtime' ? 'ElastOS was removed.' : 'PC2 was removed.');
+    stepsEl.classList.add('hidden');
   } catch (err) {
-    addLog('Uninstall failed: ' + err.message);
+    showError(err.message);
   }
 });
 
-// Click outside confirm modal to close
-confirmModal.addEventListener('click', (e) => {
-  if (e.target === confirmModal) {
-    confirmModal.classList.add('hidden');
-  }
+confirmModal.addEventListener('click', (event) => {
+  if (event.target === confirmModal) confirmModal.classList.add('hidden');
 });
 
-// Environment selector
 envSelect.addEventListener('change', async () => {
-  const env = envSelect.value;
-  
-  // Stop PC2 if running before switching
-  if (currentStatus === 'running') {
-    await window.pc2.stop();
-  }
-  
-  await window.pc2.setEnvironment(env);
-  
-  // Check status in new environment
+  if (currentStatus === 'running') await window.pc2.stop();
+  await window.pc2.setEnvironment(envSelect.value);
   const status = await window.pc2.getStatus();
   updateStatus(status);
-
   await refreshVersion();
   checkForUpdate();
 });
 
-// Listen for status changes
-window.pc2.onStatus((status) => {
-  updateStatus(status);
+targetSelect.addEventListener('change', async () => {
+  if (currentStatus === 'running') {
+    try { await window.pc2.stop(); } catch (err) { showError(err.message); }
+  }
+  targetId = await window.pc2.setLaunchTarget(targetSelect.value);
+  clearError();
+  stepsEl.classList.add('hidden');
+  await refreshLaunch();
 });
 
-// Listen for log messages
-window.pc2.onLog((log) => {
-  addLog(log);
+loginCheckbox.addEventListener('change', async () => {
+  await window.pc2.setOpenAtLogin(loginCheckbox.checked);
 });
 
-// Listen for install progress
+window.pc2.onStatus((status) => updateStatus(status));
+window.pc2.onLog((log) => addLog(log));
 window.pc2.onInstallProgress((message) => {
   statusText.textContent = message;
+  renderSteps(message);
   addLog(message);
 });
-
-// Listen for update progress
 window.pc2.onUpdateProgress((message) => {
   statusText.textContent = message;
   addLog(message);
 });
 
-// Version display and update check
 async function refreshVersion() {
   try {
     const version = await window.pc2.getVersion();
-    versionEl.textContent = version === 'not installed' ? '—' : `v${version}`;
+    versionEl.textContent = !version || version === 'not installed' || version.includes('not yet supported')
+      ? '—'
+      : (version.startsWith('v') || version.startsWith('ElastOS') ? version : `v${version}`);
   } catch {
     versionEl.textContent = '—';
   }
@@ -210,8 +286,9 @@ async function checkForUpdate() {
     const result = await window.pc2.checkForUpdate();
     if (result.updateAvailable) {
       updateBtn.classList.remove('hidden');
-      updateBtnLabel.textContent = `Update to v${result.latest}`;
-      updateBtn.title = `Update available: v${result.current} → v${result.latest}`;
+      updateBtnLabel.textContent = result.latest && result.latest !== 'a newer release'
+        ? `Update to ${result.latest}`
+        : 'Update';
     } else {
       updateBtn.classList.add('hidden');
     }
@@ -220,19 +297,26 @@ async function checkForUpdate() {
   }
 }
 
-// Update button click
+rollbackBtn.addEventListener('click', async () => {
+  try {
+    await window.pc2.rollback();
+    addLog('Restored the previous ElastOS release. Start it again to open your computer.');
+  } catch (err) {
+    showError(err.message);
+  }
+});
+
 updateBtn.addEventListener('click', async () => {
   if (isUpdating) return;
   isUpdating = true;
   updateBtn.disabled = true;
   updateBtnLabel.textContent = 'Updating...';
-
   try {
     await window.pc2.update();
     await refreshVersion();
     updateBtn.classList.add('hidden');
   } catch (err) {
-    addLog('Update failed: ' + err.message);
+    showError(err.message);
     updateBtnLabel.textContent = 'Retry';
     updateBtn.disabled = false;
   } finally {
@@ -240,20 +324,34 @@ updateBtn.addEventListener('click', async () => {
   }
 });
 
-// Initial setup
+async function refreshLaunch() {
+  const info = await window.pc2.getLaunchInfo();
+  targetId = info.id;
+  openUrl = info.openUrl;
+  targetSelect.value = info.id === 'pc2' ? 'pc2' : 'runtime';
+  if (rollbackBtn) rollbackBtn.classList.toggle('hidden', !info.canRollback);
+  loginCheckbox.checked = Boolean(info.openAtLogin);
+  const blocks = (info.preflight.checks || []).filter((check) => check.level === 'block' || check.level === 'warn');
+  if (info.platformNote || blocks.length) {
+    platformNote.textContent = info.platformNote || blocks.map((check) => check.message).join(' ');
+    platformNote.classList.remove('hidden');
+  } else {
+    platformNote.classList.add('hidden');
+  }
+  updateStatus(info.status || await window.pc2.getStatus());
+  await refreshVersion();
+  checkForUpdate();
+}
+
 async function init() {
   try {
     const envInfo = await window.pc2.getEnvironment();
     envSelect.value = envInfo.env;
-    
-    const status = await window.pc2.getStatus();
-    updateStatus(status);
-
-    await refreshVersion();
-    checkForUpdate();
+    await refreshLaunch();
   } catch (err) {
     console.error('Init error:', err);
     updateStatus('error');
+    showError('Could not read this computer. Quit ElastOS and open it again.');
   }
 }
 

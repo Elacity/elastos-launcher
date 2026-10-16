@@ -132,12 +132,17 @@ test('forcing runtime logs the stable error and does not install PC2', async () 
   }
 });
 
-test('launch target precedence is explicit, then env, then store, then PC2', () => {
+test('launch target precedence is explicit, then env, then store, then the published pin', () => {
+  const { createLaunchController } = require('../dist/main/launchController');
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'elastos-launch-target-'));
   const store = createLaunchTargetStore(dir);
 
-  assert.equal(resolveLaunchTargetId({}), 'pc2');
-  assert.equal(resolveLaunchTargetId({ env: {}, store }), 'pc2');
+  assert.equal(resolveLaunchTargetId({}), 'runtime');
+  assert.equal(resolveLaunchTargetId({ env: {}, store }), 'runtime');
+  assert.equal(createLaunchController({
+    env: {},
+    store: { get: () => undefined, set() {}, delete() {} },
+  }).target.id, 'runtime');
 
   store.set('runtime');
   assert.equal(resolveLaunchTargetId({ env: {}, store }), 'runtime');
@@ -168,6 +173,8 @@ test('launch target precedence is explicit, then env, then store, then PC2', () 
 
   store.delete();
   assert.equal(store.get(), undefined);
+  assert.equal(resolveLaunchTargetId({ env: {}, store }), 'runtime');
+  store.set('pc2');
   assert.equal(resolveLaunchTargetId({ env: {}, store }), 'pc2');
 
   const main = fs.readFileSync(path.join(__dirname, '../src/main/index.ts'), 'utf8');
