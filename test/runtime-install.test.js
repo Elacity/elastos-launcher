@@ -149,9 +149,11 @@ test('a matching pin installs with --install-only, then setup, and leaves PC2 al
   const { deps, calls, mtimes } = harness();
   const progress = [];
   await installRuntime(deps, (message) => progress.push(message));
-  const install = calls.find((call) => call[0] === 'installer');
-  assert.equal(install[1].endsWith('install-pinned.sh'), true);
-  assert.deepEqual(install[2], ['--install-only']);
+  const install = calls.filter((call) => call[0] === 'installer');
+  assert.equal(install.length, 1);
+  assert.equal(install[0][1].endsWith('install.sh'), true);
+  assert.equal(install[0][1].includes('install-fallback.sh'), false);
+  assert.deepEqual(install[0][2], ['--install-only']);
   assert.equal(calls.some((call) => call[0] === 'setup'), true);
   assert.equal(JSON.stringify(calls).includes('clone'), false);
   assert.equal(mtimes.get(PC2), 1000);
@@ -210,26 +212,25 @@ test('Intel Mac gets a friendly message and does not download', async () => {
   assert.equal(plan.message, INTEL_MAC_MESSAGE);
 });
 
-test('a pinned install failure falls back to the hosted installer', async () => {
+test('a pinned install failure does not run a second installer', async () => {
   let attempts = 0;
   const { deps, calls } = harness({
     runInstaller: async (script, args) => {
       attempts += 1;
       calls.push(['installer', script, [...args]]);
-      if (attempts === 1) throw new Error('pinned download failed');
-      return { stdout: '', stderr: '' };
+      throw new Error('pinned download failed');
     },
   });
-  await installRuntime(deps, () => {});
+  await assert.rejects(() => installRuntime(deps, () => {}), /pinned download failed/);
   const installs = calls.filter((call) => call[0] === 'installer');
-  assert.equal(attempts, 2);
-  assert.equal(installs.length, 2);
-  assert.equal(installs[0][1].endsWith('install-pinned.sh'), true);
-  assert.equal(installs[1][1].endsWith('install-fallback.sh'), true);
-  assert.deepEqual(installs[1][2], ['--install-only']);
+  const scriptFetches = calls.filter((call) => call[0] === 'fetch' && String(call[1]).endsWith('/install.sh'));
+  assert.equal(attempts, 1);
+  assert.equal(installs.length, 1);
+  assert.equal(scriptFetches.length, 1);
+  assert.equal(installs[0][1].includes('fallback'), false);
 });
 
-test('a publisher mismatch uses the hosted installer', async () => {
+test('a publisher mismatch does not install', async () => {
   const { deps, calls } = harness({
     fetchText: async (url) => {
       calls.push(['fetch', url]);
@@ -239,8 +240,9 @@ test('a publisher mismatch uses the hosted installer', async () => {
       return '#!/bin/bash\necho stamped\n';
     },
   });
-  await installRuntime(deps, () => {});
-  assert.equal(calls.find((call) => call[0] === 'installer')[1].endsWith('install-fallback.sh'), true);
+  await assert.rejects(() => installRuntime(deps, () => {}), /headCid/);
+  assert.equal(calls.some((call) => call[0] === 'installer'), false);
+  assert.equal(calls.some((call) => call[0] === 'fetch' && String(call[1]).endsWith('/install.sh')), false);
 });
 
 test('changing the PC2 directory fails the install', async () => {

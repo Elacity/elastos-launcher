@@ -46,8 +46,10 @@ export {
   assertSignedInstaller,
   installRuntime,
   parseReleaseHead,
+  pinMismatchField,
   planRuntimeInstall,
   publisherMatchesPin,
+  PinMismatchError,
   UNSIGNED_INSTALLER_MARKERS,
   UnsignedInstallerError,
 } from './runtimeInstall';

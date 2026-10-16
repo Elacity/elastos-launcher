@@ -65,12 +65,37 @@ export function publisherMatchesPin(pin: ActiveRuntimePin, head: ReleaseHead | n
     && head.signerDid === pin.maintainerDid;
 }
 
+export class PinMismatchError extends Error {
+  readonly code = 'RUNTIME_PIN_MISMATCH';
+  readonly field: string;
+
+  constructor(field: string) {
+    super(`The pinned ElastOS release does not match the publisher (${field}). Install stopped.`);
+    this.name = 'PinMismatchError';
+    this.field = field;
+  }
+}
+
+/** The first field where the pin and the publisher are not the same value. */
+export function pinMismatchField(pin: ActiveRuntimePin, head: ReleaseHead | null): string | null {
+  if (!pin.publishable || !pin.version || !pin.headCid) {
+    return pin.version ? 'headCid' : 'version';
+  }
+  if (!head) return 'release-head';
+  if (head.channel !== pin.channel) return 'channel';
+  if (head.version !== pin.version) return 'version';
+  if (head.latestReleaseCid !== pin.headCid) return 'headCid';
+  if (head.signerDid !== pin.maintainerDid) return 'signerDid';
+  return null;
+}
+
 export type InstallPlan =
   | { action: 'blocked'; message: string }
   | { action: 'already-installed' }
   | { action: 'resume-setup' }
+  | { action: 'unchecked' }
   | { action: 'pinned' }
-  | { action: 'fallback' };
+  | { action: 'refused'; field: string };
 
 export function planRuntimeInstall(input: {
   platform: string;
@@ -87,8 +112,11 @@ export function planRuntimeInstall(input: {
   );
   if (versionOk && input.componentsPresent) return { action: 'already-installed' };
   if (versionOk && !input.componentsPresent) return { action: 'resume-setup' };
-  if (publisherMatchesPin(input.pin, input.publisher)) return { action: 'pinned' };
-  return { action: 'fallback' };
+  // No publisher yet. This is not permission to install.
+  if (input.publisher === null && input.pin.publishable) return { action: 'unchecked' };
+  const field = pinMismatchField(input.pin, input.publisher);
+  if (field) return { action: 'refused', field };
+  return { action: 'pinned' };
 }
 
 export interface CommandResult {
@@ -160,12 +188,13 @@ export async function installRuntime(
       assertPc2Untouched(deps, pc2Before);
       return;
     }
+    if (early.action === 'refused') throw new PinMismatchError(early.field);
 
     let publisher: ReleaseHead | null = null;
     try {
       publisher = parseReleaseHead(await deps.fetchText(releaseHeadUrl(deps.pin)));
     } catch {
-      publisher = null;
+      throw new PinMismatchError('release-head');
     }
     const plan = planRuntimeInstall({
       platform: deps.platform,
@@ -175,28 +204,17 @@ export async function installRuntime(
       pin: deps.pin,
       publisher,
     });
+    if (plan.action === 'refused') throw new PinMismatchError(plan.field);
+    if (plan.action !== 'pinned') {
+      throw new PinMismatchError('version');
+    }
 
-    if (plan.action === 'pinned') {
-      try {
-        await runInstallerStep(deps, onProgress, true);
-        const installed = await probeInstalled(deps);
-        if (!deps.pin.version || !installed?.includes(deps.pin.version)) {
-          throw new Error(
-            `Installed ElastOS does not match the pinned release ${deps.pin.version ?? ''}.`,
-          );
-        }
-      } catch (err) {
-        if (err instanceof UnsignedInstallerError) throw err;
-        onProgress('The pinned install did not finish. Trying the hosted installer.');
-        await runInstallerStep(deps, onProgress, false);
-      }
-    } else {
-      onProgress(
-        deps.pin.publishable
-          ? 'The pinned release is not on the publisher. Using the hosted installer.'
-          : 'No pinned release is available. Using the hosted installer.',
+    await runInstallerStep(deps, onProgress);
+    const installed = await probeInstalled(deps);
+    if (!deps.pin.version || !installed?.includes(deps.pin.version)) {
+      throw new Error(
+        `Installed ElastOS does not match the pinned release ${deps.pin.version ?? ''}.`,
       );
-      await runInstallerStep(deps, onProgress, false);
     }
 
     if (!deps.exists(components)) {
@@ -233,14 +251,13 @@ async function probeInstalled(deps: RuntimeInstallDeps): Promise<string | null> 
 async function runInstallerStep(
   deps: RuntimeInstallDeps,
   onProgress: (message: string) => void,
-  pinned: boolean,
 ): Promise<void> {
   onProgress(DOWNLOAD);
   const script = await deps.fetchText(deps.pin.fallbackInstallerUrl);
   assertSignedInstaller(script);
   const dir = path.join(deps.homeDir, '.elastos-launcher');
   deps.mkdirp(dir);
-  const scriptPath = path.join(dir, pinned ? 'install-pinned.sh' : 'install-fallback.sh');
+  const scriptPath = path.join(dir, 'install.sh');
   deps.writeFile(scriptPath, script);
   writeStage(deps, 'binary');
   onProgress(INSTALLING);
