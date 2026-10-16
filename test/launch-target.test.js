@@ -61,7 +61,7 @@ test('descriptors keep the PC2 and runtime health contracts apart', () => {
 
   assert.equal(getLaunchTargetDescriptor('pc2').id, 'pc2');
   assert.equal(targetSupportsHost(RUNTIME_TARGET, 'darwin', 'arm64'), true);
-  assert.equal(targetSupportsHost(RUNTIME_TARGET, 'darwin', 'x64'), false);
+  assert.equal(targetSupportsHost(RUNTIME_TARGET, 'darwin', 'x64'), true);
   assert.equal(targetSupportsHost(RUNTIME_TARGET, 'win32', 'x64'), false);
   assert.equal(targetSupportsHost(PC2_TARGET, 'win32', 'x64'), true);
   assert.equal(targetSupportsHost(PC2_TARGET, 'darwin', 'x64'), true);

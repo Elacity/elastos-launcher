@@ -30,6 +30,8 @@ export const PC2_TARGET: LaunchTargetDescriptor = {
  * `elastos gateway` is the supervised entry: `elastos home --browser`
  * also opens the system browser itself (gateway_entry.rs).
  * Health is GET /healthz → "OK" on the gateway, not PC2's /health.
+ * darwin/x64 is included because a runtime build for Intel Mac is planned.
+ * Native win32 is absent: Windows uses a WSL2 distro (ticket 11).
  */
 export const RUNTIME_TARGET: LaunchTargetDescriptor = {
   id: 'runtime',
@@ -45,6 +47,7 @@ export const RUNTIME_TARGET: LaunchTargetDescriptor = {
   openUrl: 'http://127.0.0.1:8090/home/',
   platforms: [
     { platform: 'darwin', arch: 'arm64' },
+    { platform: 'darwin', arch: 'x64' },
     { platform: 'linux', arch: 'x64' },
     { platform: 'linux', arch: 'arm64' },
   ],
