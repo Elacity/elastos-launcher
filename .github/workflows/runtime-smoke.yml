@@ -49,7 +49,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Roll 0.8.0-alpha.20 back to 0.8.0-alpha.19 and forward again
+      - name: Roll 0.8.0-alpha.21 back to 0.8.0-alpha.20 and forward again
         run: bash scripts/runtime-rollback.sh
 
   electron-e2e:
@@ -94,6 +94,16 @@ jobs:
             xvfb-run -a --server-args="-screen 0 1280x1024x24" npm run e2e
           else
             npm run e2e
+          fi
+
+      - name: Offer Remove PC2 for a seeded v1.4.0 home
+        env:
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1'
+        run: |
+          if [ "$(uname -s)" = "Linux" ]; then
+            xvfb-run -a --server-args="-screen 0 1280x1024x24" node scripts/legacy-upgrade-e2e.js
+          else
+            node scripts/legacy-upgrade-e2e.js
           fi
 
   windows-app:

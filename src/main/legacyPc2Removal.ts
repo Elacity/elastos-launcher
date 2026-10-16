@@ -1,7 +1,8 @@
-import { execFileSync } from 'child_process';
+import { execFileSync, spawnSync } from 'child_process';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import { Worker } from 'worker_threads';
 import { runtimeBinaryPath, runtimeDataDir, runtimeInstallStagePath } from './targets/runtimePaths';
 
 /**
@@ -12,25 +13,13 @@ import { runtimeBinaryPath, runtimeDataDir, runtimeInstallStagePath } from './ta
 
 const PC2_NODE_VERSION = '22.13.1';
 
+/** The old installer wrote only these two files, and only with the markers in `sudoersIsPc2`. */
 export const PC2_SUDOERS_FILES = [
-  '/etc/sudoers.d/elastos',
   '/etc/sudoers.d/wireguard',
   '/etc/sudoers.d/amneziawg',
-  '/etc/sudoers.d/pc2-wireguard',
 ];
 
-export const PC2_VPN_BINARIES = [
-  '/usr/local/bin/amneziawg-go',
-  '/usr/local/bin/awg',
-  '/usr/local/bin/awg-quick',
-  '/usr/local/bin/sing-box',
-  '/opt/homebrew/bin/amneziawg-go',
-  '/opt/homebrew/bin/awg',
-  '/opt/homebrew/bin/awg-quick',
-  '/opt/homebrew/bin/sing-box',
-];
-
-/** A WSL distro is PC2's only when it was registered under one of these names. */
+/** A WSL distro can use one of these names only after an in-guest PC2 marker is found. */
 const PC2_DISTRO_NAMES = new Set(['pc2', 'pc2-wsl']);
 
 const PC2_SERVICE_NAME = /^(pc2|com\.elacity\.pc2|com\.pc2)[^/]*\.(plist|service|desktop)$/i;
@@ -66,6 +55,11 @@ export interface LegacyProbe {
   distroList?: string;
   /** PC2 files inside a non-ElastOS WSL distro. */
   wsl?: Array<{ distro: string; home: string; pc2Bytes: number | null; nodeBytes: number | null }>;
+  /**
+   * Distro names that contain `~/.pc2` or the PC2 Node tree.
+   * A matching name in `distroList` is not enough.
+   */
+  provenDistros?: string[];
 }
 
 export interface LegacyRemovalResult {
@@ -86,6 +80,10 @@ export interface LegacyRemovalActions {
   zipDirectories?(dirs: string[], dest: string): void;
   removeWslPath?(distro: string, file: string): void;
   unregisterDistro?(name: string): Promise<void>;
+  /** Stream a guest `~/.pc2` into `dest`. Required when backup is requested for that folder. */
+  backupWslPath?(distro: string, file: string, dest: string): void;
+  /** `wsl --export` into `dest`. Required when backup is requested for a distro. */
+  exportDistro?(name: string, dest: string): Promise<void>;
 }
 
 const REMOVED_MESSAGE = 'PC2 removed';
@@ -138,9 +136,26 @@ export function isRuntimePath(file: string, home: string, platform: string, env:
 }
 
 export function isPc2DistroName(name: string): boolean {
-  const normalized = name.trim().toLowerCase();
+  if (typeof name !== 'string' || /\s/.test(name)) return false;
+  const normalized = name.toLowerCase();
   if (normalized === 'elastos') return false;
   return PC2_DISTRO_NAMES.has(normalized);
+}
+
+/**
+ * The old installer wrote `/etc/sudoers.d/wireguard` as a NOPASSWD `wg-quick`
+ * rule and `/etc/sudoers.d/amneziawg` as NOPASSWD:SETENV `awg-quick`,
+ * `killall amneziawg-go`, and `/bin/rm -rf /var/run/amneziawg/`.
+ * It never wrote `/etc/sudoers.d/elastos` or `/etc/sudoers.d/pc2-wireguard`.
+ */
+export function sudoersIsPc2(file: string, body: string): boolean {
+  if (file === '/etc/sudoers.d/amneziawg') {
+    return body.includes('NOPASSWD:SETENV') && body.includes('amneziawg-go') && body.includes('/var/run/amneziawg/');
+  }
+  if (file === '/etc/sudoers.d/wireguard') {
+    return body.includes('NOPASSWD:') && body.includes('wg-quick');
+  }
+  return false;
 }
 
 export function isPc2ServiceFile(basename: string, body: string | null): boolean {
@@ -202,17 +217,25 @@ export function selectWslPc2Pids(psText: string): number[] {
   return pids;
 }
 
+function backupStamp(now: Date): string {
+  return now.toISOString().replace(/\.\d{3}Z$/, 'Z').replace(/[-:]/g, '').replace('T', '-');
+}
+
 export function legacyBackupDestination(home: string, now = new Date()): string {
-  const stamp = now.toISOString().replace(/\.\d{3}Z$/, 'Z').replace(/[-:]/g, '').replace('T', '-');
-  return path.join(home, 'Downloads', `PC2-backup-${stamp}.zip`);
+  return path.join(home, 'Downloads', `PC2-backup-${backupStamp(now)}.zip`);
 }
 
 export function withSupportBundle(message: string, bundlePath: string): string {
   return `${message} A support bundle was saved to ${bundlePath}.`;
 }
 
-function isSystemFile(file: string): boolean {
-  return PC2_SUDOERS_FILES.includes(file) || PC2_VPN_BINARIES.includes(file);
+function isProvenSudoers(file: string, readFile: (file: string) => string): boolean {
+  if (!PC2_SUDOERS_FILES.includes(file)) return false;
+  try {
+    return sudoersIsPc2(file, readFile(file));
+  } catch {
+    return false;
+  }
 }
 
 function serviceParent(file: string, home: string): { dir: string; scope: 'user' | 'system' } | null {
@@ -259,6 +282,17 @@ function missing(err: unknown): boolean {
 
 function item(scope: LegacyScope, file: string, label: string, bytes: number | null, extra: Partial<LegacyItem> = {}): LegacyItem {
   return { scope, path: file, label, bytes, ...extra };
+}
+
+function sudoersItem(file: string, probe: LegacyProbe): LegacyItem | null {
+  if (!isProvenSudoers(file, probe.readFile)) return null;
+  try {
+    const st = probe.lstat(file);
+    if (st.isSymbolicLink()) return null;
+    return item('system', file, 'PC2 sudoers rule', st.size);
+  } catch {
+    return null;
+  }
 }
 
 function directoryBytes(root: string, probe: LegacyProbe): number {
@@ -335,20 +369,9 @@ export function discoverLegacyPc2(probe: LegacyProbe): LegacyItem[] {
       found.push(item(dir.scope, file, 'PC2 startup entry', bytes));
     }
   }
-  for (const file of [...PC2_SUDOERS_FILES, ...PC2_VPN_BINARIES]) {
-    try {
-      const st = probe.lstat(file);
-      if (st.isSymbolicLink()) continue;
-      found.push(item('system', file, systemLabel(file), st.size));
-    } catch {
-      continue;
-    }
-  }
-  if (probe.distroList) {
-    for (const row of parseWslDistroList(probe.distroList)) {
-      if (!isPc2DistroName(row.name)) continue;
-      found.push(item('distro', row.name, 'PC2 Linux environment', null, { distro: row.name }));
-    }
+  for (const name of probe.provenDistros ?? []) {
+    if (!isPc2DistroName(name)) continue;
+    found.push(item('distro', name, 'PC2 Linux environment', null, { distro: name }));
   }
   for (const guest of probe.wsl ?? []) {
     if (guest.distro.toLowerCase() === 'elastos') continue;
@@ -365,12 +388,13 @@ export function discoverLegacyPc2(probe: LegacyProbe): LegacyItem[] {
       }));
     }
   }
+  if (found.length) {
+    for (const file of PC2_SUDOERS_FILES) {
+      const entry = sudoersItem(file, probe);
+      if (entry) found.push(entry);
+    }
+  }
   return found;
-}
-
-function systemLabel(file: string): string {
-  if (file.startsWith('/etc/sudoers.d/')) return 'PC2 sudoers rule';
-  return 'PC2 VPN program';
 }
 
 function safeList(file: string, probe: LegacyProbe): { bytes: number } | null {
@@ -405,7 +429,11 @@ function allowUserPath(file: string, probe: LegacyProbe): boolean {
 }
 
 function allowItem(entry: LegacyItem, probe: LegacyProbe): boolean {
-  if (entry.scope === 'distro') return isPc2DistroName(entry.path) && entry.distro === entry.path;
+  if (entry.scope === 'distro') {
+    return isPc2DistroName(entry.path)
+      && entry.distro === entry.path
+      && (probe.provenDistros ?? []).includes(entry.path);
+  }
   if (entry.scope === 'wsl') {
     if (!entry.distro || !entry.wslHome || !wslHomeOk(entry.wslHome)) return false;
     if (entry.distro.toLowerCase() === 'elastos' || !/^[A-Za-z0-9._-]+$/.test(entry.distro)) return false;
@@ -413,7 +441,9 @@ function allowItem(entry: LegacyItem, probe: LegacyProbe): boolean {
     const node = `${entry.wslHome}/.elastos/node`;
     return entry.path === pc2 || entry.path === node;
   }
-  if (isSystemFile(entry.path)) return entry.scope === 'system';
+  if (PC2_SUDOERS_FILES.includes(entry.path)) {
+    return entry.scope === 'system' && isProvenSudoers(entry.path, probe.readFile);
+  }
   if (allowUserPath(entry.path, probe)) return entry.scope === 'user';
   const parent = serviceParent(entry.path, probe.home);
   if (!parent || parent.scope !== entry.scope) return false;
@@ -542,25 +572,61 @@ export async function removeDiscoveredLegacyPc2(
 
   let backupPath: string | undefined;
   if (actions.backup) {
-    const dirs = present.filter((entry) => entry.scope === 'user' && entry.path === legacyPc2Dir(probe.home)).map((entry) => entry.path);
-    if (dirs.length) {
-      const name = path.basename(legacyBackupDestination(probe.home, actions.now ?? new Date()));
-      backupPath = path.join(actions.downloadsDir, name);
-      if (isRuntimePath(backupPath, probe.home, probe.platform, probe.env) || isRuntimePath(actions.downloadsDir, probe.home, probe.platform, probe.env)) {
-        return refusal('Refusing to remove ElastOS.');
+    const now = actions.now ?? new Date();
+    const stamp = backupStamp(now);
+    const data = present.filter((entry) => (
+      (entry.scope === 'user' && entry.path === legacyPc2Dir(probe.home))
+      || (entry.scope === 'wsl' && entry.path.endsWith('/.pc2'))
+      || entry.scope === 'distro'
+    ));
+    for (const entry of data) {
+      if (entry.scope === 'wsl' && !actions.backupWslPath) {
+        return refusal('A backup of the PC2 folder in Windows Linux is not available, so nothing was removed.');
       }
-      try {
-        const zip = actions.zipDirectories ?? zipDirectories;
-        zip(dirs, backupPath);
-      } catch (err) {
-        return {
-          ok: false,
-          message: `PC2 was not removed. The backup could not be saved (${messageOf(err)}).`,
-          removed: [],
-          failed: [],
-        };
+      if (entry.scope === 'distro' && !actions.exportDistro) {
+        return refusal('A backup of the PC2 Linux environment is not available, so nothing was removed.');
       }
     }
+    if (data.length && (isRuntimePath(actions.downloadsDir, probe.home, probe.platform, probe.env))) {
+      return refusal('Refusing to remove ElastOS.');
+    }
+    const written: string[] = [];
+    try {
+      const userDirs = data.filter((entry) => entry.scope === 'user').map((entry) => entry.path);
+      if (userDirs.length) {
+        const dest = path.join(actions.downloadsDir, `PC2-backup-${stamp}.zip`);
+        if (isRuntimePath(dest, probe.home, probe.platform, probe.env)) {
+          return refusal('Refusing to remove ElastOS.');
+        }
+        const zip = actions.zipDirectories ?? zipDirectories;
+        zip(userDirs, dest);
+        written.push(dest);
+      }
+      for (const entry of data) {
+        if (entry.scope === 'wsl' && entry.distro && actions.backupWslPath) {
+          const dest = path.join(actions.downloadsDir, `PC2-wsl-${entry.distro}-backup-${stamp}.tar`);
+          actions.backupWslPath(entry.distro, entry.path, dest);
+          written.push(dest);
+        }
+        if (entry.scope === 'distro' && actions.exportDistro) {
+          const dest = path.join(actions.downloadsDir, `PC2-distro-${entry.path}-backup-${stamp}.tar`);
+          await actions.exportDistro(entry.path, dest);
+          written.push(dest);
+        }
+      }
+    } catch (err) {
+      return {
+        ok: false,
+        message: `PC2 was not removed. The backup could not be saved (${messageOf(err)}).`,
+        removed: [],
+        failed: [],
+        backupPath: written[0],
+      };
+    }
+    if (data.length && written.length !== data.length) {
+      return refusal('The backup could not be saved, so nothing was removed.');
+    }
+    backupPath = written[0];
   }
 
   try {
@@ -650,19 +716,150 @@ function backupNote(message: string, backupPath?: string): string {
   return `${message} Your backup is ${backupPath}.`;
 }
 
-export async function removeLegacyPc2(probe: LegacyProbe, actions: LegacyRemovalActions): Promise<LegacyRemovalResult> {
-  return removeDiscoveredLegacyPc2(discoverLegacyPc2(probe), probe, actions);
+function confirmedGone(file: string, probe: LegacyProbe): boolean {
+  if (!file.includes('/') && !file.includes('\\')) {
+    if ((probe.provenDistros ?? []).includes(file)) return false;
+    if (!probe.distroList) return true;
+    return !parseWslDistroList(probe.distroList).some((row) => row.name === file);
+  }
+  try {
+    probe.lstat(file);
+    return false;
+  } catch (err) {
+    if (!missing(err)) return false;
+    if ((probe.wsl ?? []).some((guest) => `${guest.home}/.pc2` === file || `${guest.home}/.elastos/node` === file)) {
+      return false;
+    }
+    return true;
+  }
 }
 
-function crc32(buffer: Buffer): number {
-  let crc = ~0;
+export async function removeLegacyPc2(
+  probe: LegacyProbe,
+  actions: LegacyRemovalActions,
+  confirmedPaths: readonly string[],
+): Promise<LegacyRemovalResult> {
+  const confirmed: string[] = [];
+  const seen = new Set<string>();
+  for (const entry of confirmedPaths) {
+    if (typeof entry !== 'string' || seen.has(entry)) continue;
+    seen.add(entry);
+    confirmed.push(entry);
+  }
+  if (confirmed.length === 0) {
+    return { ok: true, message: REMOVED_MESSAGE, removed: [], failed: [] };
+  }
+  const byPath = new Map(discoverLegacyPc2(probe).map((entry) => [entry.path, entry]));
+  const selected: LegacyItem[] = [];
+  for (const file of confirmed) {
+    let entry = byPath.get(file);
+    if (!entry) {
+      const sudoers = sudoersItem(file, probe);
+      if (sudoers) entry = sudoers;
+    }
+    if (!entry) {
+      if (confirmedGone(file, probe)) continue;
+      return refusal('Refusing to remove a path that is not part of the old PC2 install.');
+    }
+    if (!allowItem(entry, probe)) {
+      return refusal('Refusing to remove a path that is not part of the old PC2 install.');
+    }
+    selected.push(entry);
+  }
+  return removeDiscoveredLegacyPc2(selected, probe, actions);
+}
+
+function crc32Update(crc: number, buffer: Buffer): number {
+  let next = crc;
   for (const byte of buffer) {
-    crc ^= byte;
+    next ^= byte;
     for (let bit = 0; bit < 8; bit += 1) {
-      crc = (crc >>> 1) ^ (crc & 1 ? 0xedb88320 : 0);
+      next = (next >>> 1) ^ (next & 1 ? 0xedb88320 : 0);
     }
   }
-  return ~crc >>> 0;
+  return next >>> 0;
+}
+
+function crc32Finish(crc: number): number {
+  return (~crc) >>> 0;
+}
+
+/** ZIP64 extra for a stored entry. `offset` is included only when it does not fit in 32 bits. */
+function zip64Extra(size: number, offset?: number): Buffer {
+  const size64 = size > 0xffffffff;
+  const offset64 = offset !== undefined && offset > 0xffffffff;
+  if (!size64 && !offset64) return Buffer.alloc(0);
+  const payload = (size64 ? 16 : 0) + (offset64 ? 8 : 0);
+  const extra = Buffer.alloc(4 + payload);
+  extra.writeUInt16LE(0x0001, 0);
+  extra.writeUInt16LE(payload, 2);
+  let cursor = 4;
+  if (size64) {
+    extra.writeBigUInt64LE(BigInt(size), cursor);
+    extra.writeBigUInt64LE(BigInt(size), cursor + 8);
+    cursor += 16;
+  }
+  if (offset64 && offset !== undefined) extra.writeBigUInt64LE(BigInt(offset), cursor);
+  return extra;
+}
+
+/** 32-bit size fields, or ZIP64 when `size` does not fit. Used by the backup writer. */
+export function zipStoredSizeFields(size: number): { version: number; sizeField: number; extra: Buffer } {
+  if (!Number.isSafeInteger(size) || size < 0) throw new Error('The backup could not be saved.');
+  const extra = zip64Extra(size);
+  if (extra.length === 0) return { version: 20, sizeField: size, extra };
+  return { version: 45, sizeField: 0xffffffff, extra };
+}
+
+/**
+ * End-of-central-directory bytes. Counts or offsets past the ZIP32 limits
+ * produce a ZIP64 record (signature 0x06064b50) instead of throwing.
+ */
+export function zipCentralDirectoryFooter(count: number, centralSize: number, centralOffset: number): Buffer {
+  if (!Number.isSafeInteger(count) || count < 0 || !Number.isSafeInteger(centralSize) || centralSize < 0 || !Number.isSafeInteger(centralOffset) || centralOffset < 0) {
+    throw new Error('The backup could not be saved.');
+  }
+  const zip64 = count > 0xffff || centralSize > 0xffffffff || centralOffset > 0xffffffff;
+  if (!zip64) {
+    const end = Buffer.alloc(22);
+    end.writeUInt32LE(0x06054b50, 0);
+    end.writeUInt16LE(0, 4);
+    end.writeUInt16LE(0, 6);
+    end.writeUInt16LE(count, 8);
+    end.writeUInt16LE(count, 10);
+    end.writeUInt32LE(centralSize, 12);
+    end.writeUInt32LE(centralOffset, 16);
+    end.writeUInt16LE(0, 20);
+    return end;
+  }
+  const eocdOffset = centralOffset + centralSize;
+  if (!Number.isSafeInteger(eocdOffset)) throw new Error('The backup could not be saved.');
+  const record = Buffer.alloc(56);
+  record.writeUInt32LE(0x06064b50, 0);
+  record.writeBigUInt64LE(44n, 4);
+  record.writeUInt16LE(45, 12);
+  record.writeUInt16LE(45, 14);
+  record.writeUInt32LE(0, 16);
+  record.writeUInt32LE(0, 20);
+  record.writeBigUInt64LE(BigInt(count), 24);
+  record.writeBigUInt64LE(BigInt(count), 32);
+  record.writeBigUInt64LE(BigInt(centralSize), 40);
+  record.writeBigUInt64LE(BigInt(centralOffset), 48);
+  const locator = Buffer.alloc(20);
+  locator.writeUInt32LE(0x07064b50, 0);
+  locator.writeUInt32LE(0, 4);
+  locator.writeBigUInt64LE(BigInt(eocdOffset), 8);
+  locator.writeUInt32LE(1, 16);
+  const end = Buffer.alloc(22);
+  end.writeUInt32LE(0x06054b50, 0);
+  end.writeUInt16LE(0xffff, 4);
+  end.writeUInt16LE(0xffff, 6);
+  end.writeUInt16LE(0xffff, 8);
+  end.writeUInt16LE(0xffff, 10);
+  end.writeUInt32LE(0xffffffff, 12);
+  end.writeUInt32LE(0xffffffff, 16);
+  end.writeUInt16LE(0, 20);
+  return Buffer.concat([record, locator, end]);
 }
 
 function dosTime(when: Date): { time: number; date: number } {
@@ -671,68 +868,153 @@ function dosTime(when: Date): { time: number; date: number } {
   return { time, date };
 }
 
+const ZIP_CHUNK = 64 * 1024;
+
+function fileCrc(file: string, size: number): number {
+  const fd = fs.openSync(file, 'r');
+  try {
+    const buf = Buffer.alloc(ZIP_CHUNK);
+    let crc = ~0 >>> 0;
+    let seen = 0;
+    while (seen < size) {
+      const n = fs.readSync(fd, buf, 0, Math.min(ZIP_CHUNK, size - seen), seen);
+      if (n <= 0) throw new Error('The backup could not be saved.');
+      crc = crc32Update(crc, buf.subarray(0, n));
+      seen += n;
+    }
+    return crc32Finish(crc);
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+function copyFileRange(file: string, size: number, out: number): void {
+  const fd = fs.openSync(file, 'r');
+  try {
+    const buf = Buffer.alloc(ZIP_CHUNK);
+    let seen = 0;
+    while (seen < size) {
+      const n = fs.readSync(fd, buf, 0, Math.min(ZIP_CHUNK, size - seen), seen);
+      if (n <= 0) throw new Error('The backup could not be saved.');
+      fs.writeSync(out, buf, 0, n);
+      seen += n;
+    }
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+function verifyStoredZip(file: string, entries: Array<{ dataOffset: number; size: number; crc: number }>): void {
+  const fd = fs.openSync(file, 'r');
+  try {
+    const buf = Buffer.alloc(ZIP_CHUNK);
+    for (const entry of entries) {
+      let crc = ~0 >>> 0;
+      let left = entry.size;
+      let pos = entry.dataOffset;
+      while (left > 0) {
+        const n = fs.readSync(fd, buf, 0, Math.min(buf.length, left), pos);
+        if (n <= 0) throw new Error('The backup could not be saved.');
+        crc = crc32Update(crc, buf.subarray(0, n));
+        pos += n;
+        left -= n;
+      }
+      if (crc32Finish(crc) !== entry.crc) throw new Error('The backup could not be saved.');
+    }
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
 /** Store-method zip of regular files under each directory. Symlinks are not followed. */
 export function zipDirectories(dirs: string[], dest: string): void {
   const when = dosTime(new Date());
-  const locals: Buffer[] = [];
-  const centrals: Buffer[] = [];
-  let offset = 0;
-  for (const dir of dirs) {
-    const rootName = path.basename(dir);
-    const files = walkRegularFiles(dir);
-    for (const file of files) {
-      const relative = path.relative(dir, file).split(path.sep).join('/');
-      const name = Buffer.from(`${rootName}/${relative}`, 'utf8');
-      const data = fs.readFileSync(file);
-      const crc = crc32(data);
-      const local = Buffer.alloc(30);
-      local.writeUInt32LE(0x04034b50, 0);
-      local.writeUInt16LE(20, 4);
-      local.writeUInt16LE(0x800, 6);
-      local.writeUInt16LE(0, 8);
-      local.writeUInt16LE(when.time, 10);
-      local.writeUInt16LE(when.date, 12);
-      local.writeUInt32LE(crc, 14);
-      local.writeUInt32LE(data.length, 18);
-      local.writeUInt32LE(data.length, 22);
-      local.writeUInt16LE(name.length, 26);
-      local.writeUInt16LE(0, 28);
-      locals.push(local, name, data);
-      const central = Buffer.alloc(46);
-      central.writeUInt32LE(0x02014b50, 0);
-      central.writeUInt16LE(20, 4);
-      central.writeUInt16LE(20, 6);
-      central.writeUInt16LE(0x800, 8);
-      central.writeUInt16LE(0, 10);
-      central.writeUInt16LE(when.time, 12);
-      central.writeUInt16LE(when.date, 14);
-      central.writeUInt32LE(crc, 16);
-      central.writeUInt32LE(data.length, 20);
-      central.writeUInt32LE(data.length, 24);
-      central.writeUInt16LE(name.length, 28);
-      central.writeUInt16LE(0, 30);
-      central.writeUInt16LE(0, 32);
-      central.writeUInt16LE(0, 34);
-      central.writeUInt16LE(0, 36);
-      central.writeUInt32LE(0, 38);
-      central.writeUInt32LE(offset, 42);
-      centrals.push(central, name);
-      offset += local.length + name.length + data.length;
-    }
-  }
-  const centralStart = offset;
-  const centralBytes = Buffer.concat(centrals);
-  const end = Buffer.alloc(22);
-  end.writeUInt32LE(0x06054b50, 0);
-  end.writeUInt16LE(0, 4);
-  end.writeUInt16LE(0, 6);
-  end.writeUInt16LE(centrals.length / 2, 8);
-  end.writeUInt16LE(centrals.length / 2, 10);
-  end.writeUInt32LE(centralBytes.length, 12);
-  end.writeUInt32LE(centralStart, 16);
-  end.writeUInt16LE(0, 20);
   fs.mkdirSync(path.dirname(dest), { recursive: true });
-  fs.writeFileSync(dest, Buffer.concat([...locals, centralBytes, end]));
+  const out = fs.openSync(dest, 'w', 0o600);
+  const centrals: Buffer[] = [];
+  const written: Array<{ dataOffset: number; size: number; crc: number }> = [];
+  let offset = 0;
+  let count = 0;
+  try {
+    for (const dir of dirs) {
+      const rootName = path.basename(dir);
+      for (const file of walkRegularFiles(dir)) {
+        const relative = path.relative(dir, file).split(path.sep).join('/');
+        const name = Buffer.from(`${rootName}/${relative}`, 'utf8');
+        if (name.length > 0xffff) throw new Error('The backup could not be saved.');
+        const st = fs.lstatSync(file);
+        if (!Number.isSafeInteger(st.size) || st.size < 0) throw new Error('The backup could not be saved.');
+        const crc = fileCrc(file, st.size);
+        const sized = zipStoredSizeFields(st.size);
+        const localExtra = sized.extra;
+        const local = Buffer.alloc(30);
+        local.writeUInt32LE(0x04034b50, 0);
+        local.writeUInt16LE(sized.version, 4);
+        local.writeUInt16LE(0x800, 6);
+        local.writeUInt16LE(0, 8);
+        local.writeUInt16LE(when.time, 10);
+        local.writeUInt16LE(when.date, 12);
+        local.writeUInt32LE(crc, 14);
+        local.writeUInt32LE(sized.sizeField, 18);
+        local.writeUInt32LE(sized.sizeField, 22);
+        local.writeUInt16LE(name.length, 26);
+        local.writeUInt16LE(localExtra.length, 28);
+        fs.writeSync(out, local);
+        fs.writeSync(out, name);
+        if (localExtra.length) fs.writeSync(out, localExtra);
+        const dataOffset = offset + local.length + name.length + localExtra.length;
+        copyFileRange(file, st.size, out);
+        const centralExtra = zip64Extra(st.size, offset);
+        const centralSize = st.size > 0xffffffff ? 0xffffffff : st.size;
+        const centralOffset = offset > 0xffffffff ? 0xffffffff : offset;
+        const central = Buffer.alloc(46);
+        central.writeUInt32LE(0x02014b50, 0);
+        central.writeUInt16LE(centralExtra.length ? 45 : 20, 4);
+        central.writeUInt16LE(sized.version, 6);
+        central.writeUInt16LE(0x800, 8);
+        central.writeUInt16LE(0, 10);
+        central.writeUInt16LE(when.time, 12);
+        central.writeUInt16LE(when.date, 14);
+        central.writeUInt32LE(crc, 16);
+        central.writeUInt32LE(centralSize, 20);
+        central.writeUInt32LE(centralSize, 24);
+        central.writeUInt16LE(name.length, 28);
+        central.writeUInt16LE(centralExtra.length, 30);
+        central.writeUInt16LE(0, 32);
+        central.writeUInt16LE(0, 34);
+        central.writeUInt16LE(0, 36);
+        central.writeUInt32LE(0, 38);
+        central.writeUInt32LE(centralOffset, 42);
+        centrals.push(central, name);
+        if (centralExtra.length) centrals.push(centralExtra);
+        written.push({ dataOffset, size: st.size, crc });
+        offset = dataOffset + st.size;
+        if (!Number.isSafeInteger(offset)) throw new Error('The backup could not be saved.');
+        count += 1;
+      }
+    }
+    const centralStart = offset;
+    let centralSize = 0;
+    for (const part of centrals) {
+      fs.writeSync(out, part);
+      centralSize += part.length;
+      offset += part.length;
+    }
+    const footer = zipCentralDirectoryFooter(count, centralSize, centralStart);
+    fs.writeSync(out, footer);
+  } catch (err) {
+    fs.closeSync(out);
+    fs.rmSync(dest, { force: true });
+    throw err;
+  }
+  fs.closeSync(out);
+  try {
+    verifyStoredZip(dest, written);
+    fs.chmodSync(dest, 0o600);
+  } catch (err) {
+    fs.rmSync(dest, { force: true });
+    throw err;
+  }
 }
 
 function walkRegularFiles(dir: string): string[] {
@@ -753,6 +1035,7 @@ function walkRegularFiles(dir: string): string[] {
 }
 
 function realProbe(home: string, platform: string, env: NodeJS.ProcessEnv): LegacyProbe {
+  const distroList = platform === 'win32' ? readWslList() : undefined;
   return {
     home,
     platform,
@@ -761,9 +1044,14 @@ function realProbe(home: string, platform: string, env: NodeJS.ProcessEnv): Lega
     realpath: (file) => fs.realpathSync(file),
     readdir: (dir) => fs.readdirSync(dir),
     readFile: (file) => fs.readFileSync(file, 'utf8'),
-    distroList: platform === 'win32' ? readWslList() : undefined,
-    wsl: platform === 'win32' ? readWslPc2Homes() : undefined,
+    distroList,
+    wsl: distroList !== undefined ? readWslPc2Homes(distroList) : undefined,
+    provenDistros: distroList !== undefined ? readProvenDistros(distroList) : undefined,
   };
+}
+
+export function probeThisComputer(home: string, platform: string, env: NodeJS.ProcessEnv): LegacyProbe {
+  return realProbe(home, platform, env);
 }
 
 function readWslList(): string {
@@ -782,8 +1070,31 @@ export function wslPc2ProbeScript(): string {
   ].join('; ');
 }
 
-function readWslPc2Homes(): LegacyProbe['wsl'] {
-  const rows = parseWslDistroList(readWslList());
+function readProvenDistros(distroList: string): string[] {
+  const proven: string[] = [];
+  for (const row of parseWslDistroList(distroList)) {
+    if (!isPc2DistroName(row.name)) continue;
+    if (distroHasPc2(row.name)) proven.push(row.name);
+  }
+  return proven;
+}
+
+function distroHasPc2(distro: string): boolean {
+  if (!isPc2DistroName(distro)) return false;
+  try {
+    const probe = execFileSync('wsl.exe', ['-d', distro, '--', 'bash', '-c', wslPc2ProbeScript()], {
+      timeout: 20000,
+      encoding: 'utf8',
+    });
+    const sized = parseWslPc2Probe(probe);
+    return sized.pc2Bytes !== null || sized.nodeBytes !== null;
+  } catch {
+    return false;
+  }
+}
+
+function readWslPc2Homes(distroList = readWslList()): LegacyProbe['wsl'] {
+  const rows = parseWslDistroList(distroList);
   const distro = defaultUserDistro(rows);
   if (!distro || distro.toLowerCase() === 'elastos') return [];
   try {
@@ -804,8 +1115,70 @@ function readWslPc2Homes(): LegacyProbe['wsl'] {
   }
 }
 
-export function describeLegacyPc2OnThisComputer(home = os.homedir(), platform = process.platform, env: NodeJS.ProcessEnv = process.env): LegacyItem[] {
-  return discoverLegacyPc2(realProbe(home, platform, env));
+const DESCRIBE_CACHE_MS = 15000;
+let describeCache: { key: string; at: number; items: LegacyItem[] } | null = null;
+let describeRuns = 0;
+
+export function clearLegacyPc2DescribeCache(): void {
+  describeCache = null;
+}
+
+export function legacyPc2DescribeRuns(): number {
+  return describeRuns;
+}
+
+function legacyPc2WorkerScript(): string {
+  const bundled = path.join(__dirname, 'legacyPc2Worker.js');
+  const unpacked = bundled.replace(`${path.sep}app.asar${path.sep}`, `${path.sep}app.asar.unpacked${path.sep}`);
+  if (unpacked !== bundled && fs.existsSync(unpacked)) return unpacked;
+  return bundled;
+}
+
+function runPc2Worker<T>(
+  job: { op: 'describe' | 'remove'; home: string; platform: string; backup?: boolean; paths?: string[]; downloadsDir?: string },
+  timeoutMs: number,
+): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const worker = new Worker(legacyPc2WorkerScript(), { workerData: job });
+    let settled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const finish = (fn: () => void) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      fn();
+      void worker.terminate();
+    };
+    timer = setTimeout(() => {
+      finish(() => reject(new Error(job.op === 'describe' ? 'Could not check for PC2.' : 'PC2 removal took too long.')));
+    }, timeoutMs);
+    worker.once('message', (msg: { ok?: boolean; items?: LegacyItem[]; result?: LegacyRemovalResult; error?: string }) => {
+      finish(() => {
+        if (!msg || msg.ok !== true) reject(new Error(msg && msg.error ? msg.error : 'PC2 removal failed.'));
+        else resolve((job.op === 'describe' ? msg.items : msg.result) as T);
+      });
+    });
+    worker.once('error', (err) => finish(() => reject(err)));
+    worker.once('exit', (code) => {
+      if (!settled && code !== 0) finish(() => reject(new Error(`PC2 removal stopped (${code}).`)));
+    });
+  });
+}
+
+export async function describeLegacyPc2OnThisComputer(
+  home = os.homedir(),
+  platform = process.platform,
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<LegacyItem[]> {
+  const delay = Number(env.ELASTOS_PC2_PROBE_DELAY_MS || '0');
+  const key = `${platform}\0${home}`;
+  if (!(delay > 0) && describeCache && describeCache.key === key && Date.now() - describeCache.at < DESCRIBE_CACHE_MS) {
+    return describeCache.items;
+  }
+  describeRuns += 1;
+  const items = await runPc2Worker<LegacyItem[]>({ op: 'describe', home, platform }, 120000);
+  if (!(delay > 0)) describeCache = { key, at: Date.now(), items };
+  return items;
 }
 
 const SYSTEM_SERVICE_DIRS = ['/Library/LaunchAgents', '/Library/LaunchDaemons', '/etc/systemd/system'];
@@ -819,7 +1192,7 @@ export function privilegedRemovalScript(
   readFile: (file: string) => string = (file) => fs.readFileSync(file, 'utf8'),
 ): string {
   for (const file of files) {
-    if (isSystemFile(file)) continue;
+    if (isProvenSudoers(file, readFile)) continue;
     const base = path.basename(file);
     const body = PM2_SERVICE_NAME.test(base) ? readFile(file) : null;
     if (!SYSTEM_SERVICE_DIRS.includes(path.dirname(file)) || !isPc2ServiceFile(base, body)) {
@@ -840,15 +1213,15 @@ function runOnePrivilegedRm(files: string[]): void {
   const script = privilegedRemovalScript(files);
   if (process.platform === 'darwin') {
     const apple = `do shell script ${JSON.stringify(script)} with administrator privileges`;
-    execFileSync('osascript', ['-e', apple], { stdio: 'inherit' });
+    execFileSync('osascript', ['-e', apple], { stdio: 'inherit', timeout: 120000 });
     return;
   }
   if (process.platform === 'linux') {
     try {
-      execFileSync('pkexec', ['sh', '-c', script], { stdio: 'inherit' });
+      execFileSync('pkexec', ['sh', '-c', script], { stdio: 'inherit', timeout: 120000 });
     } catch (err) {
       if (errorCode(err) !== 'ENOENT') throw err;
-      execFileSync('sudo', ['--', 'sh', '-c', script], { stdio: 'inherit' });
+      execFileSync('sudo', ['--', 'sh', '-c', script], { stdio: 'inherit', timeout: 120000 });
     }
     return;
   }
@@ -864,14 +1237,74 @@ export function wslRemovalArgs(distro: string, file: string): string[] {
   return ['-d', distro, '--', 'bash', '-c', script, 'bash', file];
 }
 
-export async function removeLegacyPc2OnThisComputer(options: { backup: boolean }): Promise<LegacyRemovalResult> {
-  const home = os.homedir();
-  const probe = realProbe(home, process.platform, process.env);
+function downloadsDirectory(home: string): string {
+  if (process.versions.electron) {
+    try {
+      const electron = require('electron') as { app?: { isReady?: () => boolean; getPath?: (name: string) => string } };
+      const app = electron.app;
+      if (app && typeof app.getPath === 'function' && (!app.isReady || app.isReady())) {
+        const dir = app.getPath('downloads');
+        if (typeof dir === 'string' && dir && !dir.includes('\0')) return dir;
+      }
+    } catch {
+      // Node tests have no Electron app object.
+    }
+  }
+  return path.join(home, 'Downloads');
+}
+
+function backupWslDirectory(distro: string, file: string, dest: string): void {
+  if (distro.toLowerCase() === 'elastos' || !/^[A-Za-z0-9._-]+$/.test(distro) || !isSafeWslPath(file) || !file.endsWith('/.pc2')) {
+    throw new Error('Refusing to remove a path that is not part of the old PC2 install.');
+  }
+  const parent = file.slice(0, -'/.pc2'.length);
+  fs.mkdirSync(path.dirname(dest), { recursive: true });
+  const fd = fs.openSync(dest, 'w', 0o600);
+  let failed = true;
+  try {
+    const result = spawnSync('wsl.exe', ['-d', distro, '--', 'tar', '-C', parent, '-cf', '-', '.pc2'], {
+      stdio: ['ignore', fd, 'pipe'],
+      timeout: 120000,
+    });
+    if (result.error) throw result.error;
+    if (result.status !== 0) throw new Error('The backup could not be saved.');
+    failed = false;
+  } finally {
+    fs.closeSync(fd);
+    if (failed) fs.rmSync(dest, { force: true });
+  }
+  fs.chmodSync(dest, 0o600);
+}
+
+function exportWslDistro(name: string, dest: string): void {
+  if (!isPc2DistroName(name)) throw new Error('Refusing to remove ElastOS.');
+  fs.mkdirSync(path.dirname(dest), { recursive: true });
+  try {
+    execFileSync('wsl.exe', ['--export', name, dest], { timeout: 600000 });
+  } catch (err) {
+    fs.rmSync(dest, { force: true });
+    throw err;
+  }
+  fs.chmodSync(dest, 0o600);
+}
+
+export async function removeLegacyPc2InProcess(options: {
+  backup: boolean;
+  paths: readonly string[];
+  home?: string;
+  platform?: string;
+  env?: NodeJS.ProcessEnv;
+  downloadsDir?: string;
+}): Promise<LegacyRemovalResult> {
+  const home = options.home ?? os.homedir();
+  const platform = options.platform ?? process.platform;
+  const env = options.env ?? process.env;
+  const probe = realProbe(home, platform, env);
   return removeLegacyPc2(probe, {
     backup: options.backup,
-    downloadsDir: path.join(home, 'Downloads'),
+    downloadsDir: options.downloadsDir ?? downloadsDirectory(home),
     remove: (file) => {
-      if (isRuntimePath(file, home, process.platform, process.env)) {
+      if (isRuntimePath(file, home, platform, env)) {
         throw new Error('Refusing to remove ElastOS.');
       }
       let st: fs.Stats;
@@ -883,8 +1316,8 @@ export async function removeLegacyPc2OnThisComputer(options: { backup: boolean }
       }
       if (st.isSymbolicLink()) throw new Error('Refusing to remove a path that follows a symlink.');
       const real = fs.realpathSync(file);
-      if (path.resolve(real) !== path.resolve(file) || isRuntimePath(real, home, process.platform, process.env)) {
-        throw new Error(isRuntimePath(real, home, process.platform, process.env)
+      if (path.resolve(real) !== path.resolve(file) || isRuntimePath(real, home, platform, env)) {
+        throw new Error(isRuntimePath(real, home, platform, env)
           ? 'Refusing to remove ElastOS.'
           : 'Refusing to remove a path that follows a symlink.');
       }
@@ -921,7 +1354,27 @@ export async function removeLegacyPc2OnThisComputer(options: { backup: boolean }
       if (!isPc2DistroName(name)) throw new Error('Refusing to remove ElastOS.');
       execFileSync('wsl.exe', ['--unregister', name], { timeout: 120000 });
     },
-  });
+    backupWslPath: (distro, file, dest) => backupWslDirectory(distro, file, dest),
+    exportDistro: async (name, dest) => {
+      exportWslDistro(name, dest);
+    },
+  }, options.paths);
+}
+
+export async function removeLegacyPc2OnThisComputer(options: { backup: boolean; paths?: readonly string[] }): Promise<LegacyRemovalResult> {
+  const paths = Array.isArray(options.paths) ? options.paths.filter((entry): entry is string => typeof entry === 'string') : [];
+  clearLegacyPc2DescribeCache();
+  const home = os.homedir();
+  const result = await runPc2Worker<LegacyRemovalResult>({
+    op: 'remove',
+    home,
+    platform: process.platform,
+    backup: options.backup === true,
+    paths: paths.slice(),
+    downloadsDir: downloadsDirectory(home),
+  }, 15 * 60 * 1000);
+  clearLegacyPc2DescribeCache();
+  return result;
 }
 
 function isSafeWslPath(file: string): boolean {

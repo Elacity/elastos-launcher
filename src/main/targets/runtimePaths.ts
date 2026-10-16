@@ -56,11 +56,22 @@ export function runtimeInstallStagePath(homeDir: string): string {
 const ALLOWED_DOTTED_DIRS = new Set(['.local', '.elastos-launcher']);
 
 /**
- * A removable path may use a dotted directory only for the runtime layout
- * (`.local` and `.elastos-launcher`). Other dotted directories stay on disk.
+ * The account directory (`/home/<name>`, `/Users/<name>`, `X:/Users/<name>`)
+ * may contain a dot. Every other directory segment may use a dot only for the
+ * runtime layout (`.local` and `.elastos-launcher`).
  */
+function accountSegmentIndex(segments: string[]): number {
+  if (segments[0] === 'home' || segments[0] === 'Users') return 1;
+  if (/^[A-Za-z]:$/.test(segments[0] || '') && segments[1] === 'Users') return 2;
+  return -1;
+}
+
 export function launcherOwnedDirectories(file: string): boolean {
   const segments = file.replace(/\\/g, '/').split('/').filter(Boolean);
   const dirs = segments.slice(0, -1);
-  return dirs.every((segment) => !segment.includes('.') || ALLOWED_DOTTED_DIRS.has(segment));
+  const account = accountSegmentIndex(segments);
+  return dirs.every((segment, index) => {
+    if (index === account) return true;
+    return !segment.includes('.') || ALLOWED_DOTTED_DIRS.has(segment);
+  });
 }

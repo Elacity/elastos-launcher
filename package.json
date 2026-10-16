@@ -17,7 +17,8 @@
     "build:linux": "npm run build:ts && electron-builder --linux",
     "build:all": "npm run build:ts && electron-builder --mac --win --linux",
     "test": "npm run build:ts && node --test test/*.test.js",
-    "e2e": "npm run build:ts && node scripts/electron-e2e.js"
+    "e2e": "npm run build:ts && node scripts/electron-e2e.js",
+    "e2e:upgrade": "npm run build:ts && node scripts/legacy-upgrade-e2e.js"
   },
   "dependencies": {
     "electron-log": "^5.0.0"
@@ -39,6 +40,9 @@
     "files": [
       "dist/**/*",
       "src/renderer/**/*"
+    ],
+    "asarUnpack": [
+      "dist/main/legacyPc2Worker.js"
     ],
     "mac": {
       "category": "public.app-category.utilities",

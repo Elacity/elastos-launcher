@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Install the pinned runtime (0.8.0-alpha.20), roll back to the publisher's
-# previous signed head (0.8.0-alpha.19), require /healthz OK, then update
+# Install the pinned runtime (0.8.0-alpha.21), roll back to the publisher's
+# previous signed head (0.8.0-alpha.20), require /healthz OK, then update
 # forward again and require /healthz OK. This runs the real elastos binary.
 set -euo pipefail
 
@@ -63,8 +63,8 @@ current = urllib.request.urlopen(gateway + "/release-head.json", timeout=60).rea
 open(sys.argv[2], "wb").write(current)
 current_doc = json.loads(current.decode())
 current_cid = unixfs_cid(current)
-if current_doc["payload"]["version"] != "0.8.0-alpha.20":
-    sys.exit("publisher release-head.json is not 0.8.0-alpha.20")
+if current_doc["payload"]["version"] != "0.8.0-alpha.21":
+    sys.exit("publisher release-head.json is not 0.8.0-alpha.21")
 if current_cid != channel["headCid"]:
     sys.exit(f"publisher head {current_cid} is not the pin {channel['headCid']}")
 prev = current_doc["payload"].get("prev_head_cid") or ""
@@ -76,13 +76,13 @@ prev_doc = json.loads(prev_raw.decode())
 prev_cid = unixfs_cid(prev_raw)
 if prev_cid != prev:
     sys.exit(f"previous object CID {prev_cid} is not {prev}")
-if prev_doc["payload"]["version"] != "0.8.0-alpha.19":
-    sys.exit(f"previous head is {prev_doc['payload'].get('version')}, not 0.8.0-alpha.19")
+if prev_doc["payload"]["version"] != "0.8.0-alpha.20":
+    sys.exit(f"previous head is {prev_doc['payload'].get('version')}, not 0.8.0-alpha.20")
 open(sys.argv[4], "w").write(
     f"PREV_CID={prev}\nPIN_CID={channel['headCid']}\nMAINTAINER={pin['maintainerDid']}\n"
 )
-print(f"previous head {prev} is 0.8.0-alpha.19")
-print(f"pinned head {channel['headCid']} is 0.8.0-alpha.20")
+print(f"previous head {prev} is 0.8.0-alpha.20")
+print(f"pinned head {channel['headCid']} is 0.8.0-alpha.21")
 PY
 
 # shellcheck disable=SC1090
@@ -181,14 +181,14 @@ run_update() {
   fi
 }
 
-echo "Rolling back to 0.8.0-alpha.19 ${PREV_CID}"
+echo "Rolling back to 0.8.0-alpha.20 ${PREV_CID}"
 run_update update --rollback-to "${PREV_CID}" --yes
-require_version "0.8.0-alpha.19"
+require_version "0.8.0-alpha.20"
 require_health
 
 echo "Updating back to the pinned release ${PIN_CID}"
 run_update update --yes
-require_version "0.8.0-alpha.20"
+require_version "0.8.0-alpha.21"
 require_health
 echo "Rollback returned to the pinned release"
 trap - EXIT
