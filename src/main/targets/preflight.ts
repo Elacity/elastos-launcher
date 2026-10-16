@@ -144,7 +144,7 @@ export function scrubSupportText(text: string): string {
       .replace(/(\bcookie\s*[:=]\s*)\S+/gi, '$1[removed]')
       .replace(/(\bauthorization\s*=\s*)\S+/gi, '$1[removed]')
       .replace(/bearer\s+\S+/gi, 'bearer [removed]')
-      .replace(/(\bpassword\s*[:=]\s*)\S+/gi, '$1[removed]'))
+      .replace(/password\s*[:=]\s*\S+/gi, 'password [removed]'))
     .join('\n');
 }
 
