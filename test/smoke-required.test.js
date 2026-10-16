@@ -25,4 +25,6 @@ test('a missing wsl.exe fails the Windows job', () => {
     /if \(-not \(Get-Command wsl\.exe -ErrorAction SilentlyContinue\)\) \{\s*Write-Host 'wsl\.exe is not installed\.'\s*exit 1\s*\}/,
   );
   assert.match(windows, /exit \$code\s*$/);
+  assert.match(windows, /\.Replace\('\\', '\/'\)/);
+  assert.match(windows, /if \(\$null -eq \$unixRaw\) \{\s*Write-Host 'wslpath did not return a Linux path\.'\s*exit 1\s*\}/);
 });
