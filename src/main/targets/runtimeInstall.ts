@@ -99,12 +99,15 @@ export function planRuntimeInstall(input: {
   if (blocked) return { action: 'blocked', message: blocked };
   const versionOk = installedVersionMatches(input.installedVersion, input.pin.version);
   const headOk = Boolean(input.pin.headCid && input.installedHeadCid === input.pin.headCid);
-  if (versionOk && headOk && input.componentsPresent) return { action: 'already-installed' };
-  if (versionOk && headOk && !input.componentsPresent) return { action: 'resume-setup' };
-  // No publisher yet. This is not permission to install.
-  if (input.publisher === null && input.pin.publishable) return { action: 'unchecked' };
+  if (!input.publisher) {
+    return input.pin.publishable
+      ? { action: 'unchecked' }
+      : { action: 'refused', field: pinMismatchField(input.pin, null) ?? 'release-head' };
+  }
   const field = pinMismatchField(input.pin, input.publisher);
   if (field) return { action: 'refused', field };
+  if (versionOk && headOk && input.componentsPresent) return { action: 'already-installed' };
+  if (versionOk && headOk && !input.componentsPresent) return { action: 'resume-setup' };
   return { action: 'pinned' };
 }
 
@@ -159,31 +162,6 @@ export async function installRuntime(
 
     const components = runtimeComponentsPath(runtimeDataDir(deps.platform, deps.homeDir, deps.env));
     const probed = await probeInstalled(deps);
-    const early = planRuntimeInstall({
-      platform: deps.platform,
-      arch: deps.arch,
-      installedVersion: probed,
-      installedHeadCid: readInstalledHeadCid(deps),
-      componentsPresent: deps.exists(components),
-      pin: deps.pin,
-      publisher: null,
-    });
-    if (early.action === 'already-installed') {
-      writeStage(deps, 'done');
-      onProgress('ElastOS is already installed.');
-      assertPc2Untouched(deps, pc2Before);
-      return;
-    }
-    if (early.action === 'resume-setup') {
-      onProgress('Resuming setup. The download already finished.');
-      await runSetupStep(deps, onProgress);
-      writeStage(deps, 'done');
-      onProgress('Your computer is ready.');
-      assertPc2Untouched(deps, pc2Before);
-      return;
-    }
-    if (early.action === 'refused') throw new PinMismatchError(early.field);
-
     let publisher: ReleaseHead | null = null;
     try {
       const raw = await deps.fetchText(releaseHeadUrl(deps.pin));
@@ -201,6 +179,20 @@ export async function installRuntime(
       pin: deps.pin,
       publisher,
     });
+    if (plan.action === 'already-installed') {
+      writeStage(deps, 'done');
+      onProgress('ElastOS is already installed.');
+      assertPc2Untouched(deps, pc2Before);
+      return;
+    }
+    if (plan.action === 'resume-setup') {
+      onProgress('Resuming setup. The download already finished.');
+      await runSetupStep(deps, onProgress);
+      writeStage(deps, 'done');
+      onProgress('Your computer is ready.');
+      assertPc2Untouched(deps, pc2Before);
+      return;
+    }
     if (plan.action === 'refused') throw new PinMismatchError(plan.field);
     if (plan.action !== 'pinned') {
       throw new PinMismatchError('version');
