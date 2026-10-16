@@ -481,7 +481,7 @@ function processCommand(pid: number): string | null {
 }
 
 export function openRuntimeHome(): void {
-  // Same pattern as PC2: Electron is present in the app and absent in unit tests.
+  // Electron is present in the app and absent in unit tests.
   const electron = require('electron') as { shell?: { openExternal: (url: string) => void } };
   if (!electron.shell?.openExternal) {
     throw new Error('Could not open your computer in the browser.');

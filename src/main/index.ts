@@ -1,8 +1,7 @@
 import { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage, shell } from 'electron';
 import * as path from 'path';
 import log from 'electron-log';
-import * as pc2Manager from './pc2Manager';
-import { createDefaultLaunchController } from './launchController';
+import { createDefaultLaunchController, TargetStatus } from './launchController';
 
 const launch = createDefaultLaunchController(process.env);
 
@@ -27,7 +26,7 @@ if (process.platform === 'darwin') {
 let mainWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
 let isQuitting = false;
-let currentStatus: pc2Manager.PC2Status = 'stopped';
+let currentStatus: TargetStatus = 'stopped';
 
 // Configure logging
 log.transports.file.level = 'info';
@@ -58,7 +57,7 @@ function createWindow(): void {
     
     // Check initial status
     currentStatus = await launch.getStatus();
-    mainWindow?.webContents.send('pc2:status', currentStatus);
+    mainWindow?.webContents.send('elastos:status', currentStatus);
   });
 
   mainWindow.on('close', (event) => {
@@ -102,7 +101,7 @@ function createTray(): void {
 }
 
 function updateTrayMenu(): void {
-  const statusLabels: Record<pc2Manager.PC2Status, string> = {
+  const statusLabels: Record<TargetStatus, string> = {
     'running': '🟢 Running',
     'stopped': '⚫ Stopped',
     'starting': '🟡 Starting...',
@@ -115,18 +114,18 @@ function updateTrayMenu(): void {
     { label: `Status: ${statusLabels[currentStatus]}`, enabled: false },
     { type: 'separator' },
     {
-      label: launch.target.id === 'runtime' ? 'Start' : 'Start PC2',
+      label: 'Start',
       enabled: currentStatus === 'stopped' || currentStatus === 'error',
       click: () => { void launch.start(); }
     },
     {
-      label: launch.target.id === 'runtime' ? 'Stop' : 'Stop PC2',
+      label: 'Stop',
       enabled: currentStatus === 'running',
       click: () => { void launch.stop(); }
     },
     { type: 'separator' },
     {
-      label: launch.target.id === 'runtime' ? 'Open my computer' : 'Open in Browser',
+      label: 'Open my computer',
       enabled: currentStatus === 'running',
       click: () => launch.openInBrowser()
     },
@@ -147,84 +146,54 @@ function updateTrayMenu(): void {
 // Set up status change listener
 launch.onStatusChange((status) => {
   currentStatus = status;
-  mainWindow?.webContents.send('pc2:status', status);
+  mainWindow?.webContents.send('elastos:status', status);
   updateTrayMenu();
 });
 
 // Set up log listener
 launch.onLog((logMessage) => {
-  mainWindow?.webContents.send('pc2:log', logMessage);
+  mainWindow?.webContents.send('elastos:log', logMessage);
 });
 
-// IPC Handlers. Preload keeps the pc2:* channel names; the controller
-// chooses the target. Default target methods are the pc2Manager functions.
-ipcMain.handle('pc2:getStatus', () => launch.getStatus());
-ipcMain.handle('pc2:start', () => launch.start());
-ipcMain.handle('pc2:stop', () => launch.stop());
-ipcMain.handle('pc2:restart', () => launch.restart());
-ipcMain.handle('pc2:getLogs', (_, lines) => launch.getLogs(lines));
-ipcMain.handle('pc2:isInstalled', () => launch.isInstalled());
-ipcMain.handle('pc2:openBrowser', () => launch.openInBrowser());
-ipcMain.handle('pc2:install', async (event) => {
+// IPC handlers. The preload exposes these as window.elastos.
+ipcMain.handle('elastos:getStatus', () => launch.getStatus());
+ipcMain.handle('elastos:start', () => launch.start());
+ipcMain.handle('elastos:stop', () => launch.stop());
+ipcMain.handle('elastos:restart', () => launch.restart());
+ipcMain.handle('elastos:getLogs', (_, lines) => launch.getLogs(lines));
+ipcMain.handle('elastos:isInstalled', () => launch.isInstalled());
+ipcMain.handle('elastos:openBrowser', () => launch.openInBrowser());
+ipcMain.handle('elastos:install', async (event) => {
   return launch.install((msg) => {
-    event.sender.send('pc2:installProgress', msg);
+    event.sender.send('elastos:installProgress', msg);
   });
 });
 
-ipcMain.handle('pc2:uninstall', () => launch.uninstall());
-ipcMain.handle('pc2:resetRuntime', () => launch.resetRuntime());
+ipcMain.handle('elastos:uninstall', () => launch.uninstall());
+ipcMain.handle('elastos:resetRuntime', () => launch.resetRuntime());
 
 // Version and updates
-ipcMain.handle('pc2:getVersion', () => launch.getVersion());
-ipcMain.handle('pc2:checkForUpdate', () => launch.checkForUpdate());
-ipcMain.handle('pc2:update', async (event) => {
+ipcMain.handle('elastos:getVersion', () => launch.getVersion());
+ipcMain.handle('elastos:checkForUpdate', () => launch.checkForUpdate());
+ipcMain.handle('elastos:update', async (event) => {
   return launch.update((msg) => {
-    event.sender.send('pc2:updateProgress', msg);
+    event.sender.send('elastos:updateProgress', msg);
   });
 });
 
-// Environment management
-ipcMain.handle('pc2:setEnvironment', async (_, env: string, customPath?: string) => {
-  pc2Manager.setEnvironment(env as pc2Manager.PC2Environment, customPath);
-  const status = await launch.getStatus();
-  mainWindow?.webContents.send('pc2:status', status);
-  return {
-    env,
-    path: pc2Manager.getPC2Dir(),
-    installed: await pc2Manager.isInstalled()
-  };
-});
-
-ipcMain.handle('pc2:getEnvironment', () => ({
-  env: pc2Manager.getEnvironment(),
-  path: pc2Manager.getPC2Dir(),
-  label: pc2Manager.getEnvironmentLabel()
-}));
-
-// Network info
-ipcMain.handle('pc2:getLanURL', () => pc2Manager.getLanURL());
-ipcMain.handle('pc2:getQRCode', () => pc2Manager.generateQRCode());
-
-ipcMain.handle('pc2:getLaunchInfo', () => launch.getLaunchInfo());
-ipcMain.handle('pc2:setLaunchTarget', async (_, id: string) => {
-  const next = launch.setLaunchTarget(id);
-  const status = await launch.getStatus();
-  mainWindow?.webContents.send('pc2:status', status);
-  updateTrayMenu();
-  return next;
-});
-ipcMain.handle('pc2:getPreflight', () => launch.getPreflight());
-ipcMain.handle('pc2:getDiagnostics', () => launch.getDiagnostics());
-ipcMain.handle('pc2:saveSupportBundle', () => launch.saveSupportBundle());
-ipcMain.handle('pc2:describeFailure', () => launch.describeFailure());
-ipcMain.handle('pc2:fixFailure', () => launch.fixFailure());
-ipcMain.handle('pc2:setOpenAtLogin', (_, enabled: boolean) => {
+ipcMain.handle('elastos:getLaunchInfo', () => launch.getLaunchInfo());
+ipcMain.handle('elastos:getPreflight', () => launch.getPreflight());
+ipcMain.handle('elastos:getDiagnostics', () => launch.getDiagnostics());
+ipcMain.handle('elastos:saveSupportBundle', () => launch.saveSupportBundle());
+ipcMain.handle('elastos:describeFailure', () => launch.describeFailure());
+ipcMain.handle('elastos:fixFailure', () => launch.fixFailure());
+ipcMain.handle('elastos:setOpenAtLogin', (_, enabled: boolean) => {
   launch.setOpenAtLogin(enabled);
   return launch.getOpenAtLogin();
 });
-ipcMain.handle('pc2:rollback', async (event) => {
+ipcMain.handle('elastos:rollback', async (event) => {
   return launch.rollback((msg) => {
-    event.sender.send('pc2:updateProgress', msg);
+    event.sender.send('elastos:updateProgress', msg);
   });
 });
 
@@ -252,9 +221,5 @@ app.on('activate', () => {
 
 app.on('before-quit', () => {
   isQuitting = true;
-  // v1.2.7.13: clean up the heartbeat poller's interval timer so the
-  // event loop doesn't keep the app process alive after BrowserWindow
-  // closes. (The poller uses unref'd timers in pc2-node but Electron's
-  // setInterval doesn't auto-unref, so we stop it explicitly.)
   launch.shutdown();
 });

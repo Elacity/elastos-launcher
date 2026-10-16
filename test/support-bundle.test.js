@@ -75,11 +75,11 @@ test('save support bundle writes only ElastOS-support.txt outside the data dirs'
 
   assert.throws(
     () => saveSupportBundle(path.join(home, '.local/share/elastos/ElastOS-support.txt'), 'x', () => {}),
-    /ElastOS or PC2/,
+    /ElastOS data directory/,
   );
   assert.throws(
-    () => saveSupportBundle(path.join(home, '.pc2/ElastOS-support.txt'), 'x', () => {}),
-    /ElastOS or PC2/,
+    () => saveSupportBundle(path.join(home, '.other/ElastOS-support.txt'), 'x', () => {}),
+    /ElastOS data directory/,
   );
   assert.throws(
     () => saveSupportBundle(path.join(desktop, 'notes.txt'), 'x', () => {}),

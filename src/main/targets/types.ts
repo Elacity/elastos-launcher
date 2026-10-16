@@ -1,9 +1,9 @@
 /**
- * Launch-target contract shared by PC2.net and the ElastOS runtime.
+ * Launch-target contract for the ElastOS runtime.
  * Descriptors are data. They do not start a process.
  */
 
-export type LaunchTargetId = 'pc2' | 'runtime';
+export type LaunchTargetId = 'runtime';
 
 /** Same strings the renderer already renders in src/renderer/app.js. */
 export type TargetStatus =
@@ -20,12 +20,9 @@ export interface TargetPlatform {
 }
 
 export interface HealthProbe {
-  /** Absolute URL the launcher polls until HTTP 2xx. */
+  /** Absolute URL the launcher polls until the body is OK. */
   url: string;
-  /**
-   * Substring required in the response body.
-   * Empty means any HTTP 2xx is enough (PC2's /health has no fixed body).
-   */
+  /** Substring required in the response body. */
   expectBodyIncludes: string;
 }
 
@@ -34,17 +31,16 @@ export interface LaunchTargetDescriptor {
   displayName: string;
   /**
    * False until this process can install and supervise the target.
-   * The runtime descriptor stays false until the wiring tickets land.
    */
   implemented: boolean;
-  /** Install root the launcher already uses, or the runtime's install root. */
+  /** Install root the launcher uses. */
   installDir: string;
-  /** Executable or script the launcher spawns. Not invoked by the registry. */
+  /** Executable the launcher spawns. Not invoked by the registry. */
   binary: string;
   /** Arguments for a launcher-owned start. Not invoked by the registry. */
   startArgs: readonly string[];
   health: HealthProbe;
-  /** Page "Open My Cloud" should open once health passes. */
+  /** Page "Open my computer" should open once health passes. */
   openUrl: string;
   platforms: readonly TargetPlatform[];
 }

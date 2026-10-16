@@ -26,13 +26,12 @@ function stepStates(message) {
 }
 
 function primaryAction(state) {
-  const targetId = state.targetId;
   const status = state.status;
   if (state.busy) return { id: 'busy', label: 'Working…', enabled: false };
   if (status === 'running') {
     return {
       id: 'open',
-      label: targetId === 'runtime' ? 'Open my computer' : 'Open My Cloud',
+      label: 'Open my computer',
       enabled: true,
     };
   }
@@ -40,7 +39,7 @@ function primaryAction(state) {
     return {
       id: status === 'error' ? 'retry' : 'install',
       label: status === 'error' ? 'Try again' : 'Install',
-      enabled: targetId === 'runtime' || status === 'not-installed',
+      enabled: true,
     };
   }
   if (status === 'starting' || status === 'stopping') {
@@ -49,17 +48,10 @@ function primaryAction(state) {
   return { id: 'start', label: 'Start', enabled: true };
 }
 
-function confirmCopy(targetId, paths) {
-  if (targetId === 'runtime') {
-    return {
-      title: 'Uninstall ElastOS?',
-      body: 'This removes ElastOS from this computer. It does not delete PC2.',
-      paths,
-    };
-  }
+function confirmCopy(_targetId, paths) {
   return {
-    title: 'Uninstall PC2?',
-    body: 'This permanently deletes the PC2 files at:',
+    title: 'Uninstall ElastOS?',
+    body: 'This removes the ElastOS program and its data from this computer.',
     paths,
   };
 }
@@ -71,8 +63,8 @@ function resetCopy() {
   };
 }
 
-function firstRunCopy(targetId, status) {
-  if (targetId !== 'runtime' || status !== 'not-installed') return '';
+function firstRunCopy(_targetId, status) {
+  if (status !== 'not-installed') return '';
   return 'Install ElastOS on this computer. One button downloads it, sets it up, and starts it. Then you open your computer in the browser.';
 }
 

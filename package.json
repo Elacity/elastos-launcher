@@ -1,7 +1,7 @@
 {
   "name": "elastos-launcher",
   "version": "1.4.0",
-  "description": "ElastOS Personal Cloud - Desktop Launcher",
+  "description": "ElastOS runtime desktop launcher",
   "main": "dist/main/index.js",
   "author": {
     "name": "Elacity Labs",
@@ -20,9 +20,7 @@
     "e2e": "npm run build:ts && node scripts/electron-e2e.js"
   },
   "dependencies": {
-    "electron-log": "^5.0.0",
-    "electron-store": "^8.1.0",
-    "qrcode": "^1.5.4"
+    "electron-log": "^5.0.0"
   },
   "devDependencies": {
     "@types/node": "^20.10.0",

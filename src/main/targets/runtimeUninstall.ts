@@ -1,12 +1,7 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { runtimeBinaryPath, runtimeDataDir, runtimeInstallStagePath } from './runtimePaths';
-
-export function mentionsPc2(file: string): boolean {
-  const normalized = file.split('\\').join('/');
-  return normalized.includes('/.pc2/') || normalized.includes('/pc2.net/');
-}
+import { launcherOwnedDirectories, runtimeBinaryPath, runtimeDataDir, runtimeInstallStagePath } from './runtimePaths';
 
 export interface RemovalStat {
   isSymbolicLink(): boolean;
@@ -69,13 +64,10 @@ export function assertStableRemovalTarget(
 }
 
 export function assertSafeRuntimeRemoval(binary: string, dataDir: string): void {
-  if (path.basename(dataDir) !== 'elastos') {
+  if (path.basename(dataDir) !== 'elastos' || !launcherOwnedDirectories(dataDir)) {
     throw new Error('Refusing to remove a directory that is not the ElastOS data directory.');
   }
-  if (mentionsPc2(dataDir) || mentionsPc2(binary)) {
-    throw new Error('Refusing to remove the PC2 directory.');
-  }
-  if (path.basename(binary) !== 'elastos') {
+  if (path.basename(binary) !== 'elastos' || !launcherOwnedDirectories(binary)) {
     throw new Error('Refusing to remove a file that is not the ElastOS program.');
   }
 }
@@ -115,12 +107,8 @@ export async function resetRuntime(deps: {
   lstat?: (file: string) => RemovalStat;
 }): Promise<void> {
   assertSafeRuntimeRemoval(deps.binary, deps.dataDir);
-  if (path.basename(deps.stageFile) !== 'install-stage.json') {
+  if (path.basename(deps.stageFile) !== 'install-stage.json' || !launcherOwnedDirectories(deps.stageFile)) {
     throw new Error('Refusing to remove a file that is not the ElastOS install stage.');
-  }
-  const stage = deps.stageFile.split('\\').join('/');
-  if (stage.includes('/.pc2/') || stage.includes('/pc2.net/')) {
-    throw new Error('Refusing to remove the PC2 directory.');
   }
   try {
     await deps.stop();

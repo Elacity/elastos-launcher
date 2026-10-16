@@ -123,7 +123,6 @@ export interface RuntimeInstallDeps {
   homeDir: string;
   env?: NodeJS.ProcessEnv;
   pin: ActiveRuntimePin;
-  pc2Dir?: string;
   probe?: (request: RuntimeProbeRequest) => Promise<RuntimeProbe>;
   fetchText: (url: string) => Promise<string>;
   runInstaller: (
@@ -144,20 +143,11 @@ const DOWNLOAD = 'Downloading ElastOS (about 1 minute)';
 const INSTALLING = 'Installing (about 30 seconds)';
 const SETUP = 'Setting up your computer (about 2 minutes)';
 
-function assertPc2Untouched(deps: RuntimeInstallDeps, before: number | null): void {
-  if (!deps.pc2Dir) return;
-  if (deps.statMtimeMs(deps.pc2Dir) !== before) {
-    throw new Error('Runtime install must not modify the PC2 directory.');
-  }
-}
-
 export async function installRuntime(
   deps: RuntimeInstallDeps,
   onProgress: (message: string) => void = () => {},
 ): Promise<void> {
-  const pc2Before = deps.pc2Dir ? deps.statMtimeMs(deps.pc2Dir) : null;
-  try {
-    onProgress(CHECK);
+  onProgress(CHECK);
     const blocked = runtimeInstallBlock(deps.platform, deps.arch);
     if (blocked) throw new Error(blocked);
 
@@ -184,7 +174,6 @@ export async function installRuntime(
     if (plan.action === 'already-installed') {
       writeStage(deps, 'done');
       onProgress('ElastOS is already installed.');
-      assertPc2Untouched(deps, pc2Before);
       return;
     }
     if (plan.action === 'resume-setup') {
@@ -192,7 +181,6 @@ export async function installRuntime(
       await runSetupStep(deps, onProgress);
       writeStage(deps, 'done');
       onProgress('Your computer is ready.');
-      assertPc2Untouched(deps, pc2Before);
       return;
     }
     if (plan.action === 'refused') throw new PinMismatchError(plan.field);
@@ -213,13 +201,8 @@ export async function installRuntime(
     if (!deps.exists(components)) {
       await runSetupStep(deps, onProgress);
     }
-    writeStage(deps, 'done');
-    onProgress('Your computer is ready.');
-    assertPc2Untouched(deps, pc2Before);
-  } catch (err) {
-    assertPc2Untouched(deps, pc2Before);
-    throw err;
-  }
+  writeStage(deps, 'done');
+  onProgress('Your computer is ready.');
 }
 
 function readInstalledHeadCid(deps: RuntimeInstallDeps): string | null {
@@ -341,7 +324,6 @@ export function defaultRuntimeInstallDeps(pin: ActiveRuntimePin = loadActiveRunt
     homeDir,
     env: process.env,
     pin,
-    pc2Dir: path.join(homeDir, '.pc2'),
     fetchText: fetchText,
     runInstaller: (scriptPath, args, env) => exec('bash', [scriptPath, ...args], 15 * 60 * 1000, env),
     runSetup: (binary) => exec(binary, ['setup'], 15 * 60 * 1000, installerChildEnv(process.env)),

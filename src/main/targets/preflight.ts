@@ -3,6 +3,7 @@ import * as net from 'net';
 import * as os from 'os';
 import * as path from 'path';
 import { HEALTH_URL } from './runtimeGateway';
+import { launcherOwnedDirectories } from './runtimePaths';
 import { loadActiveRuntimePin } from './runtimePin';
 import { runtimeInstallBlock, wslKvmMessage, detectWsl } from './runtimeSupport';
 import { detectWindows, hostPrompt, listDistros, lookupCommand } from './windowsHost';
@@ -163,8 +164,8 @@ export function saveSupportBundle(
     throw new Error('Refusing to write the support bundle under another name.');
   }
   const normalized = file.split(path.sep).join('/');
-  if (normalized.includes('/.pc2/') || normalized.includes('/pc2.net/') || /\/elastos\//.test(normalized)) {
-    throw new Error('Refusing to store the support bundle inside ElastOS or PC2 data.');
+  if (!launcherOwnedDirectories(file) || /\/elastos\//.test(normalized)) {
+    throw new Error('Refusing to store the support bundle inside the ElastOS data directory.');
   }
   write(file, scrubSupportText(text));
   return file;

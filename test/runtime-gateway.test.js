@@ -449,10 +449,10 @@ test('uninstall removes only the runtime binary and data dir', async () => {
 
   await assert.rejects(() => uninstallRuntime({
     binary: '/home/tester/.local/bin/elastos',
-    dataDir: '/home/tester/.pc2',
+    dataDir: '/home/tester/.other',
     stop: async () => {},
     remove: () => { throw new Error('should not remove'); },
-  }), /not the ElastOS data directory|PC2 directory/);
+  }), /not the ElastOS data directory/);
 
   let stopped = false;
   await assert.rejects(() => uninstallRuntime({

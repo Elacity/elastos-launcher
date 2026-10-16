@@ -29,15 +29,15 @@ test('reset removes the runtime program, data, and unfinished install', async ()
   assert.deepEqual(removed, calls.slice(1));
 });
 
-test('reset refuses PC2, a live foreign host, and a misnamed stage file', async () => {
+test('reset refuses a foreign directory, a live foreign host, and a misnamed stage file', async () => {
   const remove = () => { throw new Error('should not remove'); };
   await assert.rejects(() => resetRuntime({
     binary: '/home/tester/.local/bin/elastos',
-    dataDir: '/home/tester/.pc2/elastos',
+    dataDir: '/home/tester/.other/elastos',
     stageFile: '/home/tester/.elastos-launcher/install-stage.json',
     stop: async () => {},
     remove,
-  }), /PC2 directory/);
+  }), /not the ElastOS data directory/);
 
   await assert.rejects(() => resetRuntime({
     binary: '/home/tester/.local/bin/elastos',
@@ -68,7 +68,7 @@ test('reset refuses PC2, a live foreign host, and a misnamed stage file', async 
   assert.match(app, /resetCopy/);
 });
 
-test('reset refuses a symlink and a forward-slash PC2 path', async () => {
+test('reset refuses a symlink and a dotted foreign directory', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'elastos-reset-'));
   const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'elastos-outside-'));
   const data = path.join(root, 'elastos');
@@ -87,11 +87,11 @@ test('reset refuses a symlink and a forward-slash PC2 path', async () => {
 
   await assert.rejects(() => resetRuntime({
     binary: path.join(root, 'elastos'),
-    dataDir: 'C:/Users/tester/.pc2/elastos',
+    dataDir: 'C:/Users/tester/.other/elastos',
     stageFile: path.join(root, 'install-stage.json'),
     stop: async () => { throw new Error('stop should not run'); },
     remove: (target) => { removed.push(target); },
-  }), /PC2/);
+  }), /not the ElastOS data directory/);
   assert.deepEqual(removed, []);
 
   const inspected = [];

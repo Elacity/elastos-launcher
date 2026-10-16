@@ -74,12 +74,6 @@ print(f"smoke pin channel={flat.get('channel')} version={flat.get('version')}")
 PY
 pin_file="${work}/pin.json"
 
-pc2_dir="${real_home}/.pc2"
-pc2_stamp=""
-if [[ -e "${pc2_dir}" ]]; then
-  pc2_stamp="$(stat -c %Y "${pc2_dir}" 2>/dev/null || stat -f %m "${pc2_dir}")"
-fi
-
 python3 - "${pin_file}" "${work}/pin.match" "${work}/release-head.json" <<'PY'
 import json, sys, urllib.request
 pin = json.load(open(sys.argv[1]))
@@ -190,15 +184,6 @@ if [[ "${installed_head}" != "${head_cid}" ]]; then
   exit 1
 fi
 echo "Installed head CID matches the pin"
-
-if [[ -n "${pc2_stamp}" ]]; then
-  pc2_now="$(stat -c %Y "${pc2_dir}" 2>/dev/null || stat -f %m "${pc2_dir}")"
-  if [[ "${pc2_now}" != "${pc2_stamp}" ]]; then
-    echo "PC2 directory changed during the runtime install" >&2
-    exit 1
-  fi
-  echo "PC2 directory was left unchanged"
-fi
 
 echo "Starting elastos gateway --addr 127.0.0.1:8090"
 "${runtime_bin}" gateway --addr 127.0.0.1:8090 >"${gw_log}" 2>&1 &

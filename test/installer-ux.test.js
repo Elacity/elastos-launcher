@@ -101,13 +101,12 @@ test('sign-in launch writes a desktop file and can remove it', () => {
 test('the install button is the primary action until the computer is healthy', () => {
   assert.equal(flow.primaryAction({ targetId: 'runtime', status: 'not-installed', busy: false }).label, 'Install');
   assert.equal(flow.primaryAction({ targetId: 'runtime', status: 'running', busy: false }).label, 'Open my computer');
-  assert.equal(flow.primaryAction({ targetId: 'pc2', status: 'running', busy: false }).label, 'Open My Cloud');
   assert.equal(flow.primaryAction({ targetId: 'runtime', status: 'error', busy: false }).id, 'retry');
   assert.match(flow.firstRunCopy('runtime', 'not-installed'), /One button/);
-  assert.equal(flow.firstRunCopy('pc2', 'not-installed'), '');
+  assert.equal(flow.firstRunCopy('runtime', 'running'), '');
   const copy = flow.confirmCopy('runtime', []);
   assert.match(copy.title, /ElastOS/);
-  assert.match(copy.body, /does not delete PC2/);
+  assert.match(copy.body, /removes the ElastOS program/);
   const steps = flow.stepStates('Downloading ElastOS (about 1 minute)');
   assert.equal(steps[1].state, 'active');
   assert.equal(steps[0].state, 'done');

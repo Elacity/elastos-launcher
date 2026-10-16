@@ -1,6 +1,6 @@
 # Import a dedicated ElastOS WSL2 distro and run the Linux runtime smoke inside it.
 # Distro name is ElastOS. Every wsl.exe call names -d ElastOS.
-# This is not the PC2 path (wsl bash -c against the default distro).
+# Every call names the ElastOS distro. It does not use the default distro.
 # A missing distro, a WSL1 import, or a failed /healthz exits non-zero.
 $PSNativeCommandUseErrorActionPreference = $false
 $env:WSL_UTF8 = '1'
