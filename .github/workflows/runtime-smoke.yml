@@ -106,6 +106,31 @@ jobs:
             node scripts/legacy-upgrade-e2e.js
           fi
 
+  electron-e2e-windows:
+    name: e2e (windows)
+    timeout-minutes: 60
+    runs-on: windows-2025
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - name: Install dependencies
+        env:
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1'
+        run: npm ci
+
+      - name: Click Install and reach Open my computer
+        env:
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1'
+          ELASTOS_LAUNCH_TARGET: runtime
+        run: npm run e2e
+
   windows-app:
     name: app install (windows-wsl)
     timeout-minutes: 60

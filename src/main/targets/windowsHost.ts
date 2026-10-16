@@ -323,34 +323,110 @@ export function assertPinnedRootfs(bytes: Buffer): void {
   }
 }
 
-/** After a Windows restart, continue Install only when Linux support is actually on. */
+function resumeLockPath(homeDir: string): string {
+  return `${runtimeResumeInstallPath(homeDir)}.lock`;
+}
+
+function claimResumeInstall(homeDir: string): boolean {
+  const lock = resumeLockPath(homeDir);
+  const payload = JSON.stringify({ pid: process.pid });
+  const write = () => {
+    const fd = fs.openSync(lock, fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_WRONLY, 0o600);
+    try {
+      fs.writeFileSync(fd, payload);
+    } finally {
+      fs.closeSync(fd);
+    }
+  };
+  try {
+    write();
+    return true;
+  } catch (err) {
+    const code = err && typeof err === 'object' && 'code' in err ? String((err as { code?: string }).code) : '';
+    if (code !== 'EEXIST') return false;
+  }
+  try {
+    const existing = JSON.parse(fs.readFileSync(lock, 'utf8')) as { pid?: unknown };
+    if (existing.pid === process.pid) return false;
+    if (typeof existing.pid === 'number' && existing.pid > 0) {
+      try {
+        process.kill(existing.pid, 0);
+        return false;
+      } catch {
+        // The previous ElastOS is gone. This open can continue Install.
+      }
+    } else {
+      return false;
+    }
+  } catch {
+    return false;
+  }
+  try {
+    fs.rmSync(lock, { force: true });
+    write();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * After a Windows restart, continue Install only when Linux support is on and
+ * ElastOS is not already installed. One open claims the resume. The marker
+ * stays until Install succeeds.
+ */
 export async function resumeInstallPlanOnThisComputer(deps: {
   homeDir?: string;
   platform?: string;
   wslInstalled?: boolean;
+  installed?: () => Promise<boolean>;
+  detect?: () => Promise<{ wslInstalled: boolean }>;
 } = {}): Promise<ResumeInstallPlan> {
   const homeDir = deps.homeDir ?? os.homedir();
   const marker = readResumeInstallMarker(homeDir);
   if (!marker) return 'none';
+  if (deps.installed) {
+    try {
+      if (await deps.installed()) return 'none';
+    } catch {
+      return 'wait';
+    }
+  }
   const platform = deps.platform ?? process.platform;
   let wslInstalled = deps.wslInstalled;
   if (wslInstalled === undefined) {
     if (platform !== 'win32') return 'wait';
-    const facts = await detectWindows({
-      platform,
-      arch: process.arch,
-      lookup: lookupCommand,
-      listDistros,
-    });
-    wslInstalled = facts.wslInstalled;
-  }
-  const plan = planAfterWindowsRestart({ marker: true, wslInstalled });
-  if (plan === 'install') {
     try {
-      fs.rmSync(runtimeResumeInstallPath(homeDir), { force: true });
+      const facts = deps.detect
+        ? await deps.detect()
+        : await detectWindows({
+          platform,
+          arch: process.arch,
+          lookup: lookupCommand,
+          listDistros,
+        });
+      wslInstalled = facts.wslInstalled;
     } catch {
-      // The next open can try again if the marker is still there.
+      return 'wait';
     }
   }
-  return plan;
+  const plan = planAfterWindowsRestart({ marker: true, wslInstalled });
+  if (plan !== 'install') return plan;
+  if (!claimResumeInstall(homeDir)) return 'none';
+  return 'install';
+}
+
+/** Drop the resume lock. Remove the marker only after Install succeeded. */
+export function finishResumeInstall(homeDir: string, ok: boolean): void {
+  try {
+    fs.rmSync(resumeLockPath(homeDir), { force: true });
+  } catch {
+    // The next open can reclaim a lock whose process is gone.
+  }
+  if (!ok) return;
+  try {
+    fs.rmSync(runtimeResumeInstallPath(homeDir), { force: true });
+  } catch {
+    // Reset also removes this file.
+  }
 }

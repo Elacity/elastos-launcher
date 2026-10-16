@@ -17,6 +17,7 @@ const {
   ensureElastosRootfs,
   hostPrompt,
   importDistroArgs,
+  finishResumeInstall,
   markInstallResumeAfterReboot,
   planAfterWindowsRestart,
   resumeInstallPlanOnThisComputer,
@@ -256,11 +257,40 @@ test('the next open continues Install only after Linux support is on', async () 
     assert.equal(await resumeInstallPlanOnThisComputer({ homeDir: home, platform: 'win32', wslInstalled: false }), 'wait');
     assert.equal(fs.existsSync(marker), true);
     assert.equal(await resumeInstallPlanOnThisComputer({ homeDir: home, platform: 'linux' }), 'wait');
-    assert.equal(await resumeInstallPlanOnThisComputer({ homeDir: home, platform: 'win32', wslInstalled: true }), 'install');
+    assert.equal(await resumeInstallPlanOnThisComputer({
+      homeDir: home,
+      platform: 'win32',
+      wslInstalled: true,
+      installed: async () => true,
+    }), 'none');
+    assert.equal(fs.existsSync(marker), true);
+    assert.equal(await resumeInstallPlanOnThisComputer({
+      homeDir: home,
+      platform: 'win32',
+      installed: async () => false,
+      detect: async () => { throw new Error('wsl'); },
+    }), 'wait');
+    assert.equal(fs.existsSync(marker), true);
+    const plans = await Promise.all([
+      resumeInstallPlanOnThisComputer({ homeDir: home, platform: 'win32', wslInstalled: true, installed: async () => false }),
+      resumeInstallPlanOnThisComputer({ homeDir: home, platform: 'win32', wslInstalled: true, installed: async () => false }),
+    ]);
+    assert.deepEqual(plans.slice().sort(), ['install', 'none']);
+    assert.equal(fs.existsSync(marker), true);
+    finishResumeInstall(home, false);
+    assert.equal(fs.existsSync(marker), true);
+    assert.equal(await resumeInstallPlanOnThisComputer({
+      homeDir: home,
+      platform: 'win32',
+      wslInstalled: true,
+      installed: async () => false,
+    }), 'install');
+    finishResumeInstall(home, true);
     assert.equal(fs.existsSync(marker), false);
     const app = fs.readFileSync(path.join(__dirname, '../src/renderer/app.js'), 'utf8');
     const firstRun = fs.readFileSync(path.join(__dirname, '../docs/FIRST_RUN.md'), 'utf8');
-    assert.match(app, /plan === 'install'/);
+    assert.match(app, /plan !== 'install'/);
+    assert.match(app, /finishResumeInstall/);
     assert.match(firstRun, /Install continues/);
   } finally {
     fs.rmSync(home, { recursive: true, force: true });

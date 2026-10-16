@@ -119,6 +119,10 @@ test('a busy port is not cleared by killing another program', async () => {
     portBusy: async () => true,
     confirm: async () => true,
   }), 'ours');
+  assert.equal(await recheckPortWith({
+    portBusy: async () => true,
+    confirm: async () => { throw new Error('lock'); },
+  }), 'busy');
 });
 
 test('an interrupted install continues setup and does not download', async () => {

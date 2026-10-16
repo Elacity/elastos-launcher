@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * Click Install in the Electron window and wait until the button says
- * "Open my computer". Linux and macOS CI run this against the pinned runtime.
+ * "Open my computer". Linux, macOS, and Windows CI run this against the pinned runtime.
  */
 const fs = require('node:fs');
 const os = require('node:os');

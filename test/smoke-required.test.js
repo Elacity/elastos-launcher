@@ -24,6 +24,18 @@ test('the runtime smoke workflow has no continue-on-error', () => {
   assert.match(workflow, /macos-14/);
   assert.match(workflow, /node scripts\/windows-app-install\.js/);
   assert.match(workflow, /bash scripts\/clean-machine-linux\.sh/);
+  const windowsE2e = (workflow.split('electron-e2e-windows:')[1] || '').split('\n  windows-app:')[0];
+  assert.match(windowsE2e, /name: e2e \(windows\)/);
+  assert.match(windowsE2e, /runs-on: windows-2025/);
+  assert.match(windowsE2e, /npm run e2e/);
+  assert.equal(/xvfb/.test(windowsE2e), false);
+  assert.equal(/windows-elastos-distro\.ps1/.test(windowsE2e), false);
+  const cleanInside = fs.readFileSync(path.join(root, 'scripts/clean-machine-inside.sh'), 'utf8');
+  assert.equal(/apt-get install[^\n]*ca-certificates/.test(cleanInside), false);
+  assert.equal(/apt-get install[^\n]*openssl/.test(cleanInside), false);
+  assert.match(cleanInside, /--use-bundled-ca/);
+  assert.match(cleanInside, /package_absent ca-certificates/);
+  assert.match(cleanInside, /package_absent openssl/);
   assert.match(workflow, /scripts\/windows-clean-machine\.ps1/);
   assert.equal(/windows-elastos-distro\.ps1/.test(
     workflow.split('windows-app:')[1] || '',

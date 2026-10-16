@@ -164,6 +164,8 @@ export function isPc2ServiceFile(basename: string, _body: string | null = null):
 
 /** Printed before the removal commands so a later exit status is the script's own. */
 export const PKEXEC_SENTINEL = 'ELASTOS_PKEXEC_STARTED';
+/** Printed after the root process has listed every file that is still present. */
+export const PKEXEC_CHECKED = 'ELASTOS_PKEXEC_CHECKED';
 
 export function pkexecDismissedMessage(): string {
   return 'You cancelled the administrator prompt, or the administrator check failed. The PC2 system files were not changed.';
@@ -1206,13 +1208,28 @@ export function privilegedRemovalScript(
       throw new Error('Refusing to remove a path that is not part of the old PC2 install.');
     }
   }
-  return files.map((file) => {
+  const removals = files.map((file) => {
     const quoted = quoteShell(file);
     if (file.endsWith('.service') || file.endsWith('.plist')) {
       return `launchctl bootout system ${quoted} >/dev/null 2>&1 || true; systemctl disable --now ${quoteShell(path.basename(file))} >/dev/null 2>&1 || true; rm -f -- ${quoted}`;
     }
     return `rm -f -- ${quoted}`;
   }).join('; ');
+  const checks = files.map((file) => {
+    const quoted = quoteShell(file);
+    return `if [ -e ${quoted} ] || [ -L ${quoted} ]; then printf '%s\\n' ${quoteShell(`LEFT:${file}`)}; fi`;
+  }).join('; ');
+  return `${removals}; ${checks}; printf '%s\\n' ${quoteShell(PKEXEC_CHECKED)}`;
+}
+
+export function pkexecRemainingFiles(output: string): { checked: boolean; remaining: string[] } {
+  const remaining: string[] = [];
+  let checked = false;
+  for (const line of output.split(/\r?\n/)) {
+    if (line === PKEXEC_CHECKED) checked = true;
+    else if (line.startsWith('LEFT:')) remaining.push(line.slice('LEFT:'.length));
+  }
+  return { checked, remaining };
 }
 
 function commandOutput(err: unknown): string {
@@ -1234,22 +1251,37 @@ export function runOnePrivilegedRm(
   if (files.length === 0) return;
   const platform = deps.platform ?? process.platform;
   const run = deps.execFileSync ?? ((file, args, options) => execFileSync(file, args as string[], options));
-  const stillPresent = deps.stillPresent ?? ((file) => fs.existsSync(file));
   const script = privilegedRemovalScript(files, deps.readFile);
+  const remainingFrom = (output: string) => {
+    const parsed = pkexecRemainingFiles(output);
+    return parsed.checked ? parsed.remaining : files.slice();
+  };
   if (platform === 'darwin') {
     const apple = `do shell script ${JSON.stringify(script)} with administrator privileges`;
-    run('osascript', ['-e', apple], { encoding: 'utf8', timeout: 120000 });
+    try {
+      const stdout = run('osascript', ['-e', apple], { encoding: 'utf8', timeout: 120000 });
+      const remaining = remainingFrom(String(stdout ?? ''));
+      if (remaining.length > 0) throw new Error(pkexecScriptMessage(1, remaining));
+    } catch (err) {
+      if (err instanceof Error && err.message.startsWith('The removal command stopped')) throw err;
+      const text = `${err instanceof Error ? err.message : ''}\n${commandOutput(err)}`;
+      if (/user canceled|-\s*128/i.test(text)) throw new Error(pkexecDismissedMessage());
+      throw err;
+    }
     return;
   }
   if (platform === 'linux') {
     const wrapped = `printf '%s\\n' ${quoteShell(PKEXEC_SENTINEL)}; ${script}`;
     try {
-      run('pkexec', ['sh', '-c', wrapped], { encoding: 'utf8', timeout: 120000 });
+      const stdout = run('pkexec', ['sh', '-c', wrapped], { encoding: 'utf8', timeout: 120000 });
+      const remaining = remainingFrom(String(stdout ?? ''));
+      if (remaining.length > 0) throw new Error(pkexecScriptMessage(0, remaining));
     } catch (err) {
+      if (err instanceof Error && err.message.startsWith('The removal command stopped')) throw err;
       if (errorCode(err) === 'ENOENT') throw new Error(pkexecMissingMessage());
       const started = commandOutput(err).includes(PKEXEC_SENTINEL);
       const status = errorStatus(err);
-      if (started) throw new Error(pkexecScriptMessage(status, files.filter(stillPresent)));
+      if (started) throw new Error(pkexecScriptMessage(status, remainingFrom(commandOutput(err))));
       if (status === 126) throw new Error(pkexecDismissedMessage());
       if (status === 127) throw new Error(pkexecNotAuthorizedMessage());
       throw err;
@@ -1264,7 +1296,25 @@ export function wslRemovalArgs(distro: string, file: string): string[] {
   if (!/^[A-Za-z0-9._-]+$/.test(distro) || !isSafeWslPath(file)) {
     throw new Error('Refusing to remove a path that is not part of the old PC2 install.');
   }
-  const script = 'if [ -L "$1" ]; then exit 3; fi; if [ ! -e "$1" ]; then exit 0; fi; rm -rf -- "$1"';
+  const script = [
+    'if [ -L "$1" ]; then exit 3; fi',
+    'if [ ! -e "$1" ]; then exit 0; fi',
+    'resolved=$(realpath -e -- "$1") || exit 4',
+    'if [ "$resolved" != "$1" ]; then exit 5; fi',
+    'case "$resolved" in',
+    '  /root/.pc2|/root/.elastos/node) ;;',
+    '  /home/*/.pc2|/home/*/.elastos/node)',
+    '    account=${resolved#/home/}',
+    '    account=${account%%/*}',
+    '    case "$account" in',
+    '      ""|*[!A-Za-z0-9._-]*) exit 5 ;;',
+    '    esac',
+    '    if [ "$resolved" != "/home/${account}/.pc2" ] && [ "$resolved" != "/home/${account}/.elastos/node" ]; then exit 5; fi',
+    '    ;;',
+    '  *) exit 5 ;;',
+    'esac',
+    'rm -rf -- "$resolved"',
+  ].join('\n');
   return ['-d', distro, '--', 'bash', '-c', script, 'bash', file];
 }
 

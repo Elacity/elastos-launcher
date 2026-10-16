@@ -59,6 +59,7 @@ export interface LaunchTarget {
   getStatus(): Promise<TargetStatus>;
   start(): Promise<void>;
   stop(): Promise<void>;
+  forceStop?(): void;
   restart(): Promise<void>;
   install(onProgress: (message: string) => void): Promise<void>;
   update(onProgress: (message: string) => void): Promise<void>;

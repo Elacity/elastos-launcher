@@ -440,16 +440,34 @@ async function refreshLaunch() {
   await refreshLegacyPc2();
 }
 
+async function maybeResumeInstall() {
+  if (busy) return;
+  try {
+    const plan = await window.elastos.resumeInstallPlan();
+    if (plan !== 'install' || busy) return;
+    await runInstall();
+    const status = await window.elastos.getStatus().catch(() => 'error');
+    if (typeof window.elastos.finishResumeInstall === 'function') {
+      await window.elastos.finishResumeInstall(status === 'running');
+    }
+  } catch (err) {
+    console.error('Resume error:', err);
+    if (typeof window.elastos.finishResumeInstall === 'function') {
+      await window.elastos.finishResumeInstall(false).catch(() => {});
+    }
+  }
+}
+
 async function init() {
   try {
     await refreshLaunch();
-    const plan = await window.elastos.resumeInstallPlan();
-    if (plan === 'install') await runInstall();
   } catch (err) {
     console.error('Init error:', err);
     updateStatus('error');
     showError('Could not read this computer. Quit ElastOS and open it again.');
+    return;
   }
+  await maybeResumeInstall();
 }
 
 init();

@@ -1,6 +1,7 @@
+import * as os from 'os';
 import { applyOpenAtLogin, readOpenAtLogin } from './targets/openAtLogin';
 import { buildDiagnostics, collectPreflight, PreflightReport, saveCollectedSupportBundle } from './targets/preflight';
-import { confirmInstalledGateway, HEALTH_URL, isForeignGatewayError, isHealthOk } from './targets/runtimeGateway';
+import { confirmInstalledGateway, HEALTH_URL, isForeignGatewayError, isHealthOk, STOP_GRACE_MS } from './targets/runtimeGateway';
 import { collectFailureFacts, failureScreen, FailureScreen, fixCollectedFailure, windowsFixResult } from './targets/runtimeRecovery';
 import { resolveLaunchTargetId } from './targets/preferences';
 import { LAUNCH_TARGET_ENV, retiredPc2Notice } from './targets/registry';
@@ -10,7 +11,7 @@ import { loadActiveRuntimePin } from './targets/runtimePin';
 import { runtimeHeadStore } from './targets/runtimeUpdate';
 import { rollbackRuntimeUpdate } from './targets/runtimeTarget';
 import { resetRuntimeOnThisComputer } from './targets/runtimeUninstall';
-import { fixWindowsOnThisComputer, resumeInstallPlanOnThisComputer, ResumeInstallPlan } from './targets/windowsHost';
+import { finishResumeInstall as clearResumeInstall, fixWindowsOnThisComputer, resumeInstallPlanOnThisComputer, ResumeInstallPlan } from './targets/windowsHost';
 import { LaunchTarget, LaunchTargetId, TargetStatus, UpdateCheck } from './targets/types';
 
 export type { TargetStatus };
@@ -45,9 +46,11 @@ export interface LaunchController {
   describeFailure(): Promise<FailureScreen>;
   fixFailure(): Promise<'ready' | 'still-blocked'>;
   resumeInstallPlan(): Promise<ResumeInstallPlan>;
+  finishResumeInstall(ok: boolean): void;
   setOpenAtLogin(enabled: boolean): void;
   getOpenAtLogin(): boolean;
   shutdown(): Promise<void>;
+  forceStopGateway(): void;
 }
 
 export interface QuitGate {
@@ -55,13 +58,16 @@ export interface QuitGate {
   ready: boolean;
 }
 
-/** SIGTERM grace plus SIGKILL grace, with a little room for the health probes. */
-export const QUIT_STOP_BUDGET_MS = 32_000;
+/** One /healthz probe can outlive each grace, and stop may probe ownership once first. */
+export const QUIT_HEALTH_PROBE_MS = 2_000;
+export const QUIT_STOP_BUDGET_MS = 2 * STOP_GRACE_MS + 3 * QUIT_HEALTH_PROBE_MS + 4_000;
 
 export interface QuitStopOptions {
   budgetMs?: number;
   log?: (line: string) => void;
   onStopping?: () => void;
+  /** Runs when the wait expires, before the window closes. SIGKILL the gateway here. */
+  onBudget?: () => void;
 }
 
 /**
@@ -86,7 +92,8 @@ export async function finishQuitAfterGatewayStop(
     options.onStopping?.();
     const budget = new Promise<void>((resolve) => {
       timer = setTimeout(() => {
-        log('ElastOS did not stop before quit finished. The window is closing.');
+        log('ElastOS did not stop before quit finished. Stopping it now.');
+        options.onBudget?.();
         resolve();
       }, budgetMs);
     });
@@ -294,7 +301,12 @@ export function createLaunchController(options: LaunchControllerOptions = {}): L
     },
     getDiagnostics: () => diagnosticsText(),
     saveSupportBundle: async () => saveCollectedSupportBundle(await diagnosticsText()),
-    resumeInstallPlan: () => resumeInstallPlanOnThisComputer(),
+    resumeInstallPlan: () => resumeInstallPlanOnThisComputer({
+      installed: () => active.isInstalled(),
+    }),
+    finishResumeInstall(ok: boolean) {
+      clearResumeInstall(os.homedir(), ok);
+    },
     setOpenAtLogin(enabled: boolean) {
       applyOpenAtLogin(enabled);
     },
@@ -308,6 +320,9 @@ export function createLaunchController(options: LaunchControllerOptions = {}): L
         if (isForeignGatewayError(err)) return;
         throw err;
       }
+    },
+    forceStopGateway() {
+      active.forceStop?.();
     },
   };
 }

@@ -284,7 +284,11 @@ export async function recheckPortWith(deps: {
   confirm: () => Promise<boolean>;
 }): Promise<'free' | 'ours' | 'busy'> {
   if (!(await deps.portBusy())) return 'free';
-  return (await deps.confirm()) ? 'ours' : 'busy';
+  try {
+    return (await deps.confirm()) ? 'ours' : 'busy';
+  } catch {
+    return 'busy';
+  }
 }
 
 async function recheckPort(): Promise<'free' | 'ours' | 'busy'> {

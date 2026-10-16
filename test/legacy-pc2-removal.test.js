@@ -3,7 +3,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
-const { execFileSync } = require('node:child_process');
+const { execFileSync, spawnSync } = require('node:child_process');
 
 const {
   clearLegacyPc2DescribeCache,
@@ -15,6 +15,7 @@ const {
   parseWslDistroList,
   isPc2ServiceFile,
   PKEXEC_SENTINEL,
+  PKEXEC_CHECKED,
   pkexecDismissedMessage,
   pkexecMissingMessage,
   pkexecNotAuthorizedMessage,
@@ -392,6 +393,8 @@ test('backup zip stores PC2 files and does not follow a symlink outside them', (
 test('the privileged prompt and the WSL removal stay on known PC2 paths', () => {
   const script = privilegedRemovalScript(['/etc/sudoers.d/amneziawg'], () => AMNEZIA_SUDOERS);
   assert.match(script, /rm -f -- '\/etc\/sudoers\.d\/amneziawg'/);
+  assert.match(script, /LEFT:\/etc\/sudoers\.d\/amneziawg/);
+  assert.match(script, new RegExp(PKEXEC_CHECKED));
   assert.throws(() => privilegedRemovalScript(['/etc/sudoers.d/elastos']), /not part of the old PC2 install/);
   assert.throws(() => privilegedRemovalScript(['/usr/local/bin/sing-box']), /not part of the old PC2 install/);
   assert.throws(() => privilegedRemovalScript(['/etc/sudoers.d/../passwd']), /not part of the old PC2 install/);
@@ -404,6 +407,28 @@ test('the privileged prompt and the WSL removal stay on known PC2 paths', () => 
   const wslArgs = wslRemovalArgs('Ubuntu', '/home/user/.pc2');
   assert.deepEqual(wslArgs.slice(0, 3), ['-d', 'Ubuntu', '--']);
   execFileSync('bash', ['-n', '-c', wslArgs[5]]);
+  assert.match(wslArgs[5], /realpath -e/);
+  assert.match(wslArgs[5], /rm -rf -- "\$resolved"/);
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'elastos-wsl-pc2-'));
+  try {
+    const secretDir = path.join(outside, 'outside');
+    fs.mkdirSync(secretDir);
+    fs.writeFileSync(path.join(secretDir, 'secret'), 'SECRET');
+    const link = path.join(outside, '.pc2');
+    fs.symlinkSync(secretDir, link);
+    const linked = spawnSync('bash', ['-c', wslArgs[5], 'bash', link], { encoding: 'utf8' });
+    assert.notEqual(linked.status, 0);
+    assert.equal(fs.readFileSync(path.join(secretDir, 'secret'), 'utf8'), 'SECRET');
+    const real = path.join(outside, 'real');
+    fs.mkdirSync(path.join(real, '.pc2'), { recursive: true });
+    fs.writeFileSync(path.join(real, '.pc2', 'secret'), 'SECRET');
+    fs.symlinkSync(real, path.join(outside, 'alias'));
+    const escaped = spawnSync('bash', ['-c', wslArgs[5], 'bash', path.join(outside, 'alias', '.pc2')], { encoding: 'utf8' });
+    assert.equal(escaped.status, 5);
+    assert.equal(fs.readFileSync(path.join(real, '.pc2', 'secret'), 'utf8'), 'SECRET');
+  } finally {
+    fs.rmSync(outside, { recursive: true, force: true });
+  }
   assert.throws(() => wslRemovalArgs('ElastOS', '/home/user/.pc2'), /Refusing to remove ElastOS/);
   assert.throws(() => wslRemovalArgs('Ubuntu', '/home/user/.local/share/elastos'), /not part of the old PC2 install/);
   assert.throws(() => wslRemovalArgs('Ubuntu', '/home/../.pc2'), /not part of the old PC2 install/);
@@ -437,8 +462,10 @@ test('pkexec exits 126 and 127 do not continue as sudo', () => {
     calls.push(command);
     assert.equal(command === 'sudo', false);
     const err = new Error(command);
-    if (calls.length === 1 && command === 'pkexec') {
-      assert.match(args[2], new RegExp(PKEXEC_SENTINEL));
+    if (command === 'pkexec') {
+      assert.match(String(args[2]), new RegExp(PKEXEC_SENTINEL));
+    }
+    if (calls.length === 1 && command === 'pkexec' && String(args[2]).includes('pc2.service')) {
       assert.match(args[2], /pc2\.service/);
     }
     err.code = scenario.code;
@@ -495,12 +522,32 @@ test('pkexec exits 126 and 127 do not continue as sudo', () => {
 
   calls.length = 0;
   scenario.status = 2;
-  scenario.stdout = `${PKEXEC_SENTINEL}\n`;
+  scenario.stdout = `${PKEXEC_SENTINEL}\n${PKEXEC_CHECKED}\n`;
   assert.throws(
     () => runOnePrivilegedRm([file], { execFileSync: run, platform: 'linux', stillPresent: () => false }),
     (err) => {
       assert.equal(err.message, pkexecScriptMessage(2, []));
       assert.equal(err.message.includes('still there'), false);
+      return true;
+    },
+  );
+
+  calls.length = 0;
+  scenario.status = 1;
+  scenario.stdout = `${PKEXEC_SENTINEL}\nLEFT:/etc/sudoers.d/amneziawg\n${PKEXEC_CHECKED}\n`;
+  assert.throws(
+    () => runOnePrivilegedRm(
+      ['/etc/sudoers.d/amneziawg'],
+      {
+        execFileSync: run,
+        platform: 'linux',
+        stillPresent: () => false,
+        readFile: () => AMNEZIA_SUDOERS,
+      },
+    ),
+    (err) => {
+      assert.equal(err.message, pkexecScriptMessage(1, ['/etc/sudoers.d/amneziawg']));
+      assert.match(err.message, /sudoers/);
       return true;
     },
   );

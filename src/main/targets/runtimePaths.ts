@@ -1,3 +1,4 @@
+import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 
@@ -92,34 +93,67 @@ function withinHome(candidate: string, homeDir: string, platform: string): boole
   return value === home || value.startsWith(`${home}/`);
 }
 
+/** A regular file. A symlink does not count, so a marker cannot point outside the directory. */
+function isRegularFile(file: string): boolean {
+  try {
+    return fs.lstatSync(file).isFile();
+  } catch {
+    return false;
+  }
+}
+
 /**
- * True only when `file` is an absolute runtime path computed for this account.
- * The home defaults to `os.homedir()`. A relative path, a `..` segment, another
- * account, and a data directory outside that home are refused.
+ * The host lock or `components.json` is present as a real file. That is how an
+ * XDG directory that is not the default path proves it is an ElastOS data dir.
+ */
+export function elastosDataDirMarked(dataDir: string): boolean {
+  return isRegularFile(runtimeHostLockPath(dataDir))
+    || isRegularFile(runtimeJoin(dataDir, 'components.json'));
+}
+
+function customXdgDataDir(
+  homeDir: string,
+  platform: string,
+  env: NodeJS.ProcessEnv,
+): string | null {
+  if (platform === 'darwin') return null;
+  const xdg = env.XDG_DATA_HOME?.trim() ?? '';
+  if (!xdg || xdg.includes('\0') || hasDotSegment(xdg) || !isAbsolutePath(xdg)) return null;
+  if (!withinHome(xdg, homeDir, platform)) return null;
+  const data = runtimeJoin(xdg, 'elastos');
+  if (!data || hasDotSegment(data) || !withinHome(data, homeDir, platform)) return null;
+  return data;
+}
+
+/**
+ * True only for an exact default runtime path of this account, or for an XDG
+ * data directory that holds the ElastOS lock or marker. The home defaults to
+ * `os.homedir()`. A relative path, a `..` segment, another account, a data
+ * directory outside that home, and a bare `<dir>/elastos` are refused.
  */
 export function launcherOwnedDirectories(
   file: string,
   homeDir: string = os.homedir(),
   platform: string = process.platform,
   env: NodeJS.ProcessEnv = process.env,
+  marked: (dataDir: string) => boolean = elastosDataDirMarked,
 ): boolean {
   if (!file || file.includes('\0') || hasDotSegment(file) || !isAbsolutePath(file)) return false;
   if (!homeDir || homeDir.includes('\0') || hasDotSegment(homeDir) || !isAbsolutePath(homeDir)) return false;
+  const data = runtimeDataDir(platform, homeDir, {});
   const owned = [
     runtimeBinaryPath(homeDir),
     runtimeInstallStagePath(homeDir),
+    runtimeResumeInstallPath(homeDir),
     runtimeJoin(homeDir, 'Desktop', SUPPORT_BUNDLE_FILE),
     runtimeJoin(homeDir, SUPPORT_BUNDLE_FILE),
   ];
-  const xdg = env.XDG_DATA_HOME?.trim() ?? '';
-  const xdgUsable = platform === 'darwin'
-    || !xdg
-    || (!xdg.includes('\0') && !hasDotSegment(xdg) && withinHome(xdg, homeDir, platform));
-  if (xdgUsable) {
-    const data = runtimeDataDir(platform, homeDir, platform === 'darwin' ? {} : env);
-    if (!hasDotSegment(data) && withinHome(data, homeDir, platform)) {
-      owned.push(data, runtimeHostLockPath(data));
-    }
+  if (!hasDotSegment(data) && withinHome(data, homeDir, platform)) {
+    owned.push(data, runtimeHostLockPath(data));
+  }
+  const extra = customXdgDataDir(homeDir, platform, env);
+  if (extra && compareKey(extra, platform) !== compareKey(data, platform) && marked(extra)) {
+    owned.push(extra, runtimeHostLockPath(extra));
   }
   const key = compareKey(file, platform);
   return owned.some((candidate) => compareKey(candidate, platform) === key);

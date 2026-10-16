@@ -48,7 +48,7 @@ test('preflight blocks disk, offline, a busy port, and Intel Mac', () => {
   assert.match(kvm.checks.find((check) => check.id === 'kvm').message, /\/dev\/kvm/);
 });
 
-test('cold preflight reaches the publisher on port 443 and does not fetch the release head', async () => {
+test('cold preflight does not connect to the publisher', async () => {
   assert.equal(publisherHost('https://elastos.elacitylabs.com'), 'elastos.elacitylabs.com');
   const seen = [];
   assert.equal(await publisherOffline('https://elastos.elacitylabs.com/ignored', async (host, port) => {
@@ -60,10 +60,16 @@ test('cold preflight reaches the publisher on port 443 and does not fetch the re
   assert.equal(await publisherOffline('not a url', async () => true), true);
 
   const source = fs.readFileSync(path.join(__dirname, '../src/main/targets/preflight.ts'), 'utf8');
-  const offline = source.match(/async function offline\(\)[\s\S]*?\n\}/);
-  assert.ok(offline, 'offline function');
-  assert.equal(offline[0].includes('release-head.json'), false);
-  assert.equal(offline[0].includes('fetch('), false);
+  const collect = source.match(/export async function collectPreflight[\s\S]*?\n\}/);
+  assert.ok(collect, 'collectPreflight');
+  assert.equal(collect[0].includes('publisherOffline'), false);
+  assert.equal(collect[0].includes('release-head.json'), false);
+  assert.equal(collect[0].includes('fetch('), false);
+  assert.equal(collect[0].includes('net.connect'), false);
+  const probe = source.match(/export async function publisherOffline[\s\S]*?\n\}/);
+  assert.ok(probe, 'publisherOffline');
+  assert.equal(probe[0].includes('release-head.json'), false);
+  assert.equal(probe[0].includes('fetch('), false);
 });
 
 test('diagnostics leave out local secrets', () => {

@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Prove Install on a minimal Ubuntu image that does not have curl, python3, or a compiler.
 # Node is mounted from the runner because the packaged app embeds it. libstdc++6 is
-# installed only so that Node can start. curl, python3, and gcc must still be absent.
+# installed only so that Node can start. curl, python3, gcc, openssl, and
+# ca-certificates must still be absent. Node uses its bundled CA roots.
 set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
