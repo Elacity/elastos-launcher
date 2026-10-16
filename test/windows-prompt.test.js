@@ -1,4 +1,6 @@
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
 const test = require('node:test');
 
 const { evaluatePreflight, DISK_FLOOR_BYTES } = require('../dist/main/targets/preflight');
@@ -6,8 +8,11 @@ const { failureScreen, applyFix } = require('../dist/main/targets/runtimeRecover
 const { runtimeInstallBlock } = require('../dist/main/targets/runtimeSupport');
 const {
   applyWindowsFix,
+  assertPinnedRootfs,
   assertPromptHasNoCommands,
   detectWindows,
+  ELASTOS_ROOTFS_SHA256,
+  ELASTOS_ROOTFS_URL,
   ensureElastosRootfs,
   hostPrompt,
   importDistroArgs,
@@ -167,4 +172,33 @@ test('distro detection and the rootfs download are explicit', async () => {
     download: async () => { called = true; },
   });
   assert.equal(called, false);
+
+  let checks = 0;
+  let replaced = false;
+  const again = await ensureElastosRootfs({
+    dest: 'C:\\ElastOS\\rootfs.tar.gz',
+    exists: () => true,
+    read: () => Buffer.from('not-the-rootfs'),
+    accept: () => {
+      checks += 1;
+      if (checks === 1) throw new Error('hash');
+    },
+    download: async () => { replaced = true; },
+  });
+  assert.equal(again, 'C:\\ElastOS\\rootfs.tar.gz');
+  assert.equal(replaced, true);
+  assert.equal(downloaded.includes('/current/'), false);
+  assert.match(downloaded, /\/20240423\//);
+});
+
+test('a rootfs with the wrong size or hash is refused', () => {
+  const script = fs.readFileSync(path.join(__dirname, '../scripts/windows-elastos-distro.ps1'), 'utf8');
+  assert.equal(script.includes('/current/'), false);
+  assert.match(script, new RegExp(ELASTOS_ROOTFS_URL.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  assert.match(script, new RegExp(ELASTOS_ROOTFS_SHA256));
+  assert.match(script, /Rootfs SHA-256/);
+  assert.match(script, /larger than the cap/);
+  assert.throws(() => assertPinnedRootfs(Buffer.alloc(32, 1)), /not the pinned file/);
+  const capped = Buffer.alloc(8);
+  assert.throws(() => assertPinnedRootfs(capped), /not the pinned file/);
 });

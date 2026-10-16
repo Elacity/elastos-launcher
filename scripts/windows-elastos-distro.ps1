@@ -9,7 +9,10 @@ $Distro = 'ElastOS'
 $Root = 'C:\ElastOS'
 $Rootfs = Join-Path $Root 'ubuntu-noble-wsl-amd64-wsl.rootfs.tar.gz'
 $Install = Join-Path $Root 'distro'
-$RootfsUrl = 'https://cloud-images.ubuntu.com/wsl/releases/24.04/current/ubuntu-noble-wsl-amd64-wsl.rootfs.tar.gz'
+$RootfsUrl = 'https://cloud-images.ubuntu.com/wsl/releases/24.04/20240423/ubuntu-noble-wsl-amd64-wsl.rootfs.tar.gz'
+$RootfsSha = '8251e27ffff381a4af5f41dcb94d867de3e0d9774a9241908ab34555d99315ea'
+$RootfsBytes = 356739129
+$RootfsMax = 400MB
 
 Write-Host 'This job does not skip. /healthz must be OK inside the ElastOS distro.'
 if (-not (Get-Command wsl.exe -ErrorAction SilentlyContinue)) {
@@ -35,14 +38,27 @@ Write-Host "Unregistering any previous $Distro distro"
 Write-Host "unregister_exit=$LASTEXITCODE"
 
 Write-Host 'Downloading Ubuntu 24.04 rootfs for the ElastOS distro'
-& curl.exe --fail --location --retry 5 --retry-delay 2 --output $Rootfs $RootfsUrl
+& curl.exe --fail --location --retry 5 --retry-delay 2 --max-filesize $RootfsMax --output $Rootfs $RootfsUrl
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 $bytes = (Get-Item $Rootfs).Length
 Write-Host "rootfs_bytes=$bytes"
-if ($bytes -lt 50MB) {
-  Write-Host 'Rootfs download is too small.'
+if ($bytes -gt $RootfsMax) {
+  Write-Host 'Rootfs download is larger than the cap.'
+  Remove-Item -Force $Rootfs
   exit 1
 }
+if ($bytes -ne $RootfsBytes) {
+  Write-Host "Rootfs size $bytes is not the pinned size $RootfsBytes."
+  Remove-Item -Force $Rootfs
+  exit 1
+}
+$got = (Get-FileHash -Algorithm SHA256 $Rootfs).Hash.ToLower()
+if ($got -ne $RootfsSha) {
+  Write-Host "Rootfs SHA-256 $got does not match the pin."
+  Remove-Item -Force $Rootfs
+  exit 1
+}
+Write-Host 'Rootfs SHA-256 matches the pin'
 
 Write-Host "Importing $Distro as WSL version 2"
 & wsl.exe --import $Distro $Install $Rootfs --version 2
