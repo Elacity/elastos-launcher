@@ -1,8 +1,21 @@
 import * as path from 'path';
 
+/**
+ * Join a runtime path. A Linux path (`/root/...`) stays POSIX even when this
+ * process is Windows, so the ElastOS distro paths are not rewritten with
+ * backslashes.
+ */
+export function runtimeJoin(root: string, ...parts: string[]): string {
+  const normalized = root.replace(/\\/g, '/');
+  if (normalized.startsWith('/')) {
+    return path.posix.join(normalized, ...parts);
+  }
+  return path.join(root, ...parts);
+}
+
 /** Binary installed by the publisher script. Contract: ~/.local/bin/elastos. */
 export function runtimeBinaryPath(homeDir: string): string {
-  return path.join(homeDir, '.local', 'bin', 'elastos');
+  return runtimeJoin(homeDir, '.local', 'bin', 'elastos');
 }
 
 /**
@@ -16,11 +29,11 @@ export function runtimeDataDir(
   env: NodeJS.ProcessEnv = {},
 ): string {
   if (platform === 'darwin') {
-    return path.join(homeDir, 'Library', 'Application Support', 'elastos');
+    return runtimeJoin(homeDir, 'Library', 'Application Support', 'elastos');
   }
   const xdg = env.XDG_DATA_HOME?.trim();
-  const base = xdg ? xdg : path.join(homeDir, '.local', 'share');
-  return path.join(base, 'elastos');
+  const base = xdg ? xdg : runtimeJoin(homeDir, '.local', 'share');
+  return runtimeJoin(base, 'elastos');
 }
 
 export function runtimeComponentsPath(dataDir: string): string {
@@ -37,5 +50,5 @@ export function runtimeHostLockPath(dataDir: string): string {
 
 /** Launcher bookkeeping. Kept outside the runtime data dir so it cannot sit next to attach_secret. */
 export function runtimeInstallStagePath(homeDir: string): string {
-  return path.join(homeDir, '.elastos-launcher', 'install-stage.json');
+  return runtimeJoin(homeDir, '.elastos-launcher', 'install-stage.json');
 }

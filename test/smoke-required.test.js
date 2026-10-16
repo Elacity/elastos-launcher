@@ -21,6 +21,10 @@ test('the runtime smoke workflow has no continue-on-error', () => {
   assert.match(workflow, /npm run e2e/);
   assert.match(workflow, /xvfb-run/);
   assert.match(workflow, /macos-14/);
+  assert.match(workflow, /node scripts\/windows-app-install\.js/);
+  assert.equal(/windows-elastos-distro\.ps1/.test(
+    workflow.split('windows-app:')[1] || '',
+  ), false);
 });
 
 test('a missing wsl.exe fails the Windows job', () => {

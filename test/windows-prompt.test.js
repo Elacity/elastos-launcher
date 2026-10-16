@@ -143,7 +143,17 @@ test('a missing ElastOS distro is one Set up action, and a ready host does not a
   const ready = hostPrompt({ platform: 'win32', arch: 'x64', wslInstalled: true, distroReady: true });
   assert.equal(ready.actionLabel, null);
   assertPromptHasNoCommands(ready);
-  assert.match(ready.body, /cannot finish the install/);
+  assert.match(ready.body, /Click Install/);
+  assert.equal(/cannot finish/.test(ready.body), false);
+  assert.equal(/wsl\.exe|powershell|\bbash\b/.test(ready.body), false);
+  const readyReport = evaluatePreflight({
+    ...base,
+    platform: 'win32',
+    arch: 'x64',
+    wslInstalled: true,
+    distroReady: true,
+  });
+  assert.equal(readyReport.ok, true);
 
   await assert.rejects(
     () => applyWindowsFix(
