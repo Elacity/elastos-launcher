@@ -93,4 +93,20 @@ test('reset refuses a symlink and a forward-slash PC2 path', async () => {
     remove: (target) => { removed.push(target); },
   }), /PC2/);
   assert.deepEqual(removed, []);
+
+  const inspected = [];
+  await assert.rejects(() => resetRuntime({
+    binary: path.join(root, 'elastos'),
+    dataDir: data,
+    stageFile: path.join(root, 'install-stage.json'),
+    stop: async () => {},
+    remove: (target) => { removed.push(target); },
+    lstat: (file) => {
+      inspected.push(file);
+      const error = new Error('permission');
+      error.code = 'EACCES';
+      throw error;
+    },
+  }), /could not be inspected/);
+  assert.deepEqual(removed, []);
 });
