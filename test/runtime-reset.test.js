@@ -274,6 +274,41 @@ test('an XDG data directory is owned only with the ElastOS lock or marker', () =
   }
 });
 
+test('a real XDG install that holds the ElastOS marker is reset', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'elastos-xdg-real-'));
+  try {
+    const home = path.join(root, 'home');
+    const data = path.join(home, 'custom', 'elastos');
+    fs.mkdirSync(path.join(data, 'state'), { recursive: true });
+    fs.writeFileSync(path.join(data, 'host-process.lock'), '{}\n');
+    fs.writeFileSync(path.join(data, 'components.json'), '{}\n');
+    fs.writeFileSync(path.join(data, 'runtime-coords.json'), '{}\n');
+    const env = { XDG_DATA_HOME: path.join(home, 'custom') };
+    assert.equal(launcherOwnedDirectories(data, home, 'linux', env), true);
+    fs.rmSync(path.join(data, 'host-process.lock'));
+    fs.rmSync(path.join(data, 'components.json'));
+    assert.equal(launcherOwnedDirectories(data, home, 'linux', env), false);
+    fs.writeFileSync(path.join(data, 'host-process.lock'), '{}\n');
+    const binary = path.join(home, '.local', 'bin', 'elastos');
+    fs.mkdirSync(path.dirname(binary), { recursive: true });
+    fs.writeFileSync(binary, '');
+    const removed = [];
+    await resetRuntime({
+      binary,
+      dataDir: data,
+      stageFile: path.join(home, '.elastos-launcher', 'install-stage.json'),
+      homeDir: home,
+      platform: 'linux',
+      env,
+      stop: async () => {},
+      remove: (target) => { removed.push(target); },
+    });
+    assert.equal(removed.includes(data), true);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('a replacement between look and delete is not removed', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'elastos-swap-'));
   try {

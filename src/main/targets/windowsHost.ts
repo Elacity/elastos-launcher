@@ -342,9 +342,6 @@ function resumeLockPath(homeDir: string): string {
   return runtimeResumeInstallLockPath(homeDir);
 }
 
-/** A lock older than this is stale even if its pid is still in the process table. */
-export const RESUME_LOCK_STALE_MS = 10 * 60 * 1000;
-
 function pidIsAlive(pid: number): boolean {
   try {
     process.kill(pid, 0);
@@ -355,26 +352,17 @@ function pidIsAlive(pid: number): boolean {
   }
 }
 
-function resumeLockIsStale(lock: string): boolean {
-  let text = '';
-  let mtime = 0;
-  try {
-    const stat = fs.statSync(lock);
-    mtime = stat.mtimeMs;
-    text = fs.readFileSync(lock, 'utf8');
-  } catch {
-    return false;
-  }
+/** Empty, unreadable, rebooted, or dead. A live pid stays, whatever the file's age. */
+function resumeLockBytesAreStale(bytes: Buffer): boolean {
   let parsed: { pid?: unknown; uptime?: unknown } | null = null;
   try {
-    parsed = JSON.parse(text) as { pid?: unknown; uptime?: unknown };
+    parsed = JSON.parse(bytes.toString('utf8')) as { pid?: unknown; uptime?: unknown };
   } catch {
     return true;
   }
   if (!parsed || typeof parsed.pid !== 'number' || parsed.pid <= 0) return true;
   if (parsed.pid === process.pid) return false;
   if (typeof parsed.uptime === 'number' && os.uptime() + 1 < parsed.uptime) return true;
-  if (Number.isFinite(mtime) && Date.now() - mtime > RESUME_LOCK_STALE_MS) return true;
   return !pidIsAlive(parsed.pid);
 }
 
@@ -399,22 +387,53 @@ function tryCreateResumeLock(lock: string, payload: string): boolean {
   }
 }
 
-/** One process claims the resume. An empty, crashed, or rebooted lock can be taken. */
-export function claimResumeInstall(homeDir: string): boolean {
+/**
+ * One process claims the resume. An empty, crashed, or rebooted lock can be
+ * taken. A live pid is kept even when the file is old. Reclaim renames the
+ * stale bytes aside and puts them back when those bytes are no longer the
+ * ones that were stale.
+ */
+export function claimResumeInstall(homeDir: string, beforeReclaim?: () => void): boolean {
   const lock = resumeLockPath(homeDir);
   const payload = JSON.stringify({ pid: process.pid, uptime: os.uptime() });
   if (tryCreateResumeLock(lock, payload)) return true;
-  if (!resumeLockIsStale(lock)) return false;
+  let judged: Buffer;
+  try {
+    judged = fs.readFileSync(lock);
+  } catch {
+    return false;
+  }
+  if (!resumeLockBytesAreStale(judged)) return false;
+  if (beforeReclaim) beforeReclaim();
   const junk = `${lock}.stale-${process.pid}-${crypto.randomBytes(4).toString('hex')}`;
   try {
     fs.renameSync(lock, junk);
   } catch {
     return false;
   }
+  let moved: Buffer;
+  try {
+    moved = fs.readFileSync(junk);
+  } catch {
+    try {
+      fs.renameSync(junk, lock);
+    } catch {
+      // The next open can create a lock that is no longer here.
+    }
+    return false;
+  }
+  if (!moved.equals(judged)) {
+    try {
+      fs.renameSync(junk, lock);
+    } catch {
+      // The winner already replaced this name.
+    }
+    return false;
+  }
   try {
     fs.rmSync(junk, { force: true });
   } catch {
-    // The name is no longer the lock. The next create can proceed.
+    // The stale bytes are no longer the lock. The next create can proceed.
   }
   return tryCreateResumeLock(lock, payload);
 }

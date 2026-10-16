@@ -82,7 +82,8 @@ test('the support bundle has versions, health, and platform, and no secrets', ()
     '«kept0»',
     token,
   ].join('\n'));
-  assert.match(kept, new RegExp(hash));
+  assert.equal(kept.includes(hash), false);
+  assert.match(kept, /\[removed\]/);
   assert.match(kept, new RegExp(cidv1));
   assert.match(kept, /ELASTOS_LAUNCH_TARGET=pc2 is retired/);
   assert.match(kept, /\/usr\/local\/bin\/elastos/);
@@ -109,8 +110,25 @@ test('the support bundle has versions, health, and platform, and no secrets', ()
   assert.equal(labeled.includes(hash), false);
   assert.match(labeled, /seed=\[removed\]/);
   assert.equal(query.includes(hash), false);
-  assert.match(scrubSupportText(hash), new RegExp(hash));
+  assert.equal(scrubSupportText(hash).includes(hash), false);
+  assert.match(scrubSupportText(hash), /\[removed\]/);
   assert.match(scrubSupportText(`sha256 ${hash}`), new RegExp(hash));
+  assert.match(scrubSupportText(`hash: ${hash}`), new RegExp(hash));
+  assert.equal(scrubSupportText(`commit ${hash}`).includes(hash), false);
+  const commit = '0123456789abcdef0123456789abcdef01234567';
+  assert.match(scrubSupportText(`elastos 0.8.0 (commit ${commit})`), new RegExp(commit));
+  const phrase = 'abandon ability able about above absent absorb abstract absurd abuse access accident';
+  const longer = `${phrase} account accuse achieve acid acoustic acquire across act action actor actress actual`;
+  assert.equal(scrubSupportText(phrase).includes('abandon'), false);
+  assert.match(scrubSupportText(phrase), /\[removed\]/);
+  assert.equal(scrubSupportText(longer).includes('abandon'), false);
+  assert.equal(scrubSupportText(longer).includes('actual'), false);
+  assert.equal(scrubSupportText(`seed: ${phrase}`).includes('ability'), false);
+  assert.match(scrubSupportText(`seed: ${phrase}`), /seed: \[removed\]/);
+  assert.equal(scrubSupportText(`mnemonic=${phrase}`).includes('abstract'), false);
+  assert.equal(scrubSupportText(`private_key=${hash}`).includes(hash), false);
+  assert.match(scrubSupportText(`private_key=${hash}`), /private_key=\[removed\]/);
+  assert.equal(scrubSupportText(`secret=${phrase} leftover`).includes('leftover'), false);
   assert.match(scrubSupportText('secret-line'), /secret-line/);
   assert.match(scrubSupportText('ELASTOS_LAUNCH_TARGET=pc2'), /ELASTOS_LAUNCH_TARGET/);
   const doc = fs.readFileSync(path.join(__dirname, '../docs/RUNTIME_MIGRATION.md'), 'utf8');

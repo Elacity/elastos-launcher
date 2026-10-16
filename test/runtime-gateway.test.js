@@ -457,11 +457,43 @@ test('stop adopts an installed gateway this window did not start', async () => {
     confirmForeign: async () => false,
     adoptInstalled: () => {
       refused.push('adopt');
-      return adopted;
+      return null;
     },
   });
   await assert.rejects(() => foreign.stop({ adopt: true }), (err) => err instanceof ForeignGatewayError);
-  assert.deepEqual(refused, []);
+  assert.deepEqual(refused, ['adopt']);
+
+  const adoptedAnyway = [];
+  let openHealth = { status: 200, body: 'OK' };
+  let openClock = 0;
+  const opened = fakeProcess(91);
+  opened.signal = (sig) => {
+    adoptedAnyway.push(sig);
+    if (sig === 'SIGTERM') {
+      openHealth = null;
+      opened.exit(0);
+    }
+  };
+  const noConfirm = createGatewaySupervisor({
+    binary: '/home/tester/.local/bin/elastos',
+    spawn() { throw new Error('must not spawn'); },
+    fetchHealth: async () => openHealth,
+    sleep: async () => { openClock += 1000; },
+    now: () => openClock,
+    openUrl: () => {},
+    log: () => {},
+    graceMs: 3000,
+    pollMs: 1000,
+    adoptInstalled: () => {
+      adoptedAnyway.push('adopt');
+      return opened;
+    },
+  });
+  await assert.rejects(() => noConfirm.stop(), (err) => err instanceof ForeignGatewayError);
+  assert.deepEqual(adoptedAnyway, []);
+  await noConfirm.stop({ adopt: true });
+  assert.deepEqual(adoptedAnyway, ['adopt', 'SIGTERM']);
+  assert.equal(noConfirm.phase(), 'stopped');
   foreign.forceKill();
   assert.deepEqual(signals, ['SIGTERM']);
 

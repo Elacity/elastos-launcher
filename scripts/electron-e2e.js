@@ -184,11 +184,11 @@ async function main() {
       if (errorVisible && errorText && /Set up ElastOS on Windows|Windows needs Linux support|Windows needs one step/.test(errorText)) {
         const fixHidden = await page.locator('#fix-btn').evaluate((node) => node.classList.contains('hidden'));
         const fixDisabled = await page.locator('#fix-btn').isDisabled();
-        if (windowsFix === 'pending' && !fixHidden && !fixDisabled) {
+        if (process.platform === 'win32' && windowsFix === 'pending' && !fixHidden && !fixDisabled) {
           await page.click('#fix-btn');
           windowsFix = 'running';
           console.log('Clicked Fix it to add the ElastOS Linux environment');
-        } else if (windowsFix === 'running' && !fixHidden && !fixDisabled) {
+        } else if (process.platform === 'win32' && windowsFix === 'running' && !fixHidden && !fixDisabled) {
           // Fix it imports the distro and leaves the gateway down, so the
           // screen can say it still needs attention. Install is the next click.
           if ((label === 'Install' || label === 'Try again') && !openDisabled) {
@@ -209,7 +209,7 @@ async function main() {
         ? await page.locator('#fix-btn').evaluate((node) => node.classList.contains('hidden'))
         : true;
       const fixDisabled = await page.locator('#fix-btn').isDisabled();
-      if (windowsFix === 'running' && (label === 'Install' || label === 'Try again') && !openDisabled && fixHidden && !fixDisabled) {
+      if (process.platform === 'win32' && windowsFix === 'running' && (label === 'Install' || label === 'Try again') && !openDisabled && fixHidden && !fixDisabled) {
         await page.click('#open-btn');
         windowsFix = 'installing';
         console.log('Clicked Install after Windows setup');
@@ -220,7 +220,8 @@ async function main() {
         await page.waitForTimeout(1000);
         continue;
       }
-      if (errorVisible && errorText && errorText !== 'That still needs attention.') {
+      const windowsSetupRunning = process.platform === 'win32' && windowsFix === 'running';
+      if (errorVisible && errorText && !(windowsSetupRunning && errorText === 'That still needs attention.')) {
         console.log('----- install log -----');
         console.log(logs);
         throw new Error(errorText);

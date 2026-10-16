@@ -36,7 +36,7 @@ export interface GatewayProcess {
   onOutput(listener: (chunk: string) => void): void;
   onExit(listener: (code: number | null) => void): void;
   signal(signal: NodeJS.Signals): void;
-  hasExited(): boolean;
+  hasExited(): boolean | Promise<boolean>;
 }
 
 /**
@@ -102,8 +102,12 @@ export interface GatewaySupervisorDeps {
   openUrl: (url: string) => void;
   log: (line: string) => void;
   confirmForeign?: () => Promise<boolean>;
-  /** A process for the installed gateway when this window did not start it. */
-  adoptInstalled?: () => GatewayProcess | null;
+  /**
+   * The installed gateway when this window did not start it. Reset and
+   * Uninstall call this after the confirm dialog. It is not a second prompt.
+   * Returning null leaves a listener that is not that gateway running.
+   */
+  adoptInstalled?: () => GatewayProcess | null | Promise<GatewayProcess | null>;
   graceMs?: number;
   healthTimeoutMs?: number;
   pollMs?: number;
@@ -260,7 +264,7 @@ export function createGatewaySupervisor(deps: GatewaySupervisorDeps): GatewaySup
     const deadline = deps.now() + budgetMs;
     let misses = 0;
     while (deps.now() < deadline) {
-      const dead = proc.hasExited();
+      const dead = await proc.hasExited();
       const healthDown = !isHealthOk(await deps.fetchHealth());
       if (dead && healthDown) {
         misses += 1;
@@ -306,7 +310,7 @@ export function createGatewaySupervisor(deps: GatewaySupervisorDeps): GatewaySup
         const health = await deps.fetchHealth();
         if (isHealthOk(health)) {
           const adopted = options?.adopt
-            ? (deps.confirmForeign && await deps.confirmForeign() ? deps.adoptInstalled?.() ?? null : null)
+            ? await (deps.adoptInstalled?.() ?? null)
             : null;
           if (!adopted) throw new ForeignGatewayError();
           owned = adopted;

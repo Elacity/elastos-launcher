@@ -100,6 +100,8 @@ test('the electron e2e clicks Install and waits for Open my computer', () => {
   assert.match(script, /LOCALAPPDATA/);
   assert.match(script, /#fix-btn/);
   assert.match(script, /Set up ElastOS on Windows/);
+  assert.match(script, /process\.platform === 'win32' && windowsFix === 'running'/);
+  assert.equal(script.includes("errorText !== 'That still needs attention.'"), false);
 });
 
 test('the flattened smoke pin keeps the installer hash', () => {

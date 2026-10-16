@@ -21,7 +21,6 @@ const {
   claimResumeInstall,
   finishResumeInstall,
   prepareWindowsImportDir,
-  RESUME_LOCK_STALE_MS,
   markInstallResumeAfterReboot,
   planAfterWindowsRestart,
   resumeInstallPlanOnThisComputer,
@@ -341,14 +340,15 @@ test('a stale resume lock can be claimed again and a live one cannot', async () 
       wslInstalled: true,
       installed: async () => false,
     }), 'none');
-    const staleAt = new Date(Date.now() - RESUME_LOCK_STALE_MS - 5000);
+    const staleAt = new Date(Date.now() - 15 * 60 * 1000);
     fs.utimesSync(lock, staleAt, staleAt);
     assert.equal(await resumeInstallPlanOnThisComputer({
       homeDir: home,
       platform: 'win32',
       wslInstalled: true,
       installed: async () => false,
-    }), 'install');
+    }), 'none');
+    assert.equal(claimResumeInstall(home), false);
     finishResumeInstall(home, false);
 
     fs.writeFileSync(lock, JSON.stringify({ pid: child.pid, uptime: os.uptime() + 10000 }));
@@ -389,6 +389,59 @@ test('a stale resume lock can be claimed again and a live one cannot', async () 
     }
   } finally {
     child.kill();
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('two reclaimers of one stale resume lock cannot take each others lock', async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'elastos-resume-reclaim-'));
+  try {
+    const dir = path.join(home, '.elastos-launcher');
+    fs.mkdirSync(dir, { recursive: true });
+    const lock = path.join(dir, 'resume-install.json.lock');
+    const stale = JSON.stringify({ pid: 2147483646, uptime: os.uptime() });
+    fs.writeFileSync(lock, stale);
+    const helper = path.join(home, 'reclaim.js');
+    const modulePath = path.join(__dirname, '../dist/main/targets/windowsHost.js');
+    fs.writeFileSync(helper, `
+      const { claimResumeInstall } = require(${JSON.stringify(modulePath)});
+      const ok = claimResumeInstall(process.argv[2], () => {
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 300);
+      });
+      process.stdout.write(ok ? 'yes' : 'no');
+      setInterval(() => {}, 1000);
+    `);
+    const claim = () => new Promise((resolve, reject) => {
+      const proc = spawn(process.execPath, [helper, home], { stdio: ['ignore', 'pipe', 'pipe'] });
+      let out = '';
+      let err = '';
+      const timer = setTimeout(() => {
+        proc.kill();
+        reject(new Error(err || 'reclaim timed out'));
+      }, 5000);
+      proc.stdout.on('data', (chunk) => {
+        out += chunk;
+        if (out === 'yes' || out === 'no') {
+          clearTimeout(timer);
+          resolve({ proc, out });
+        }
+      });
+      proc.stderr.on('data', (chunk) => { err += chunk; });
+      proc.on('exit', (code) => {
+        clearTimeout(timer);
+        reject(new Error(err || `reclaim exited ${code}`));
+      });
+    });
+    const pair = await Promise.all([claim(), claim()]);
+    try {
+      assert.deepEqual(pair.map((item) => item.out).sort(), ['no', 'yes']);
+      const held = JSON.parse(fs.readFileSync(lock, 'utf8'));
+      assert.equal(held.pid === pair[0].proc.pid || held.pid === pair[1].proc.pid, true);
+      assert.notEqual(fs.readFileSync(lock, 'utf8'), stale);
+    } finally {
+      for (const item of pair) item.proc.kill();
+    }
+  } finally {
     fs.rmSync(home, { recursive: true, force: true });
   }
 });

@@ -57,11 +57,13 @@ else:
 `.trim();
 
 const STOP_HELPER = `
-import json, os, signal, sys
+import os, signal, sys
 name = sys.argv[1]
-doc = json.load(open('/root/.local/share/elastos/host-process.lock'))
-pid = doc.get('pid')
-if not isinstance(pid, int) or pid <= 0:
+raw = sys.argv[2]
+if type(raw) is not str or not raw.isdigit():
+    raise SystemExit(1)
+pid = int(raw)
+if type(pid) is not int or pid <= 1:
     raise SystemExit(1)
 os.kill(-pid, signal.SIGKILL if name == 'KILL' else signal.SIGTERM)
 `.trim();
@@ -70,17 +72,25 @@ const LOCK_PID_HELPER = `
 import json
 doc = json.load(open('/root/.local/share/elastos/host-process.lock'))
 pid = doc.get('pid')
-if not isinstance(pid, int) or pid <= 0:
+if type(pid) is not int or pid <= 1:
     raise SystemExit(1)
 print(pid)
 `.trim();
 
 const LOCK_ALIVE_HELPER = `
 import os, sys
-pid = int(sys.argv[1])
-if pid <= 0:
+raw = sys.argv[1]
+if type(raw) is not str or not raw.isdigit():
+    raise SystemExit(2)
+pid = int(raw)
+if type(pid) is not int or pid <= 1:
+    raise SystemExit(2)
+try:
+    os.kill(pid, 0)
+except ProcessLookupError:
     raise SystemExit(1)
-os.kill(pid, 0)
+except OSError:
+    raise SystemExit(0)
 `.trim();
 
 const FACTS_HELPER = `
@@ -96,7 +106,7 @@ try:
     pid = json.loads(out['lock'] or '{}').get('pid') or 0
 except Exception:
     pid = 0
-if isinstance(pid, int) and pid > 0:
+if type(pid) is int and pid > 1:
     out['alive'] = os.path.exists(f'/proc/{pid}')
     try:
         out['command'] = open(f'/proc/{pid}/cmdline', 'rb').read().replace(bytes([0]), b' ').decode()
@@ -176,8 +186,12 @@ export function distroPackageArgs(): readonly string[] {
   return ['bash', '-lc', 'printf "nameserver 8.8.8.8\\n" > /etc/resolv.conf; apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y python3 curl ca-certificates'];
 }
 
-export function distroStopArgs(signal: 'TERM' | 'KILL'): string[] {
-  return ['python3', '-c', STOP_HELPER, signal];
+/** Signal this pid's group. The helper does not read the lock again. Pid 1 is refused. */
+export function distroStopArgs(signal: 'TERM' | 'KILL', pid: number): string[] {
+  if (!Number.isInteger(pid) || pid <= 1) {
+    throw new Error('Refusing to signal that process.');
+  }
+  return ['python3', '-c', STOP_HELPER, signal, String(pid)];
 }
 
 function plainSpawnError(err: unknown, fallback: string): Error {
@@ -401,11 +415,13 @@ function runHost(args: readonly string[], timeoutMs: number): Promise<number> {
   });
 }
 
-/** Signal the gateway recorded in the distro host lock. Never uses pid 0. */
+/** Signal the gateway recorded in the distro host lock. Never uses pid 0 or 1. */
 export function signalDistroLock(
   signal: NodeJS.Signals,
   stopInside: (name: 'TERM' | 'KILL') => void = (name) => {
-    runWslSync(distroStopArgs(name), undefined, 5000);
+    const pid = readDistroLockPid();
+    if (pid == null || pid <= 1) return;
+    runWslSync(distroStopArgs(name, pid), undefined, 5000);
   },
 ): void {
   const name = signal === 'SIGKILL' ? 'KILL' : 'TERM';
@@ -417,7 +433,9 @@ export function signalDistroGateway(
   signal: NodeJS.Signals,
   kill: (pid: number, signal: NodeJS.Signals) => void = process.kill,
   stopInside: (name: 'TERM' | 'KILL') => void = (name) => {
-    runWslSync(distroStopArgs(name), undefined, 5000);
+    const pid = readDistroLockPid();
+    if (pid == null || pid <= 1) return;
+    runWslSync(distroStopArgs(name, pid), undefined, 5000);
   },
 ): void {
   try {
@@ -483,7 +501,7 @@ export function createDistroGatewaySupervisor() {
     openUrl: openRuntimeHome,
     log: emitRuntimeLog,
     confirmForeign: confirmDistroGateway,
-    adoptInstalled: () => adoptDistroGatewayProcess(),
+    adoptInstalled: () => adoptInstalledDistroGateway(),
   });
 }
 
@@ -498,50 +516,102 @@ export function readDistroLockPid(
     const result = run(['python3', '-c', LOCK_PID_HELPER]);
     if (result.code !== 0) return null;
     const pid = Number(String(result.stdout).trim());
-    if (!Number.isInteger(pid) || pid <= 0) return null;
+    if (!Number.isInteger(pid) || pid <= 1) return null;
     return pid;
   } catch {
     return null;
   }
 }
 
-export function distroPidAlive(
+/**
+ * True when the pid is still there, or when the distro could not be asked.
+ * Only a confirmed ProcessLookupError (exit 1) is dead. A timeout stays alive
+ * so Stop does not report the gateway stopped.
+ */
+export async function distroPidAlive(
   pid: number,
-  run: (args: readonly string[]) => { code: number } = (args) => runWslSync(args, undefined, 8000),
-): boolean {
-  if (!Number.isInteger(pid) || pid <= 0) return false;
+  run: (args: readonly string[]) => Promise<{ code: number }> = (args) => runWsl(args, 8000),
+): Promise<boolean> {
+  if (!Number.isInteger(pid) || pid <= 1) return true;
   try {
-    return run(['python3', '-c', LOCK_ALIVE_HELPER, String(pid)]).code === 0;
+    const result = await run(['python3', '-c', LOCK_ALIVE_HELPER, String(pid)]);
+    return result.code !== 1;
   } catch {
-    return false;
+    return true;
+  }
+}
+
+export type DistroListenerKind = 'elastos' | 'other' | 'unknown';
+
+/** `other` is a listener that is not ElastOS. A failed read is `unknown`. */
+export async function distroListenerKind(
+  run: (args: readonly string[], timeoutMs: number) => Promise<WslResult> = runWsl,
+): Promise<DistroListenerKind> {
+  try {
+    const result = await run(['python3', '-c', FACTS_HELPER], 8000);
+    if (result.code !== 0) return 'unknown';
+    return factsAreElastos(result.stdout) ? 'elastos' : 'other';
+  } catch {
+    return 'unknown';
   }
 }
 
 /**
- * Adopt the installed distro gateway. The signal goes to that pid's group
- * inside the distro. hasExited asks the distro whether the pid is still there.
+ * Adopt the installed distro gateway. The signal goes to the pid read from
+ * the lock, not to whatever the lock says later. hasExited asks the distro
+ * whether that pid is still there and treats an error as still running.
  * A missing pid is not adopted, and pid 0 is never signaled.
  */
 export function adoptDistroGatewayProcess(deps: {
   readPid?: () => number | null;
-  alive?: (pid: number) => boolean;
+  alive?: (pid: number) => boolean | Promise<boolean>;
   signal?: (pid: number, signal: NodeJS.Signals) => void;
+  runStop?: (args: readonly string[]) => void;
 } = {}): GatewayProcess | null {
   const readPid = deps.readPid ?? (() => readDistroLockPid());
   const alive = deps.alive ?? ((pid: number) => distroPidAlive(pid));
   const signalInside = deps.signal ?? ((pid: number, signal: NodeJS.Signals) => {
-    if (!Number.isInteger(pid) || pid <= 0) return;
-    signalDistroLock(signal);
+    if (!Number.isInteger(pid) || pid <= 1) return;
+    const name = signal === 'SIGKILL' ? 'KILL' : 'TERM';
+    const run = deps.runStop ?? ((args: readonly string[]) => {
+      runWslSync(args, undefined, 5000);
+    });
+    run(distroStopArgs(name, pid));
   });
   const pid = readPid();
-  if (pid == null || pid <= 0) return null;
+  if (pid == null || pid <= 1) return null;
   return {
     pid,
     onOutput() {},
     onExit() {},
-    hasExited() { return !alive(pid); },
+    hasExited() {
+      try {
+        const result = alive(pid);
+        if (result && typeof (result as Promise<boolean>).then === 'function') {
+          return (result as Promise<boolean>).then((still) => still === false).catch(() => false);
+        }
+        return result === false;
+      } catch {
+        return false;
+      }
+    },
     signal(signal) { signalInside(pid, signal); },
   };
+}
+
+/**
+ * Reset and Uninstall adopt the lock pid. A listener that is not ElastOS is
+ * left alone. A failed identity read still adopts that pid, because the
+ * person already confirmed and the lock is the installed gateway.
+ */
+export async function adoptInstalledDistroGateway(deps: {
+  kind?: () => Promise<DistroListenerKind>;
+  adopt?: () => GatewayProcess | null;
+} = {}): Promise<GatewayProcess | null> {
+  const kind = deps.kind ?? (() => distroListenerKind());
+  const adopt = deps.adopt ?? (() => adoptDistroGatewayProcess());
+  if (await kind() === 'other') return null;
+  return adopt();
 }
 
 export function distroIsInstalled(): boolean {
@@ -587,11 +657,5 @@ export function factsAreElastos(raw: string): boolean {
 }
 
 export async function confirmDistroGateway(): Promise<boolean> {
-  try {
-    const result = await runWsl(['python3', '-c', FACTS_HELPER], 8000);
-    if (result.code !== 0) return false;
-    return factsAreElastos(result.stdout);
-  } catch {
-    return false;
-  }
+  return (await distroListenerKind()) === 'elastos';
 }

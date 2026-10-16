@@ -4,6 +4,7 @@ import * as net from 'net';
 import * as os from 'os';
 import * as path from 'path';
 import { HEALTH_URL } from './runtimeGateway';
+import { BIP39_ENGLISH } from './bip39English';
 import { launcherOwnedDirectories } from './runtimePaths';
 import { BASH_MESSAGE, detectLinuxLibc, MUSL_MESSAGE, resolveBash } from './hostTools';
 import { runtimeInstallBlock, wslKvmMessage, detectWsl } from './runtimeSupport';
@@ -190,11 +191,45 @@ function restoreKeptTokens(text: string, held: string[], nonce: string): string 
 
 const KNOWN_SECRET = /^(?:AKIA|ASIA)[0-9A-Z]{16}$|^gh[pousr]_[A-Za-z0-9]{16,}$|^github_pat_[A-Za-z0-9_]{16,}$|^sk-[A-Za-z0-9_-]{16,}$/;
 
-/** A 40- or 64-character hex hash kept on its own or beside a hash label. Other hex of 32 or more is a secret. */
+/** A 40-character hash, or a 64-character hex string on a sha256 or hash line. */
 function isDiagnosticHex(token: string, line: string): boolean {
-  if (token.length !== 40 && token.length !== 64) return false;
+  if (token.length === 64) return /\b(sha-?256|hash)\b/i.test(line);
+  if (token.length !== 40) return false;
   if (line.trim() === token) return true;
   return /\b(sha-?256|sha-?1|checksum|hash|cid|commit|installer)\b/i.test(line);
+}
+
+/** A 12- or 24-word BIP39 phrase. Shorter text, including `secret-line`, stays. */
+function redactMnemonicPhrases(line: string): string {
+  return line.replace(/[a-z]+(?:[ \t]+[a-z]+){11,}/g, (phrase) => {
+    const words = phrase.split(/[ \t]+/);
+    const drop = words.map(() => false);
+    for (const size of [24, 12]) {
+      if (words.length < size) continue;
+      for (let start = 0; start <= words.length - size; start += 1) {
+        let mnemonic = true;
+        for (let offset = 0; offset < size; offset += 1) {
+          if (!BIP39_ENGLISH.has(words[start + offset])) {
+            mnemonic = false;
+            break;
+          }
+        }
+        if (!mnemonic) continue;
+        for (let offset = 0; offset < size; offset += 1) drop[start + offset] = true;
+      }
+    }
+    if (!drop.some(Boolean)) return phrase;
+    const kept: string[] = [];
+    for (let index = 0; index < words.length; index += 1) {
+      if (!drop[index]) {
+        kept.push(words[index]);
+        continue;
+      }
+      if (kept[kept.length - 1] !== '[removed]') kept.push('[removed]');
+      while (index + 1 < words.length && drop[index + 1]) index += 1;
+    }
+    return kept.join(' ');
+  });
 }
 
 /** Paths, hashes, ids, and names a support bundle needs. A mixed-case secret is not one of these. */
@@ -228,29 +263,32 @@ function redactHighEntropy(line: string): string {
 }
 
 /**
- * Drop PEM and coordinate-file lines. Redact labeled secrets, known secret
- * prefixes (AWS keys, ghp_ tokens, sk- keys), hex of 32 or more characters
- * that is not a 40- or 64-character hash, and an unlabeled mixed-case token
- * of 20 or more characters with high entropy. Keep paths, those hashes, CIDs,
- * did:key values, versions, UUIDs, and UPPER_SNAKE names. An unlabeled secret
- * shorter than that, or with low entropy, is not redacted.
+ * Drop PEM and coordinate-file lines. Redact labeled secrets, the rest of a
+ * seed, mnemonic, private_key, or secret line, a 12- or 24-word BIP39 phrase,
+ * known secret prefixes (AWS keys, ghp_ tokens, sk- keys), hex of 32 or more
+ * characters including a 64-character hex string that is not on a sha256 or
+ * hash line, and an unlabeled mixed-case token of 20 or more characters with
+ * high entropy. Keep paths, a 40-character hash, a 64-character hex string on
+ * a sha256 or hash line, CIDs, did:key values, versions, UUIDs, and
+ * UPPER_SNAKE names. An unlabeled secret shorter than that, or with low
+ * entropy, is not redacted.
  */
 export function scrubSupportText(text: string): string {
   const shielded = shieldKeptTokens(text);
   const scrubbed = shielded.text
     .split('\n')
     .filter((line) => !DROP_SUPPORT_LINE.test(line))
-    .map((line) => redactHighEntropy(line
+    .map((line) => redactHighEntropy(redactMnemonicPhrases(line
       .replace(/\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/g, '[removed]')
       .replace(/(\battach_secret\s*[:=]\s*)\S+/gi, '$1[removed]')
       .replace(/(\bapi[_-]?key\s*[:=]\s*)\S+/gi, '$1[removed]')
       .replace(/(\baccess_token\s*[:=]\s*)\S+/gi, '$1[removed]')
       .replace(/(\btoken\s*[:=]\s*)\S+/gi, '$1[removed]')
-      .replace(/(\bseed\s*[:=]\s*)\S+/gi, '$1[removed]')
+      .replace(/(\b(?:seed|mnemonic|private[\s_-]?key|secret)\s*[:=]\s*).*/gi, '$1[removed]')
       .replace(/(\bcookie\s*[:=]\s*)\S+/gi, '$1[removed]')
       .replace(/(\bauthorization\s*=\s*)\S+/gi, '$1[removed]')
       .replace(/bearer\s+\S+/gi, 'bearer [removed]')
-      .replace(/password\s*[:=]\s*\S+/gi, 'password [removed]')))
+      .replace(/password\s*[:=]\s*\S+/gi, 'password [removed]'))))
     .join('\n');
   return restoreKeptTokens(scrubbed, shielded.held, shielded.nonce);
 }

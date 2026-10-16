@@ -118,10 +118,21 @@ export function elastosDataDirMarked(dataDir: string): boolean {
 
 const RUNTIME_DATA_FILES = new Set(['components.json', 'host-process.lock', 'sources.json']);
 
+/** A real directory. A symlink does not count, even when its target holds a marker. */
+function isRealDirectory(dataDir: string): boolean {
+  try {
+    const stat = fs.lstatSync(dataDir);
+    return !stat.isSymbolicLink() && stat.isDirectory();
+  } catch {
+    return false;
+  }
+}
+
 /**
  * A custom data directory this launcher may reset: it exists as a real
  * directory and is empty, or every entry is one of the runtime's own files.
  * Anything else, including a symlink, is foreign. A missing directory is absent.
+ * A foreign directory that holds the ElastOS lock or marker is still an install.
  */
 function customXdgContents(dataDir: string): 'owned' | 'foreign' | 'absent' {
   let stat: fs.Stats;
@@ -153,6 +164,7 @@ export function foreignRuntimeDataMessage(
   const extra = customXdgDataDir(homeDir, platform, env);
   if (!extra || compareKey(extra, platform) !== compareKey(dataDir, platform)) return null;
   if (customXdgContents(dataDir) !== 'foreign') return null;
+  if (isRealDirectory(dataDir) && elastosDataDirMarked(dataDir)) return null;
   return `will not reset ${dataDir} because it contains files that are not part of the runtime. Move those files out, then reset.`;
 }
 
@@ -173,10 +185,11 @@ function customXdgDataDir(
 /**
  * True only for an exact default runtime path of this account, or for an XDG
  * data directory under that home that is empty, holds only the runtime's own
- * files, or holds the ElastOS lock or marker. The home defaults to
- * `os.homedir()`. A relative path, a `..` segment, another account, a data
- * directory outside that home, and a bare `<dir>/elastos` are refused. A
- * custom directory that contains anything else is refused by name.
+ * files, or holds the ElastOS lock or marker as a regular file. The home
+ * defaults to `os.homedir()`. A relative path, a `..` segment, another
+ * account, a data directory outside that home, and a bare `<dir>/elastos`
+ * are refused. A custom directory that contains anything else and has no
+ * marker is refused by name.
  */
 export function launcherOwnedDirectories(
   file: string,
@@ -202,7 +215,7 @@ export function launcherOwnedDirectories(
   const extra = customXdgDataDir(homeDir, platform, env);
   if (extra && compareKey(extra, platform) !== compareKey(data, platform)) {
     const contents = customXdgContents(extra);
-    if (contents === 'owned' || (contents !== 'foreign' && marked(extra))) {
+    if (contents === 'owned' || (isRealDirectory(extra) && marked(extra))) {
       owned.push(extra, runtimeHostLockPath(extra));
     }
   }
