@@ -18,6 +18,33 @@ export interface GatewayProcess {
   onOutput(listener: (chunk: string) => void): void;
   onExit(listener: (code: number | null) => void): void;
   signal(signal: NodeJS.Signals): void;
+  hasExited(): boolean;
+}
+
+/**
+ * host_lock.rs exits 75 for a replaced binary and also when the path cannot
+ * be read, the file moved, or the bytes cannot be re-hashed. Restart only
+ * for a real replacement. Check the unreadable phrases first: the re-hash
+ * failure also contains "changed on disk".
+ */
+export function binaryReplacement(output: string, code: number | null): boolean {
+  if (code !== EXIT_BINARY_REPLACED) return false;
+  if (/could not be read|could not be verified|could not be re-verified/i.test(output)) return false;
+  return /was replaced on disk|changed on disk/i.test(output);
+}
+
+/** The gateway is its own process group. Signal the group, not only the leader. */
+export function signalProcessGroup(
+  pid: number,
+  signal: NodeJS.Signals,
+  kill: (pid: number, signal: NodeJS.Signals) => void = process.kill,
+): void {
+  if (!Number.isInteger(pid) || pid <= 0) return;
+  try {
+    kill(-pid, signal);
+  } catch {
+    // The process already left.
+  }
 }
 
 export interface GatewaySupervisorDeps {
@@ -88,7 +115,8 @@ export function createGatewaySupervisor(deps: GatewaySupervisorDeps): GatewaySup
     proc.onExit((code) => {
       exited = true;
       exitCode = code;
-      if (current === 'running' && !intentionalStop && code === EXIT_BINARY_REPLACED) {
+      if (current !== 'running' || intentionalStop) return;
+      if (binaryReplacement(output, code)) {
         owned = null;
         restarts += 1;
         if (restarts > maxRestarts) {
@@ -101,6 +129,12 @@ export function createGatewaySupervisor(deps: GatewaySupervisorDeps): GatewaySup
           current = 'error';
           note(err instanceof Error ? err.message : String(err));
         });
+        return;
+      }
+      if (code === EXIT_BINARY_REPLACED) {
+        owned = null;
+        current = 'error';
+        note('ElastOS stopped (exit 75) without a replaced binary. It was not started again.');
       }
     });
 
@@ -122,13 +156,16 @@ export function createGatewaySupervisor(deps: GatewaySupervisorDeps): GatewaySup
 
   function classifyExit(code: number | null, output: string): 'replaced' | 'already' {
     owned = null;
-    if (code === EXIT_BINARY_REPLACED) {
+    if (binaryReplacement(output, code)) {
       restarts += 1;
       if (restarts > maxRestarts) {
         throw new Error('ElastOS kept restarting after an update. Click Start to try again.');
       }
       note('ElastOS was updated. Starting it again.');
       return 'replaced';
+    }
+    if (code === EXIT_BINARY_REPLACED) {
+      throw new Error('ElastOS stopped (exit 75) without a replaced binary. It was not started again.');
     }
     if (output.includes(ALREADY_OWNS_TEXT)) {
       return 'already';
@@ -139,6 +176,24 @@ export function createGatewaySupervisor(deps: GatewaySupervisorDeps): GatewaySup
         ? `ElastOS stopped before it was ready. ${tail}`
         : 'ElastOS stopped before it was ready. Click Install to try again.',
     );
+  }
+
+  /** Two failed /healthz polls, and only after this pid has exited. */
+  async function confirmedStopped(proc: GatewayProcess, budgetMs: number): Promise<boolean> {
+    const deadline = deps.now() + budgetMs;
+    let misses = 0;
+    while (deps.now() < deadline) {
+      const dead = proc.hasExited();
+      const healthDown = !isHealthOk(await deps.fetchHealth());
+      if (dead && healthDown) {
+        misses += 1;
+        if (misses >= 2) return true;
+      } else {
+        misses = 0;
+      }
+      await deps.sleep(pollMs);
+    }
+    return false;
   }
 
   const supervisor: GatewaySupervisor = {
@@ -178,23 +233,19 @@ export function createGatewaySupervisor(deps: GatewaySupervisorDeps): GatewaySup
       current = 'stopping';
       const proc = owned;
       proc.signal('SIGTERM');
-      const deadline = deps.now() + graceMs;
-      while (deps.now() < deadline) {
-        if (!isHealthOk(await deps.fetchHealth())) {
-          owned = null;
-          current = 'stopped';
-          return;
-        }
-        await deps.sleep(pollMs);
+      if (await confirmedStopped(proc, graceMs)) {
+        owned = null;
+        current = 'stopped';
+        return;
       }
       proc.signal('SIGKILL');
-      await deps.sleep(pollMs);
-      owned = null;
-      if (isHealthOk(await deps.fetchHealth())) {
-        current = 'error';
-        throw new Error('ElastOS is still running.');
+      if (await confirmedStopped(proc, graceMs)) {
+        owned = null;
+        current = 'stopped';
+        return;
       }
-      current = 'stopped';
+      current = 'error';
+      throw new Error('ElastOS is still running.');
     },
     openHome() {
       deps.openUrl(HOME_URL);
@@ -218,6 +269,7 @@ export function spawnGatewayProcess(binary: string, args: readonly string[]): Ga
   });
   const outputListeners: Array<(chunk: string) => void> = [];
   const exitListeners: Array<(code: number | null) => void> = [];
+  let exited = false;
   const emit = (chunk: Buffer | string) => {
     const text = chunk.toString();
     for (const listener of outputListeners) listener(text);
@@ -225,6 +277,7 @@ export function spawnGatewayProcess(binary: string, args: readonly string[]): Ga
   child.stdout?.on('data', emit);
   child.stderr?.on('data', emit);
   child.on('exit', (code) => {
+    exited = true;
     for (const listener of exitListeners) listener(code);
   });
   return {
@@ -235,13 +288,11 @@ export function spawnGatewayProcess(binary: string, args: readonly string[]): Ga
     onExit(listener) {
       exitListeners.push(listener);
     },
+    hasExited() {
+      return exited;
+    },
     signal(signal) {
-      if (!child.pid || child.pid < 0) return;
-      try {
-        process.kill(child.pid, signal);
-      } catch {
-        // The process already left.
-      }
+      signalProcessGroup(child.pid ?? -1, signal);
     },
   };
 }
