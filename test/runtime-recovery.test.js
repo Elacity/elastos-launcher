@@ -147,6 +147,45 @@ test('a stale host lock is removed and a live one is left alone', async () => {
   );
 });
 
+test('deleting a stale lock re-reads the file and the pid', () => {
+  const { removeStaleLockNow } = require('../dist/main/targets/runtimeRecovery');
+  const stats = [{ dev: 1, ino: 2, isSymbolicLink: () => false }];
+  let text = LOCK_TEXT;
+  let alive = false;
+  const unlinked = [];
+  const deps = {
+    readFile: () => text,
+    lstat: () => stats[0],
+    pidAlive: () => alive,
+    unlink: (file) => { unlinked.push(file); },
+  };
+  alive = true;
+  assert.throws(() => removeStaleLockNow(LOCK, deps), /running ElastOS/);
+  assert.deepEqual(unlinked, []);
+
+  alive = false;
+  stats[0] = { dev: 1, ino: 2, isSymbolicLink: () => true };
+  assert.throws(() => removeStaleLockNow(LOCK, deps), /symlink/);
+  assert.deepEqual(unlinked, []);
+
+  let reads = 0;
+  stats[0] = { dev: 1, ino: 2, isSymbolicLink: () => false };
+  assert.throws(() => removeStaleLockNow(LOCK, {
+    readFile: () => LOCK_TEXT,
+    lstat: () => {
+      reads += 1;
+      return { dev: 1, ino: reads, isSymbolicLink: () => false };
+    },
+    pidAlive: () => false,
+    unlink: () => { unlinked.push('changed'); },
+  }), /lock changed/);
+  assert.deepEqual(unlinked, []);
+
+  stats[0] = { dev: 1, ino: 2, isSymbolicLink: () => false };
+  removeStaleLockNow(LOCK, deps);
+  assert.deepEqual(unlinked, [LOCK]);
+});
+
 test('a secret or a stack trace is not the error screen', () => {
   const secret = failureScreen(facts({ error: 'wrote attach_secret=sekrit into the log' }));
   assert.equal(secret.fixLabel, null);

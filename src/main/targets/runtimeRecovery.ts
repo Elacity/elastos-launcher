@@ -68,10 +68,46 @@ export function assertStaleLockPath(lockPath: string): void {
   if (path.basename(path.dirname(lockPath)) !== 'elastos') {
     throw new Error('Refusing to remove a lock outside the ElastOS data directory.');
   }
-  const normalized = lockPath.split(path.sep).join('/');
+  const normalized = lockPath.split('\\').join('/');
   if (normalized.includes('/.pc2/') || normalized.includes('/pc2.net/')) {
     throw new Error('Refusing to remove the PC2 directory.');
   }
+}
+
+export interface LockStat {
+  isSymbolicLink(): boolean;
+  dev: number;
+  ino: number;
+}
+
+/**
+ * Re-read the lock at delete time. A snapshot from the error screen is not
+ * enough: the file may have been replaced, or the pid may be alive again.
+ */
+export function removeStaleLockNow(lockPath: string, deps: {
+  readFile: (file: string) => string;
+  lstat: (file: string) => LockStat;
+  pidAlive: (pid: number) => boolean;
+  unlink: (file: string) => void;
+}): void {
+  assertStaleLockPath(lockPath);
+  const first = deps.lstat(lockPath);
+  if (first.isSymbolicLink()) {
+    throw new Error('Refusing to remove a lock that is a symlink.');
+  }
+  const text = deps.readFile(lockPath);
+  if (!lockIsStale(text, deps.pidAlive)) {
+    throw new Error('A running ElastOS holds this lock.');
+  }
+  const second = deps.lstat(lockPath);
+  if (second.isSymbolicLink() || second.dev !== first.dev || second.ino !== first.ino) {
+    throw new Error('The lock changed. It was left in place.');
+  }
+  const again = deps.readFile(lockPath);
+  if (again !== text || !lockIsStale(again, deps.pidAlive)) {
+    throw new Error('The lock changed. It was left in place.');
+  }
+  deps.unlink(lockPath);
 }
 
 export function failureScreen(facts: FailureFacts): FailureScreen {
@@ -118,9 +154,15 @@ export async function applyFix(facts: FailureFacts, deps: RecoveryDeps): Promise
     return 'ready';
   }
   if (kind === 'stale-lock') {
-    if (!facts.lockPath || !lockIsStale(facts.lockText, facts.pidAlive)) return 'still-blocked';
+    if (!facts.lockPath) return 'still-blocked';
     assertStaleLockPath(facts.lockPath);
-    deps.removeLock(facts.lockPath);
+    try {
+      deps.removeLock(facts.lockPath);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (/running ElastOS|lock changed|symlink/.test(message)) return 'still-blocked';
+      throw err;
+    }
     return 'ready';
   }
   return 'still-blocked';
@@ -163,8 +205,12 @@ export async function fixCollectedFailure(facts: FailureFacts): Promise<'ready' 
     recheckOnline: recheckOnline,
     resumeSetup: () => installRuntimeOnThisComputer(),
     removeLock: (lockPath) => {
-      assertStaleLockPath(lockPath);
-      fs.rmSync(lockPath, { force: true });
+      removeStaleLockNow(lockPath, {
+        readFile: (file) => fs.readFileSync(file, 'utf8'),
+        lstat: (file) => fs.lstatSync(file),
+        pidAlive,
+        unlink: (file) => fs.rmSync(file, { force: true }),
+      });
     },
   });
 }
