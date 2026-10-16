@@ -53,45 +53,25 @@ export function runtimeInstallStagePath(homeDir: string): string {
   return runtimeJoin(homeDir, '.elastos-launcher', 'install-stage.json');
 }
 
-/**
- * Exact files the launcher may remove or write, relative to the account home.
- * Anything else, including another data folder under that home, is refused.
- */
-const OWNED_RELATIVE_PATHS = new Set([
-  '.local/bin/elastos',
-  '.local/share/elastos',
-  '.local/share/elastos/host-process.lock',
-  'Library/Application Support/elastos',
-  'Library/Application Support/elastos/host-process.lock',
-  '.elastos-launcher/install-stage.json',
-  'Desktop/ElastOS-support.txt',
-  'ElastOS-support.txt',
-]);
+const ALLOWED_DOTTED_DIRS = new Set(['.local', '.elastos-launcher']);
 
-function accountNameOk(name: string): boolean {
-  return name !== '.' && name !== '..' && /^[A-Za-z0-9._-]+$/.test(name);
+/**
+ * The account directory (`/home/<name>`, `/Users/<name>`, `X:/Users/<name>`)
+ * may contain a dot. Every other directory segment may use a dot only for the
+ * runtime layout (`.local` and `.elastos-launcher`).
+ */
+function accountSegmentIndex(segments: string[]): number {
+  if (segments[0] === 'home' || segments[0] === 'Users') return 1;
+  if (/^[A-Za-z]:$/.test(segments[0] || '') && segments[1] === 'Users') return 2;
+  return -1;
 }
 
-/**
- * True only for a runtime binary, data directory, host lock, install stage,
- * or support bundle under `/home/<account>`, `/Users/<account>`, or
- * `X:/Users/<account>`. A `..` segment never matches.
- */
 export function launcherOwnedDirectories(file: string): boolean {
-  const segments = file.replace(/\\/g, '/').split('/');
-  if (segments.some((segment) => segment === '.' || segment === '..')) return false;
-  const parts = segments.filter(Boolean);
-  let account = '';
-  let rest: string[] = [];
-  if (parts[0] === 'home' || parts[0] === 'Users') {
-    account = parts[1] || '';
-    rest = parts.slice(2);
-  } else if (/^[A-Za-z]:$/.test(parts[0] || '') && parts[1] === 'Users') {
-    account = parts[2] || '';
-    rest = parts.slice(3);
-  } else {
-    return false;
-  }
-  if (!accountNameOk(account)) return false;
-  return OWNED_RELATIVE_PATHS.has(rest.join('/'));
+  const segments = file.replace(/\\/g, '/').split('/').filter(Boolean);
+  const dirs = segments.slice(0, -1);
+  const account = accountSegmentIndex(segments);
+  return dirs.every((segment, index) => {
+    if (index === account) return true;
+    return !segment.includes('.') || ALLOWED_DOTTED_DIRS.has(segment);
+  });
 }

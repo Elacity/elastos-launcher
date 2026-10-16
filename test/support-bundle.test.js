@@ -1,5 +1,6 @@
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
 
@@ -60,8 +61,9 @@ test('the support bundle has versions, health, and platform, and no secrets', ()
 });
 
 test('save support bundle writes only ElastOS-support.txt outside the data dirs', () => {
-  const home = '/home/tester';
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'elastos-support-'));
   const desktop = path.join(home, 'Desktop');
+  fs.mkdirSync(desktop);
   const file = supportBundlePath(home, true);
   assert.equal(file, path.join(desktop, 'ElastOS-support.txt'));
   const written = new Map();
