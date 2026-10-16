@@ -52,11 +52,13 @@ export {
 } from './runtimeInstall';
 export {
   installerChildEnv,
+  releaseHeadCid,
   sha256Equals,
   sha256Hex,
   verifyReleaseHead,
   ReleaseHeadError,
 } from './releaseHead';
+export { installedVersionMatches } from './runtimeInstall';
 export { INTEL_MAC_MESSAGE, KVM_MESSAGE, runtimeInstallBlock, wslKvmMessage } from './runtimeSupport';
 export {
   runtimeBinaryPath,

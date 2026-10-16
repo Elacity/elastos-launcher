@@ -25,7 +25,7 @@ The product decision this plan assumes: the desktop app keeps launching PC2 unti
 | Open URL | Still open. The supervised command in this plan remains `elastos gateway --addr 127.0.0.1:8090` and `/home/`. |
 | Remote tunnels | Still open. First runtime launch in this plan binds loopback. |
 
-On 2026-10-16 the public publisher `https://elastos.elacitylabs.com/release-head.json` was channel `canary`, version `0.8.0-alpha.20`, head `QmTAEJ8DAprsv5PbWcudofQwXrzL7ZjSgmhRmU8nqmwirf`, signer `did:key:z6MkgwHd2BCWe1jHMXPiR6H1q1RFPcv1YzhMbK5G1kBarbfe`. That is the testing channel, not the stable pin. A stable head was not published at that URL.
+On 2026-10-16 the public publisher `https://elastos.elacitylabs.com/release-head.json` was channel `canary`, version `0.8.0-alpha.20`, signer `did:key:z6MkgwHd2BCWe1jHMXPiR6H1q1RFPcv1YzhMbK5G1kBarbfe`. `latest_release_cid` was `QmTAEJ8DAprsv5PbWcudofQwXrzL7ZjSgmhRmU8nqmwirf`. The head CID, the UnixFS CID of those release-head bytes, was `QmUmMZD3yNs4C7JvtichoZ727gN2ntXNnCDF1QTHkNKhXt`. That is the testing channel, not the stable pin. A stable head was not published at that URL.
 
 ## 1. How the launcher runs PC2.net today
 
