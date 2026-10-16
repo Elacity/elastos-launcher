@@ -64,6 +64,13 @@ function confirmCopy(targetId, paths) {
   };
 }
 
+function resetCopy() {
+  return {
+    title: 'Reset ElastOS?',
+    body: 'This removes the ElastOS program and its data on this computer so you can install it again.',
+  };
+}
+
 function firstRunCopy(targetId, status) {
   if (targetId !== 'runtime' || status !== 'not-installed') return '';
   return 'Install ElastOS on this computer. One button downloads it, sets it up, and starts it. Then you open your computer in the browser.';
@@ -79,6 +86,7 @@ const api = {
   stepStates,
   primaryAction,
   confirmCopy,
+  resetCopy,
   firstRunCopy,
   urlLabel,
 };

@@ -11,6 +11,7 @@ contextBridge.exposeInMainWorld('pc2', {
   openBrowser: () => ipcRenderer.invoke('pc2:openBrowser'),
   install: () => ipcRenderer.invoke('pc2:install'),
   uninstall: () => ipcRenderer.invoke('pc2:uninstall'),
+  resetRuntime: () => ipcRenderer.invoke('pc2:resetRuntime'),
   
   // Environment
   setEnvironment: (env: string, customPath?: string) => ipcRenderer.invoke('pc2:setEnvironment', env, customPath),
@@ -73,6 +74,7 @@ declare global {
       openBrowser: () => void;
       install: () => Promise<void>;
       uninstall: () => Promise<void>;
+      resetRuntime: () => Promise<void>;
       getStatus: () => Promise<PC2Status>;
       getLogs: (lines: number) => Promise<string>;
       isInstalled: () => Promise<boolean>;

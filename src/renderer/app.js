@@ -5,6 +5,7 @@ const openBtn = document.getElementById('open-btn');
 const openLabel = document.getElementById('open-label');
 const logsBtn = document.getElementById('logs-btn');
 const uninstallBtn = document.getElementById('uninstall-btn');
+const resetBtn = document.getElementById('reset-btn');
 const logsPanel = document.getElementById('logs-panel');
 const logsContent = document.getElementById('logs-content');
 const closeLogsBtn = document.getElementById('close-logs');
@@ -37,6 +38,7 @@ const loginRow = document.getElementById('login-row');
 const urlValue = document.getElementById('url-value');
 
 let currentStatus = 'stopped';
+let confirmMode = 'uninstall';
 let targetId = 'runtime';
 let openUrl = 'http://127.0.0.1:8090/home/';
 let busy = false;
@@ -248,7 +250,19 @@ copyLogsBtn.addEventListener('click', async () => {
   }
 });
 
+resetBtn.addEventListener('click', () => {
+  const copy = flow.resetCopy();
+  confirmMode = 'reset';
+  confirmTitle.textContent = copy.title;
+  confirmBody.textContent = copy.body;
+  confirmPath.textContent = 'The ElastOS program and its data folder';
+  confirmDelete.textContent = 'Reset';
+  confirmModal.classList.remove('hidden');
+});
+
 uninstallBtn.addEventListener('click', async () => {
+  confirmMode = 'uninstall';
+  confirmDelete.textContent = 'Delete';
   const copy = flow.confirmCopy(targetId, []);
   confirmTitle.textContent = copy.title;
   confirmBody.textContent = copy.body;
@@ -265,11 +279,18 @@ confirmCancel.addEventListener('click', () => confirmModal.classList.add('hidden
 
 confirmDelete.addEventListener('click', async () => {
   confirmModal.classList.add('hidden');
-  statusText.textContent = 'Removing...';
+  const resetting = confirmMode === 'reset';
+  statusText.textContent = resetting ? 'Resetting...' : 'Removing...';
   try {
-    await window.pc2.uninstall();
-    addLog(targetId === 'runtime' ? 'ElastOS was removed.' : 'PC2 was removed.');
+    if (resetting) {
+      await window.pc2.resetRuntime();
+      addLog('ElastOS was reset. Click Install to set it up again.');
+    } else {
+      await window.pc2.uninstall();
+      addLog(targetId === 'runtime' ? 'ElastOS was removed.' : 'PC2 was removed.');
+    }
     stepsEl.classList.add('hidden');
+    clearError();
   } catch (err) {
     showError(err.message);
   }

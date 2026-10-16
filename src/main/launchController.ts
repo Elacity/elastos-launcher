@@ -10,6 +10,7 @@ import { setRuntimeLogSink } from './targets/runtimeGateway';
 import { loadActiveRuntimePin } from './targets/runtimePin';
 import { runtimeHeadStore } from './targets/runtimeUpdate';
 import { rollbackRuntimeUpdate } from './targets/runtimeTarget';
+import { resetRuntimeOnThisComputer } from './targets/runtimeUninstall';
 import { LaunchTarget, LaunchTargetId, TargetStatus, UpdateCheck } from './targets/types';
 
 export interface LaunchControllerOptions {
@@ -29,6 +30,7 @@ export interface LaunchController {
   install(onProgress: (message: string) => void): Promise<void>;
   update(onProgress: (message: string) => void): Promise<void>;
   uninstall(): Promise<void>;
+  resetRuntime(): Promise<void>;
   rollback(onProgress?: (message: string) => void): Promise<void>;
   getVersion(): string;
   checkForUpdate(): Promise<UpdateCheck>;
@@ -203,6 +205,9 @@ export function createLaunchController(options: LaunchControllerOptions = {}): L
     install: (onProgress) => (pc2Mode ? active.install(onProgress) : runRuntime(() => active.install(onProgress))),
     update: (onProgress) => (pc2Mode ? active.update(onProgress) : runRuntime(() => active.update(onProgress))),
     uninstall: () => (pc2Mode ? active.uninstall() : runRuntime(() => active.uninstall())),
+    resetRuntime: () => (pc2Mode
+      ? Promise.reject(new Error('Reset is for ElastOS.'))
+      : runRuntime(() => resetRuntimeOnThisComputer(() => active.stop()))),
     rollback: (onProgress) => (
       pc2Mode
         ? Promise.reject(new Error('PC2 does not roll back through the runtime.'))
