@@ -219,7 +219,7 @@ export function createLaunchController(options: LaunchControllerOptions = {}): L
         status = 'error';
       }
       return buildDiagnostics({
-        launcherVersion: '1.2.7',
+        launcherVersion: '1.4.0',
         target: active.id,
         channel,
         pinVersion,

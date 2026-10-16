@@ -1,6 +1,6 @@
 {
   "name": "elastos-launcher",
-  "version": "1.2.7",
+  "version": "1.4.0",
   "description": "ElastOS Personal Cloud - Desktop Launcher",
   "main": "dist/main/index.js",
   "author": {
