@@ -162,17 +162,27 @@ export function isPc2ServiceFile(basename: string, _body: string | null = null):
   return PC2_SERVICE_NAME.test(basename);
 }
 
-/**
- * pkexec 126 means no authentication agent. 127 means the prompt or command
- * could not run. Neither case should continue as `sudo`.
- */
-export function pkexecShouldTrySudo(status: number | null, code: string): boolean {
-  if (status === 126 || status === 127) return false;
-  return code === 'ENOENT';
+/** Printed before the removal commands so a later exit status is the script's own. */
+export const PKEXEC_SENTINEL = 'ELASTOS_PKEXEC_STARTED';
+
+export function pkexecDismissedMessage(): string {
+  return 'You cancelled the administrator prompt, or the administrator check failed. The PC2 system files were not changed.';
 }
 
-export function pkexecPromptMessage(status: number): string {
-  return `The administrator prompt could not be shown (pkexec exited ${status}). The PC2 system files are still there.`;
+export function pkexecNotAuthorizedMessage(): string {
+  return 'ElastOS is not authorized to remove those files, or the administrator prompt is missing. The PC2 system files are still there.';
+}
+
+export function pkexecMissingMessage(): string {
+  return 'The administrator prompt program is not installed. The PC2 system files are still there.';
+}
+
+export function pkexecScriptMessage(status: number | null, remaining: string[]): string {
+  const exit = status == null ? 'unknown' : String(status);
+  if (remaining.length === 0) {
+    return `The removal command stopped before it finished (exit ${exit}).`;
+  }
+  return `The removal command stopped before it finished (exit ${exit}). These PC2 system files are still there: ${remaining.join(', ')}.`;
 }
 
 export function parseWslDistroList(text: string): Array<{ name: string; isDefault: boolean }> {
@@ -1205,22 +1215,44 @@ export function privilegedRemovalScript(
   }).join('; ');
 }
 
-function runOnePrivilegedRm(files: string[]): void {
+function commandOutput(err: unknown): string {
+  if (!err || typeof err !== 'object') return '';
+  const failure = err as { stdout?: unknown; stderr?: unknown };
+  const text = (value: unknown) => (typeof value === 'string' ? value : Buffer.isBuffer(value) ? value.toString('utf8') : '');
+  return `${text(failure.stdout)}\n${text(failure.stderr)}`;
+}
+
+export function runOnePrivilegedRm(
+  files: string[],
+  deps: {
+    execFileSync?: (file: string, args: readonly string[], options: { encoding: 'utf8'; timeout: number }) => string;
+    platform?: string;
+    stillPresent?: (file: string) => boolean;
+    readFile?: (file: string) => string;
+  } = {},
+): void {
   if (files.length === 0) return;
-  const script = privilegedRemovalScript(files);
-  if (process.platform === 'darwin') {
+  const platform = deps.platform ?? process.platform;
+  const run = deps.execFileSync ?? ((file, args, options) => execFileSync(file, args as string[], options));
+  const stillPresent = deps.stillPresent ?? ((file) => fs.existsSync(file));
+  const script = privilegedRemovalScript(files, deps.readFile);
+  if (platform === 'darwin') {
     const apple = `do shell script ${JSON.stringify(script)} with administrator privileges`;
-    execFileSync('osascript', ['-e', apple], { stdio: 'inherit', timeout: 120000 });
+    run('osascript', ['-e', apple], { encoding: 'utf8', timeout: 120000 });
     return;
   }
-  if (process.platform === 'linux') {
+  if (platform === 'linux') {
+    const wrapped = `printf '%s\\n' ${quoteShell(PKEXEC_SENTINEL)}; ${script}`;
     try {
-      execFileSync('pkexec', ['sh', '-c', script], { stdio: 'inherit', timeout: 120000 });
+      run('pkexec', ['sh', '-c', wrapped], { encoding: 'utf8', timeout: 120000 });
     } catch (err) {
+      if (errorCode(err) === 'ENOENT') throw new Error(pkexecMissingMessage());
+      const started = commandOutput(err).includes(PKEXEC_SENTINEL);
       const status = errorStatus(err);
-      if (status === 126 || status === 127) throw new Error(pkexecPromptMessage(status));
-      if (!pkexecShouldTrySudo(status, errorCode(err))) throw err;
-      execFileSync('sudo', ['--', 'sh', '-c', script], { stdio: 'inherit', timeout: 120000 });
+      if (started) throw new Error(pkexecScriptMessage(status, files.filter(stillPresent)));
+      if (status === 126) throw new Error(pkexecDismissedMessage());
+      if (status === 127) throw new Error(pkexecNotAuthorizedMessage());
+      throw err;
     }
     return;
   }

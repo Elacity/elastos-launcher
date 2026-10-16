@@ -48,8 +48,8 @@ The Linux test is an `ubuntu:24.04` container with curl, python3, and gcc absent
 ## Windows
 
 1. If Linux support is off, the screen says Windows needs Linux support. The person clicks Enable. They do not type a command.
-2. Windows asks for permission once. If Windows says a restart is required, ElastOS says: Restart Windows, then open ElastOS and click Install.
-3. After the restart, they click Install. The app adds its own Linux environment, installs python3 and curl there if they are missing, and installs the runtime.
+2. Windows asks for permission once. If Windows says a restart is required, ElastOS says: Restart Windows. When you open ElastOS again, Install continues.
+3. After the restart, if Linux support is on, opening ElastOS continues Install. The app adds its own Linux environment, installs python3 and curl there if they are missing, and installs the runtime. If Linux support is still off, Install waits.
 4. The button becomes Open my computer. The page opens in the Windows browser at `http://127.0.0.1:8090/home/`.
 
 The ElastOS Linux environment is not removed by Remove PC2.
@@ -57,7 +57,7 @@ The ElastOS Linux environment is not removed by Remove PC2.
 ## Gaps
 
 - The macOS click test hides developer tools on a GitHub `macos-14` runner. It does not boot a blank Mac.
-- The Windows runner cannot turn Linux support off and reboot in the same job, so it cannot click from “WSL disabled” through to Open my computer. The Enable command and the restart sentence are tested. A runner that already has Linux support can install and open Home.
+- The Windows runner cannot turn Linux support off and reboot in the same job, so it cannot click from “WSL disabled” through to Open my computer. The Enable command, the restart sentence, and the decision to continue Install only after Linux support is on are tested. A runner that already has Linux support can install and open Home.
 - A musl system is refused. ElastOS does not ship a musl runtime.
 - A Linux system without bash is refused. The app does not bundle bash.
 - The in-computer browser on Linux can still ask for a password later. Install and Open my computer do not.

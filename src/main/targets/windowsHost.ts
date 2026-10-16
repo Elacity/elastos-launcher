@@ -3,6 +3,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { sha256Hex } from './releaseHead';
+import { runtimeResumeInstallPath } from './runtimePaths';
 
 export type WindowsKind = 'not-windows' | 'enable-wsl' | 'setup-distro' | 'ready';
 
@@ -47,7 +48,7 @@ export function hostPrompt(facts: WindowsFacts): HostPrompt {
     return {
       kind: 'enable-wsl',
       title: 'Windows needs Linux support',
-      body: 'ElastOS on Windows runs in its own Linux environment. Click Enable. Windows will ask for permission once, and it may ask you to restart. You do not type any commands.',
+      body: 'ElastOS on Windows runs in its own Linux environment. Click Enable. Windows will ask for permission once, and it may ask you to restart. After that restart, open ElastOS and Install continues. You do not type any commands.',
       actionLabel: 'Enable',
     };
   }
@@ -81,7 +82,30 @@ export function importDistroArgs(installDir: string, rootfs: string): readonly s
   return ['--import', 'ElastOS', installDir, rootfs, '--version', '2'];
 }
 
-export const WINDOWS_REBOOT_MESSAGE = 'Restart Windows, then open ElastOS and click Install.';
+export const WINDOWS_REBOOT_MESSAGE = 'Restart Windows. When you open ElastOS again, Install continues.';
+
+export type ResumeInstallPlan = 'install' | 'wait' | 'none';
+
+export function planAfterWindowsRestart(input: { marker: boolean; wslInstalled: boolean }): ResumeInstallPlan {
+  if (!input.marker) return 'none';
+  if (!input.wslInstalled) return 'wait';
+  return 'install';
+}
+
+export function markInstallResumeAfterReboot(homeDir: string = os.homedir()): void {
+  const file = runtimeResumeInstallPath(homeDir);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, JSON.stringify({ resume: 'install', reason: 'windows-linux-support' }), { mode: 0o600 });
+}
+
+export function readResumeInstallMarker(homeDir: string): boolean {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(runtimeResumeInstallPath(homeDir), 'utf8')) as { resume?: unknown };
+    return parsed.resume === 'install';
+  } catch {
+    return false;
+  }
+}
 
 export interface HiddenSpawnOutput {
   code: number;
@@ -107,6 +131,7 @@ export async function runHostAction(
     spawnHidden: HiddenSpawn;
     installDir?: string;
     rootfs?: string;
+    onReboot?: () => void;
   },
 ): Promise<void> {
   if (kind === 'setup-distro' && !deps.rootfs) {
@@ -119,6 +144,7 @@ export async function runHostAction(
   const code = typeof result === 'number' ? result : result.code;
   const text = typeof result === 'number' ? '' : `${result.stdout ?? ''}\n${result.stderr ?? ''}`;
   if (kind === 'enable-wsl' && windowsEnableNeedsReboot(text)) {
+    deps.onReboot?.();
     throw new Error(WINDOWS_REBOOT_MESSAGE);
   }
   if (code !== 0) {
@@ -175,6 +201,7 @@ export async function applyWindowsFix(facts: WindowsFacts, deps: {
   spawnHidden: HiddenSpawn;
   installDir?: string;
   ensureRootfs?: () => Promise<string>;
+  onReboot?: () => void;
 }): Promise<void> {
   const prompt = hostPrompt(facts);
   assertPromptHasNoCommands(prompt);
@@ -242,6 +269,7 @@ export async function fixWindowsOnThisComputer(): Promise<void> {
   });
   await applyWindowsFix(facts, {
     spawnHidden,
+    onReboot: () => markInstallResumeAfterReboot(os.homedir()),
     installDir: 'C:\\ElastOS\\distro',
     ensureRootfs: () => ensureElastosRootfs({
       dest: path.join(os.homedir(), '.elastos-launcher', 'ubuntu-noble-wsl.rootfs.tar.gz'),
@@ -293,4 +321,36 @@ export function assertPinnedRootfs(bytes: Buffer): void {
   if (sha256Hex(bytes) !== ELASTOS_ROOTFS_SHA256) {
     throw new Error('The Linux environment download does not match the pinned hash.');
   }
+}
+
+/** After a Windows restart, continue Install only when Linux support is actually on. */
+export async function resumeInstallPlanOnThisComputer(deps: {
+  homeDir?: string;
+  platform?: string;
+  wslInstalled?: boolean;
+} = {}): Promise<ResumeInstallPlan> {
+  const homeDir = deps.homeDir ?? os.homedir();
+  const marker = readResumeInstallMarker(homeDir);
+  if (!marker) return 'none';
+  const platform = deps.platform ?? process.platform;
+  let wslInstalled = deps.wslInstalled;
+  if (wslInstalled === undefined) {
+    if (platform !== 'win32') return 'wait';
+    const facts = await detectWindows({
+      platform,
+      arch: process.arch,
+      lookup: lookupCommand,
+      listDistros,
+    });
+    wslInstalled = facts.wslInstalled;
+  }
+  const plan = planAfterWindowsRestart({ marker: true, wslInstalled });
+  if (plan === 'install') {
+    try {
+      fs.rmSync(runtimeResumeInstallPath(homeDir), { force: true });
+    } catch {
+      // The next open can try again if the marker is still there.
+    }
+  }
+  return plan;
 }

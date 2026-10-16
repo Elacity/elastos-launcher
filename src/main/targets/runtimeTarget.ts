@@ -4,6 +4,7 @@ import * as os from 'os';
 import { RUNTIME_TARGET } from './descriptors';
 import {
   createDefaultGatewaySupervisor,
+  ForeignGatewayError,
   GatewaySupervisor,
   HEALTH_URL,
   isHealthOk,
@@ -13,7 +14,7 @@ import * as runtimeInstall from './runtimeInstall';
 import { runtimeBinaryPath, runtimeComponentsPath, runtimeDataDir } from './runtimePaths';
 import { findRuntimeBinary, parseRuntimeVersion, probeRuntimeInstallation, RUNTIME_VERSION_ARGS } from './runtimeProbe';
 import { runtimeInstallBlock } from './runtimeSupport';
-import { uninstallRuntime } from './runtimeUninstall';
+import { removeVerifiedTarget, uninstallRuntime } from './runtimeUninstall';
 import {
   applyRuntimeUpdate,
   checkRuntimeUpdate,
@@ -83,7 +84,7 @@ export function createRuntimeTarget(): LaunchTarget {
         return;
       }
       if (isHealthOk(await readHealth())) {
-        throw new Error('ElastOS is already running. This window did not start it, so Stop leaves it running.');
+        throw new ForeignGatewayError();
       }
     },
     restart: async () => {
@@ -179,10 +180,13 @@ async function runtimeUninstall(stop: () => Promise<void>): Promise<void> {
     stop: async () => {
       await stop();
       if (isHealthOk(await readHealth())) {
-        throw new Error('ElastOS is already running. This window did not start it, so Stop leaves it running.');
+        throw new ForeignGatewayError();
       }
     },
-    remove: (target) => fs.rmSync(target, { recursive: true, force: true }),
+    homeDir: home,
+    platform: process.platform,
+    env: process.env,
+    remove: (target) => removeVerifiedTarget(target),
   });
 }
 

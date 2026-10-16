@@ -9,6 +9,7 @@ const {
   isHealthOk,
   scrubRuntimeLog,
   signalProcessGroup,
+  ForeignGatewayError,
   foreignListenerIsElastos,
   healthListenInodes,
   pidOwnsSocketInodes,
@@ -399,7 +400,11 @@ test('signalProcessGroup kills the leader and a child in that group', async () =
 test('stop does not kill a gateway this launcher did not start', async () => {
   const world = supervisor();
   world.setHealth({ status: 200, body: 'OK' });
-  await assert.rejects(() => world.sup.stop(), /did not start it/);
+  await assert.rejects(() => world.sup.stop(), (err) => {
+    assert.equal(err instanceof ForeignGatewayError, true);
+    assert.equal(err.code, 'foreign-gateway');
+    return true;
+  });
   assert.deepEqual(world.signals, []);
 });
 
@@ -439,6 +444,9 @@ test('uninstall removes only the runtime binary and data dir', async () => {
   await uninstallRuntime({
     binary: '/home/tester/.local/bin/elastos',
     dataDir: '/home/tester/.local/share/elastos',
+    homeDir: '/home/tester',
+    platform: 'linux',
+    env: {},
     stop: async () => {},
     remove: (target) => removed.push(target),
   });
@@ -450,6 +458,9 @@ test('uninstall removes only the runtime binary and data dir', async () => {
   await assert.rejects(() => uninstallRuntime({
     binary: '/home/tester/.local/bin/elastos',
     dataDir: '/home/tester/.other',
+    homeDir: '/home/tester',
+    platform: 'linux',
+    env: {},
     stop: async () => {},
     remove: () => { throw new Error('should not remove'); },
   }), /not the ElastOS data directory/);
@@ -458,9 +469,12 @@ test('uninstall removes only the runtime binary and data dir', async () => {
   await assert.rejects(() => uninstallRuntime({
     binary: '/home/tester/.local/bin/elastos',
     dataDir: '/home/tester/Library/Application Support/elastos',
+    homeDir: '/home/tester',
+    platform: 'darwin',
+    env: {},
     stop: async () => {
       stopped = true;
-      throw new Error('ElastOS is already running. This window did not start it, so Stop leaves it running.');
+      throw new ForeignGatewayError();
     },
     remove: () => { throw new Error('should not remove'); },
   }), /another window/);

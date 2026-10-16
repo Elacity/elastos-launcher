@@ -1,7 +1,7 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { HEALTH_URL, isHealthOk } from './runtimeGateway';
+import { confirmInstalledGateway, isHealthOk } from './runtimeGateway';
 import { installRuntimeOnThisComputer } from './runtimeInstall';
 import { launcherOwnedDirectories, runtimeBinaryPath, runtimeComponentsPath, runtimeDataDir, runtimeHostLockPath } from './runtimePaths';
 import { loadActiveRuntimePin } from './runtimePin';
@@ -278,15 +278,20 @@ function isFile(file: string): boolean {
   }
 }
 
+/** Ours only when the installed gateway identity check agrees. An OK body is not enough. */
+export async function recheckPortWith(deps: {
+  portBusy: () => Promise<boolean>;
+  confirm: () => Promise<boolean>;
+}): Promise<'free' | 'ours' | 'busy'> {
+  if (!(await deps.portBusy())) return 'free';
+  return (await deps.confirm()) ? 'ours' : 'busy';
+}
+
 async function recheckPort(): Promise<'free' | 'ours' | 'busy'> {
-  if (!(await portBusy(8090))) return 'free';
-  try {
-    const response = await fetch(HEALTH_URL, { signal: AbortSignal.timeout(800) });
-    if (response.status === 200 && (await response.text()).trim() === 'OK') return 'ours';
-  } catch {
-    // Another program still has the port.
-  }
-  return 'busy';
+  return recheckPortWith({
+    portBusy: () => portBusy(8090),
+    confirm: () => confirmInstalledGateway(),
+  });
 }
 
 async function recheckOnline(): Promise<boolean> {

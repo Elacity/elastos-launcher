@@ -1,16 +1,16 @@
 import { applyOpenAtLogin, readOpenAtLogin } from './targets/openAtLogin';
 import { buildDiagnostics, collectPreflight, PreflightReport, saveCollectedSupportBundle } from './targets/preflight';
-import { confirmInstalledGateway, HEALTH_URL, isHealthOk } from './targets/runtimeGateway';
+import { confirmInstalledGateway, HEALTH_URL, isForeignGatewayError, isHealthOk } from './targets/runtimeGateway';
 import { collectFailureFacts, failureScreen, FailureScreen, fixCollectedFailure, windowsFixResult } from './targets/runtimeRecovery';
 import { resolveLaunchTargetId } from './targets/preferences';
-import { LAUNCH_TARGET_ENV } from './targets/registry';
+import { LAUNCH_TARGET_ENV, retiredPc2Notice } from './targets/registry';
 import { createLaunchTarget } from './targets';
 import { setRuntimeLogSink } from './targets/runtimeGateway';
 import { loadActiveRuntimePin } from './targets/runtimePin';
 import { runtimeHeadStore } from './targets/runtimeUpdate';
 import { rollbackRuntimeUpdate } from './targets/runtimeTarget';
 import { resetRuntimeOnThisComputer } from './targets/runtimeUninstall';
-import { fixWindowsOnThisComputer } from './targets/windowsHost';
+import { fixWindowsOnThisComputer, resumeInstallPlanOnThisComputer, ResumeInstallPlan } from './targets/windowsHost';
 import { LaunchTarget, LaunchTargetId, TargetStatus, UpdateCheck } from './targets/types';
 
 export type { TargetStatus };
@@ -44,6 +44,7 @@ export interface LaunchController {
   saveSupportBundle(): Promise<string>;
   describeFailure(): Promise<FailureScreen>;
   fixFailure(): Promise<'ready' | 'still-blocked'>;
+  resumeInstallPlan(): Promise<ResumeInstallPlan>;
   setOpenAtLogin(enabled: boolean): void;
   getOpenAtLogin(): boolean;
   shutdown(): Promise<void>;
@@ -54,23 +55,48 @@ export interface QuitGate {
   ready: boolean;
 }
 
+/** SIGTERM grace plus SIGKILL grace, with a little room for the health probes. */
+export const QUIT_STOP_BUDGET_MS = 32_000;
+
+export interface QuitStopOptions {
+  budgetMs?: number;
+  log?: (line: string) => void;
+  onStopping?: () => void;
+}
+
 /**
  * The first before-quit waits for the gateway this window started.
- * A second before-quit, after that stop has finished, is the real quit.
+ * The wait is bounded. A second before-quit, after that stop has finished, is the real quit.
  */
 export async function finishQuitAfterGatewayStop(
   gate: QuitGate,
   event: { preventDefault(): void },
   shutdown: () => Promise<void>,
   quit: () => void,
+  options: QuitStopOptions = {},
 ): Promise<void> {
   if (gate.ready) return;
   event.preventDefault();
   if (gate.started) return;
   gate.started = true;
+  const budgetMs = options.budgetMs ?? QUIT_STOP_BUDGET_MS;
+  const log = options.log ?? (() => {});
+  let timer: ReturnType<typeof setTimeout> | undefined;
   try {
-    await shutdown();
+    options.onStopping?.();
+    const budget = new Promise<void>((resolve) => {
+      timer = setTimeout(() => {
+        log('ElastOS did not stop before quit finished. The window is closing.');
+        resolve();
+      }, budgetMs);
+    });
+    const stopping = shutdown().catch((err: unknown) => {
+      const message = err instanceof Error ? err.message : String(err);
+      log(`ElastOS did not stop cleanly. ${message}`);
+    });
+    await Promise.race([stopping, budget]);
   } finally {
+    if (timer) clearTimeout(timer);
     gate.ready = true;
     quit();
   }
@@ -93,17 +119,11 @@ function messageOf(err: unknown): string {
 
 /** IPC-facing supervisor for the ElastOS runtime. A leftover `pc2` target opens the runtime. */
 export function createDefaultLaunchController(env: NodeJS.ProcessEnv = process.env): LaunchController {
-  const raw = env[LAUNCH_TARGET_ENV];
-  if (typeof raw === 'string' && raw.trim().toLowerCase() === 'pc2') {
-    console.error('ELASTOS_LAUNCH_TARGET=pc2 is retired. Opening the ElastOS runtime.');
-    const cleaned: NodeJS.ProcessEnv = { ...env };
-    delete cleaned[LAUNCH_TARGET_ENV];
-    return createLaunchController({ env: cleaned });
-  }
   return createLaunchController({ env });
 }
 
 export function createLaunchController(options: LaunchControllerOptions = {}): LaunchController {
+  const retired = retiredPc2Notice(options.explicit) ?? retiredPc2Notice(options.env?.[LAUNCH_TARGET_ENV]);
   const id = resolveLaunchTargetId({
     explicit: options.explicit,
     env: options.env,
@@ -123,6 +143,7 @@ export function createLaunchController(options: LaunchControllerOptions = {}): L
   };
 
   setRuntimeLogSink(emitLog);
+  if (retired) emitLog(retired);
 
   async function runRuntime<T>(action: () => Promise<T>): Promise<T> {
     try {
@@ -273,6 +294,7 @@ export function createLaunchController(options: LaunchControllerOptions = {}): L
     },
     getDiagnostics: () => diagnosticsText(),
     saveSupportBundle: async () => saveCollectedSupportBundle(await diagnosticsText()),
+    resumeInstallPlan: () => resumeInstallPlanOnThisComputer(),
     setOpenAtLogin(enabled: boolean) {
       applyOpenAtLogin(enabled);
     },
@@ -283,7 +305,7 @@ export function createLaunchController(options: LaunchControllerOptions = {}): L
       try {
         await active.stop();
       } catch (err) {
-        if (messageOf(err).includes('did not start it')) return;
+        if (isForeignGatewayError(err)) return;
         throw err;
       }
     },

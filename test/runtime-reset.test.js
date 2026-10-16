@@ -1,10 +1,12 @@
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
 
-const { resetRuntime } = require('../dist/main/targets/runtimeUninstall');
+const { removeVerifiedTarget, resetRuntime } = require('../dist/main/targets/runtimeUninstall');
 const { launcherOwnedDirectories } = require('../dist/main/targets/runtimePaths');
+const { ForeignGatewayError } = require('../dist/main/targets/runtimeGateway');
 const flow = require('../src/renderer/flow.js');
 
 test('reset removes the runtime program, data, and unfinished install', async () => {
@@ -14,6 +16,9 @@ test('reset removes the runtime program, data, and unfinished install', async ()
     binary: '/home/tester/.local/bin/elastos',
     dataDir: '/home/tester/.local/share/elastos',
     stageFile: '/home/tester/.elastos-launcher/install-stage.json',
+    homeDir: '/home/tester',
+    platform: 'linux',
+    env: {},
     stop: async () => { calls.push('stop'); },
     remove: (target) => {
       calls.push(target);
@@ -30,26 +35,38 @@ test('reset removes the runtime program, data, and unfinished install', async ()
 });
 
 test('a dotted account name is still a launcher path', async () => {
-  assert.equal(launcherOwnedDirectories('/Users/jane.doe/.local/bin/elastos'), true);
-  assert.equal(launcherOwnedDirectories('/home/jane.doe/.local/share/elastos'), true);
-  assert.equal(launcherOwnedDirectories('/Users/jane.doe/Library/Application Support/elastos'), true);
-  assert.equal(launcherOwnedDirectories('C:/Users/jane.doe/Desktop/ElastOS-support.txt'), true);
-  assert.equal(launcherOwnedDirectories('/home/jane.doe/.local/share/elastos/host-process.lock'), true);
-  assert.equal(launcherOwnedDirectories('/home/jane.doe/.elastos-launcher/install-stage.json'), true);
-  assert.equal(launcherOwnedDirectories('/home/jane.doe/ElastOS-support.txt'), true);
-  assert.equal(launcherOwnedDirectories('/home/jane.doe/.pc2/note'), false);
-  assert.equal(launcherOwnedDirectories('/home/tester/.other/elastos'), false);
-  assert.equal(launcherOwnedDirectories('C:/Users/tester/.other/elastos'), false);
-  assert.equal(launcherOwnedDirectories('/usr/local/bin/elastos'), false);
-  assert.equal(launcherOwnedDirectories('/home/u/Documents/elastos'), false);
-  assert.equal(launcherOwnedDirectories('/home/tester/../tester/.local/bin/elastos'), false);
-  assert.equal(launcherOwnedDirectories('/home/tester/.LOCAL/bin/elastos'), false);
+  assert.equal(launcherOwnedDirectories('/Users/jane.doe/.local/bin/elastos', '/Users/jane.doe', 'darwin', {}), true);
+  assert.equal(launcherOwnedDirectories('/home/jane.doe/.local/share/elastos', '/home/jane.doe', 'linux', {}), true);
+  assert.equal(launcherOwnedDirectories('/Users/jane.doe/Library/Application Support/elastos', '/Users/jane.doe', 'darwin', {}), true);
+  assert.equal(launcherOwnedDirectories('C:/Users/jane.doe/Desktop/ElastOS-support.txt', 'C:/Users/jane.doe', 'win32', {}), true);
+  assert.equal(launcherOwnedDirectories('/home/jane.doe/.local/share/elastos/host-process.lock', '/home/jane.doe', 'linux', {}), true);
+  assert.equal(launcherOwnedDirectories('/home/jane.doe/.elastos-launcher/install-stage.json', '/home/jane.doe', 'linux', {}), true);
+  assert.equal(launcherOwnedDirectories('/home/jane.doe/ElastOS-support.txt', '/home/jane.doe', 'linux', {}), true);
+  assert.equal(launcherOwnedDirectories('/home/jane.doe/.pc2/note', '/home/jane.doe', 'linux', {}), false);
+  assert.equal(launcherOwnedDirectories('/home/tester/.other/elastos', '/home/tester', 'linux', {}), false);
+  assert.equal(launcherOwnedDirectories('C:/Users/tester/.other/elastos', 'C:/Users/tester', 'win32', {}), false);
+  assert.equal(launcherOwnedDirectories('/usr/local/bin/elastos', '/home/tester', 'linux', {}), false);
+  assert.equal(launcherOwnedDirectories('/home/u/Documents/elastos', '/home/u', 'linux', {}), false);
+  assert.equal(launcherOwnedDirectories('/home/tester/../tester/.local/bin/elastos', '/home/tester', 'linux', {}), false);
+  assert.equal(launcherOwnedDirectories('/home/tester/.LOCAL/bin/elastos', '/home/tester', 'linux', {}), false);
+  assert.equal(launcherOwnedDirectories('/Users/Jane.Doe/.local/bin/elastos', '/Users/jane.doe', 'darwin', {}), true);
+  assert.equal(launcherOwnedDirectories('/root/.local/bin/elastos', '/root', 'linux', {}), true);
+  assert.equal(launcherOwnedDirectories('/var/home/u/.local/bin/elastos', '/var/home/u', 'linux', {}), true);
+  assert.equal(launcherOwnedDirectories('D:/Profiles/u/.local/bin/elastos', 'D:/Profiles/u', 'win32', {}), true);
+  assert.equal(launcherOwnedDirectories('home/u/.local/bin/elastos', '/home/u', 'linux', {}), false);
+  assert.equal(launcherOwnedDirectories('/home/other/.local/bin/elastos', '/home/tester', 'linux', {}), false);
+  assert.equal(launcherOwnedDirectories('/home/tester/.xdg/elastos', '/home/tester', 'linux', { XDG_DATA_HOME: '/home/tester/.xdg' }), true);
+  assert.equal(launcherOwnedDirectories('/var/lib/elastos', '/home/tester', 'linux', { XDG_DATA_HOME: '/var/lib' }), false);
+  assert.equal(launcherOwnedDirectories('/home/tester/.local/share/elastos', '/home/tester', 'linux', { XDG_DATA_HOME: '/var/lib' }), false);
 
   const removed = [];
   await resetRuntime({
     binary: '/home/jane.doe/.local/bin/elastos',
     dataDir: '/home/jane.doe/.local/share/elastos',
     stageFile: '/home/jane.doe/.elastos-launcher/install-stage.json',
+    homeDir: '/home/jane.doe',
+    platform: 'linux',
+    env: {},
     stop: async () => {},
     remove: (target) => { removed.push(target); },
   });
@@ -66,6 +83,9 @@ test('reset refuses a foreign directory, a live foreign host, and a misnamed sta
     binary: '/home/tester/.local/bin/elastos',
     dataDir: '/home/tester/.other/elastos',
     stageFile: '/home/tester/.elastos-launcher/install-stage.json',
+    homeDir: '/home/tester',
+    platform: 'linux',
+    env: {},
     stop: async () => {},
     remove,
   }), /not the ElastOS data directory/);
@@ -74,8 +94,11 @@ test('reset refuses a foreign directory, a live foreign host, and a misnamed sta
     binary: '/home/tester/.local/bin/elastos',
     dataDir: '/home/tester/.local/share/elastos',
     stageFile: '/home/tester/.elastos-launcher/install-stage.json',
+    homeDir: '/home/tester',
+    platform: 'linux',
+    env: {},
     stop: async () => {
-      throw new Error('ElastOS is already running. This window did not start it, so Stop leaves it running.');
+      throw new ForeignGatewayError();
     },
     remove,
   }), /another window/);
@@ -83,7 +106,27 @@ test('reset refuses a foreign directory, a live foreign host, and a misnamed sta
   await assert.rejects(() => resetRuntime({
     binary: '/home/tester/.local/bin/elastos',
     dataDir: '/home/tester/.local/share/elastos',
+    stageFile: '/home/tester/.elastos-launcher/install-stage.json',
+    homeDir: '/home/tester',
+    platform: 'linux',
+    env: {},
+    stop: async () => {
+      throw new Error('ElastOS is already running. This window did not start it, so Stop leaves it running.');
+    },
+    remove,
+  }), (err) => {
+    assert.match(err.message, /did not start it/);
+    assert.equal(/another window/.test(err.message), false);
+    return true;
+  });
+
+  await assert.rejects(() => resetRuntime({
+    binary: '/home/tester/.local/bin/elastos',
+    dataDir: '/home/tester/.local/share/elastos',
     stageFile: '/home/tester/.elastos-launcher/secrets.txt',
+    homeDir: '/home/tester',
+    platform: 'linux',
+    env: {},
     stop: async () => { throw new Error('stop should not run'); },
     remove,
   }), /install stage/);
@@ -108,6 +151,9 @@ test('reset refuses a symlink and a dotted foreign directory', async () => {
     binary,
     dataDir: data,
     stageFile: stage,
+    homeDir: '/home/tester',
+    platform: 'linux',
+    env: {},
     stop: async () => {},
     remove: (target) => { removed.push(target); },
     lstat: (file) => ({
@@ -122,6 +168,9 @@ test('reset refuses a symlink and a dotted foreign directory', async () => {
     binary: '/usr/local/bin/elastos',
     dataDir: '/home/u/Documents/elastos',
     stageFile: stage,
+    homeDir: '/home/u',
+    platform: 'linux',
+    env: {},
     stop: async () => { throw new Error('stop should not run'); },
     remove: (target) => { removed.push(target); },
   }), /not the ElastOS data directory/);
@@ -130,6 +179,9 @@ test('reset refuses a symlink and a dotted foreign directory', async () => {
     binary,
     dataDir: 'C:/Users/tester/.other/elastos',
     stageFile: stage,
+    homeDir: '/home/tester',
+    platform: 'linux',
+    env: {},
     stop: async () => { throw new Error('stop should not run'); },
     remove: (target) => { removed.push(target); },
   }), /not the ElastOS data directory/);
@@ -140,6 +192,9 @@ test('reset refuses a symlink and a dotted foreign directory', async () => {
     binary,
     dataDir: data,
     stageFile: stage,
+    homeDir: '/home/tester',
+    platform: 'linux',
+    env: {},
     stop: async () => {},
     remove: (target) => { removed.push(target); },
     lstat: (file) => {
@@ -150,4 +205,79 @@ test('reset refuses a symlink and a dotted foreign directory', async () => {
     },
   }), /could not be inspected/);
   assert.deepEqual(removed, []);
+});
+
+test('real home names are owned and a real symlink is not followed', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'elastos-owned-'));
+  try {
+    const spaced = path.join(root, 'John Smith');
+    const unicode = path.join(root, 'José García');
+    fs.mkdirSync(spaced);
+    fs.mkdirSync(unicode);
+    assert.equal(launcherOwnedDirectories(path.join(spaced, '.local', 'bin', 'elastos'), spaced, 'linux', {}), true);
+    assert.equal(launcherOwnedDirectories(path.join(unicode, '.local', 'share', 'elastos'), unicode, 'linux', {}), true);
+    assert.equal(launcherOwnedDirectories(path.join(spaced, '.local', 'bin', 'elastos'), unicode, 'linux', {}), false);
+    assert.equal(launcherOwnedDirectories(path.join(root, '.local', 'bin', 'elastos'), root, 'linux', {}), true);
+
+    const outside = path.join(root, 'outside');
+    fs.mkdirSync(outside);
+    fs.writeFileSync(path.join(outside, 'secret'), 'SECRET');
+    fs.symlinkSync(outside, path.join(spaced, '.local'));
+    const removed = [];
+    await assert.rejects(() => resetRuntime({
+      binary: path.join(spaced, '.local', 'bin', 'elastos'),
+      dataDir: path.join(spaced, '.local', 'share', 'elastos'),
+      stageFile: path.join(spaced, '.elastos-launcher', 'install-stage.json'),
+      homeDir: spaced,
+      platform: 'linux',
+      env: {},
+      stop: async () => {},
+      remove: (target) => { removed.push(target); },
+    }), /symlink/);
+    assert.deepEqual(removed, []);
+    assert.equal(fs.readFileSync(path.join(outside, 'secret'), 'utf8'), 'SECRET');
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('a replacement between look and delete is not removed', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'elastos-swap-'));
+  try {
+    const target = path.join(root, 'elastos');
+    const sibling = path.join(root, 'sibling.txt');
+    fs.mkdirSync(target);
+    fs.writeFileSync(path.join(target, 'old'), 'old');
+    fs.writeFileSync(sibling, 'keep');
+    removeVerifiedTarget(target);
+    assert.equal(fs.existsSync(target), false);
+    assert.equal(fs.readFileSync(sibling, 'utf8'), 'keep');
+    removeVerifiedTarget(path.join(root, 'missing'));
+
+    fs.mkdirSync(target);
+    fs.writeFileSync(path.join(target, 'old'), 'old');
+    assert.throws(() => removeVerifiedTarget(target, {
+      beforeRename() {
+        fs.rmSync(target, { recursive: true, force: true });
+        fs.mkdirSync(target);
+        fs.writeFileSync(path.join(target, 'secret'), 'SECRET');
+      },
+    }), /changed/);
+    assert.equal(fs.readFileSync(path.join(target, 'secret'), 'utf8'), 'SECRET');
+
+    const outside = path.join(root, 'outside');
+    fs.mkdirSync(outside);
+    fs.writeFileSync(path.join(outside, 'secret'), 'SECRET');
+    fs.rmSync(target, { recursive: true, force: true });
+    fs.mkdirSync(target);
+    assert.throws(() => removeVerifiedTarget(target, {
+      beforeRename() {
+        fs.rmSync(target, { recursive: true, force: true });
+        fs.symlinkSync(outside, target);
+      },
+    }), /changed|symlink/);
+    assert.equal(fs.readFileSync(path.join(outside, 'secret'), 'utf8'), 'SECRET');
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
