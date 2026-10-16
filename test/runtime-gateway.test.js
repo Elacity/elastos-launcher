@@ -9,6 +9,7 @@ const {
   isHealthOk,
   scrubRuntimeLog,
   signalProcessGroup,
+  foreignListenerIsElastos,
 } = require('../dist/main/targets/runtimeGateway');
 const { uninstallRuntime } = require('../dist/main/targets/runtimeUninstall');
 
@@ -88,10 +89,11 @@ test('start spawns the gateway and becomes running when /healthz is OK', async (
   assert.deepEqual(world.opened, [HOME_URL]);
 });
 
-test('a held host lock is already running and opens Home without a signal', async () => {
+test('a held host lock opens Home only when the listener is the ElastOS gateway', async () => {
   const world = supervisor();
   world.setHealth(null);
   let asked = 0;
+  const lock = JSON.stringify({ pid: 7, role: 'gateway', addr: '127.0.0.1:8090' });
   const pending = createGatewaySupervisor({
     binary: '/bin/elastos',
     spawn() {
@@ -113,9 +115,51 @@ test('a held host lock is already running and opens Home without a signal', asyn
     openUrl: (url) => world.opened.push(url),
     log: () => {},
     healthTimeoutMs: 5000,
+    confirmForeign: async () => foreignListenerIsElastos({
+      lockText: lock,
+      command: '/home/user/.local/bin/elastos gateway --addr 127.0.0.1:8090',
+      pidAlive: (pid) => pid === 7,
+    }),
   }).start();
   assert.equal(await pending, 'already-running');
   assert.deepEqual(world.opened, [HOME_URL]);
+
+  const impostor = supervisor();
+  impostor.setHealth(null);
+  let polls = 0;
+  await assert.rejects(() => createGatewaySupervisor({
+    binary: '/bin/elastos',
+    spawn() {
+      const proc = fakeProcess(9);
+      impostor.procs.push(proc);
+      return proc;
+    },
+    fetchHealth: async () => {
+      polls += 1;
+      if (polls === 1) {
+        impostor.procs[0].emit('another ElastOS host already owns this data directory\n');
+        impostor.procs[0].exit(1);
+        return null;
+      }
+      return { status: 200, body: 'OK' };
+    },
+    sleep: async () => {},
+    now: () => 0,
+    openUrl: (url) => impostor.opened.push(url),
+    log: () => {},
+    healthTimeoutMs: 5000,
+    confirmForeign: async () => foreignListenerIsElastos({
+      lockText: JSON.stringify({ pid: 9, role: 'other', addr: '127.0.0.1:8090' }),
+      command: 'python3 -m http.server 8090',
+      pidAlive: () => true,
+    }),
+  }).start(), /not the ElastOS gateway/);
+  assert.deepEqual(impostor.opened, []);
+  assert.equal(foreignListenerIsElastos({
+    lockText: lock,
+    command: '/home/user/.local/bin/elastos gateway --addr 127.0.0.1:8090',
+    pidAlive: () => false,
+  }), false);
 });
 
 const REPLACED = 'host executable /bin/elastos was replaced on disk. Exiting stale host.\n';
@@ -274,12 +318,25 @@ test('one failed health poll while the process is alive is not a stop', async ()
   assert.deepEqual(world.signals, ['SIGTERM', 'SIGKILL']);
 });
 
-test('signalProcessGroup uses the negative pid', () => {
+test('signalProcessGroup uses the negative pid and surfaces a failed kill', () => {
   const seen = [];
   signalProcessGroup(42, 'SIGTERM', (pid, signal) => { seen.push([pid, signal]); });
   assert.deepEqual(seen, [[-42, 'SIGTERM']]);
   signalProcessGroup(0, 'SIGTERM', () => { throw new Error('pid 0 must not be signaled'); });
   signalProcessGroup(-5, 'SIGTERM', () => { throw new Error('a negative pid must not be signaled'); });
+  signalProcessGroup(42, 'SIGTERM', () => {
+    const err = new Error('gone');
+    err.code = 'ESRCH';
+    throw err;
+  });
+  assert.throws(
+    () => signalProcessGroup(42, 'SIGKILL', () => {
+      const err = new Error('operation not permitted');
+      err.code = 'EPERM';
+      throw err;
+    }),
+    /Could not signal ElastOS \(SIGKILL\): operation not permitted/,
+  );
 });
 
 test('signalProcessGroup kills the leader and a child in that group', async () => {
