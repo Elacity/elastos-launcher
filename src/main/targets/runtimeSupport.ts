@@ -2,10 +2,10 @@ import { RUNTIME_TARGET } from './descriptors';
 import { targetSupportsHost } from './registry';
 
 export const INTEL_MAC_MESSAGE =
-  'ElastOS is not yet supported on Intel Macs. A signed release for this Mac is not published yet. You can still use PC2.net on this computer.';
+  'ElastOS is not yet supported on Intel Macs. A signed release for this Mac is not published yet.';
 
 export const WINDOWS_NATIVE_MESSAGE =
-  'ElastOS on Windows runs inside a dedicated WSL2 Linux distro. That installer is not in this build yet. You can still use PC2.net.';
+  'ElastOS on Windows runs in its own Linux environment. Click Enable. Windows will ask for permission once. You do not type any commands.';
 
 export const KVM_MESSAGE =
   'The local Browser needs /dev/kvm, and this WSL2 distro does not have it. ElastOS can still install, and you can open your computer in the Windows browser. The in-computer browser stays off until /dev/kvm is available.';
