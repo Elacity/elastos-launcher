@@ -125,14 +125,26 @@ export function buildDiagnostics(info: {
   return scrubSupportText(body);
 }
 
-/** Drop secret-bearing lines. The bundle is meant to be pasted or emailed. */
+const DROP_SUPPORT_LINE = /runtime-coords\.json|gateway-runtime-coords|home-runtime-coords|\bprivate key\b|BEGIN [A-Z0-9 ]*PRIVATE KEY/i;
+
+/**
+ * Drop PEM and coordinate-file lines, and redact secret assignments that
+ * share a line with text worth keeping.
+ */
 export function scrubSupportText(text: string): string {
   return text
     .split('\n')
-    .filter((line) => !/attach_secret|runtime-coords\.json|gateway-runtime-coords|home-runtime-coords|private key|BEGIN [A-Z ]*PRIVATE KEY/i.test(line))
+    .filter((line) => !DROP_SUPPORT_LINE.test(line))
     .map((line) => line
+      .replace(/\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/g, '[removed]')
+      .replace(/(\battach_secret\s*[:=]\s*)\S+/gi, '$1[removed]')
+      .replace(/(\bapi[_-]?key\s*[:=]\s*)\S+/gi, '$1[removed]')
+      .replace(/(\baccess_token\s*[:=]\s*)\S+/gi, '$1[removed]')
+      .replace(/(\btoken\s*[:=]\s*)\S+/gi, '$1[removed]')
+      .replace(/(\bcookie\s*[:=]\s*)\S+/gi, '$1[removed]')
+      .replace(/(\bauthorization\s*=\s*)\S+/gi, '$1[removed]')
       .replace(/bearer\s+\S+/gi, 'bearer [removed]')
-      .replace(/password\s*[:=]\s*\S+/gi, 'password [removed]'))
+      .replace(/(\bpassword\s*[:=]\s*)\S+/gi, '$1[removed]'))
     .join('\n');
 }
 
