@@ -8,9 +8,20 @@ export function mentionsPc2(file: string): boolean {
   return normalized.includes('/.pc2/') || normalized.includes('/pc2.net/');
 }
 
+export interface RemovalStat {
+  isSymbolicLink(): boolean;
+  dev?: number;
+  ino?: number;
+}
+
+function statErrorCode(err: unknown): string {
+  if (err && typeof err === 'object' && 'code' in err) return String((err as { code?: string }).code);
+  return '';
+}
+
 export function assertNoSymlinkAncestors(
   target: string,
-  lstat: (file: string) => { isSymbolicLink(): boolean },
+  lstat: (file: string) => RemovalStat,
 ): void {
   const resolved = path.resolve(target);
   const root = path.parse(resolved).root;
@@ -18,15 +29,42 @@ export function assertNoSymlinkAncestors(
   const parts = resolved.slice(root.length).split(path.sep).filter(Boolean);
   for (const part of parts) {
     cursor = path.join(cursor, part);
-    let st: { isSymbolicLink(): boolean };
+    let st: RemovalStat;
     try {
       st = lstat(cursor);
-    } catch {
-      continue;
+    } catch (err) {
+      if (statErrorCode(err) === 'ENOENT') continue;
+      throw new Error('Refusing to remove a path that could not be inspected.');
     }
     if (st.isSymbolicLink()) {
       throw new Error('Refusing to remove a path that follows a symlink.');
     }
+  }
+}
+
+/** Re-stat the leaf immediately before delete. A failed lstat refuses the delete. */
+export function assertStableRemovalTarget(
+  target: string,
+  lstat: (file: string) => RemovalStat,
+): void {
+  let first: RemovalStat;
+  try {
+    first = lstat(target);
+  } catch (err) {
+    if (statErrorCode(err) === 'ENOENT') return;
+    throw new Error('Refusing to remove a path that could not be inspected.');
+  }
+  if (first.isSymbolicLink()) {
+    throw new Error('Refusing to remove a path that follows a symlink.');
+  }
+  let second: RemovalStat;
+  try {
+    second = lstat(target);
+  } catch {
+    throw new Error('Refusing to remove a path that could not be inspected.');
+  }
+  if (second.isSymbolicLink() || second.dev !== first.dev || second.ino !== first.ino) {
+    throw new Error('Refusing to remove a path that changed.');
   }
 }
 
@@ -47,7 +85,7 @@ export async function uninstallRuntime(deps: {
   dataDir: string;
   stop: () => Promise<void>;
   remove: (target: string) => void;
-  lstat?: (file: string) => { isSymbolicLink(): boolean };
+  lstat?: (file: string) => RemovalStat;
 }): Promise<void> {
   assertSafeRuntimeRemoval(deps.binary, deps.dataDir);
   try {
@@ -62,6 +100,8 @@ export async function uninstallRuntime(deps: {
   const lstat = deps.lstat ?? fs.lstatSync;
   assertNoSymlinkAncestors(deps.binary, lstat);
   assertNoSymlinkAncestors(deps.dataDir, lstat);
+  assertStableRemovalTarget(deps.binary, lstat);
+  assertStableRemovalTarget(deps.dataDir, lstat);
   deps.remove(deps.binary);
   deps.remove(deps.dataDir);
 }
@@ -72,7 +112,7 @@ export async function resetRuntime(deps: {
   stageFile: string;
   stop: () => Promise<void>;
   remove: (target: string) => void;
-  lstat?: (file: string) => { isSymbolicLink(): boolean };
+  lstat?: (file: string) => RemovalStat;
 }): Promise<void> {
   assertSafeRuntimeRemoval(deps.binary, deps.dataDir);
   if (path.basename(deps.stageFile) !== 'install-stage.json') {
@@ -95,6 +135,9 @@ export async function resetRuntime(deps: {
   assertNoSymlinkAncestors(deps.binary, lstat);
   assertNoSymlinkAncestors(deps.dataDir, lstat);
   assertNoSymlinkAncestors(deps.stageFile, lstat);
+  assertStableRemovalTarget(deps.binary, lstat);
+  assertStableRemovalTarget(deps.dataDir, lstat);
+  assertStableRemovalTarget(deps.stageFile, lstat);
   deps.remove(deps.binary);
   deps.remove(deps.dataDir);
   deps.remove(deps.stageFile);
