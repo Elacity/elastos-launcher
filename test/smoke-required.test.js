@@ -18,6 +18,9 @@ test('the runtime smoke workflow has no continue-on-error', () => {
   assert.match(workflow, /bash scripts\/runtime-smoke\.sh/);
   assert.match(workflow, /pwsh -File scripts\/windows-elastos-distro\.ps1/);
   assert.match(workflow, /bash scripts\/runtime-rollback\.sh/);
+  assert.match(workflow, /npm run e2e/);
+  assert.match(workflow, /xvfb-run/);
+  assert.match(workflow, /macos-14/);
 });
 
 test('a missing wsl.exe fails the Windows job', () => {
@@ -61,6 +64,17 @@ test('rollback uses the real binary between alpha.19 and alpha.20', () => {
   assert.match(script, /\/healthz is OK/);
   assert.equal(/--head-cid/.test(script), false);
   assert.match(script, /ELASTOS_RETAIN_FILE/);
+});
+
+test('the electron e2e clicks Install and waits for Open my computer', () => {
+  const script = fs.readFileSync(path.join(root, 'scripts/electron-e2e.js'), 'utf8');
+  assert.match(script, /Open my computer/);
+  assert.match(script, /#open-btn/);
+  assert.match(script, /Release head signature matches the pinned maintainer/);
+  assert.match(script, /install\.sh SHA-256 matches the pin/);
+  assert.match(script, /Installed head CID matches the pin/);
+  assert.match(script, /app\.exit\(0\)/);
+  assert.match(script, /ELASTOS_LAUNCH_TARGET: 'runtime'/);
 });
 
 test('the flattened smoke pin keeps the installer hash', () => {

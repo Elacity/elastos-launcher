@@ -51,3 +51,47 @@ jobs:
 
       - name: Roll 0.8.0-alpha.20 back to 0.8.0-alpha.19 and forward again
         run: bash scripts/runtime-rollback.sh
+
+  electron-e2e:
+    name: e2e (${{ matrix.platform }})
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            platform: linux-x64
+          - os: macos-14
+            platform: darwin-arm64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - name: Install display libraries
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb libnss3 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 libgbm1 libasound2t64 libgtk-3-0t64 libxss1
+
+      - name: Install dependencies
+        env:
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1'
+        run: npm ci
+
+      - name: Click Install and reach Open my computer
+        env:
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1'
+          ELASTOS_LAUNCH_TARGET: runtime
+        run: |
+          if [ "$(uname -s)" = "Linux" ]; then
+            xvfb-run -a --server-args="-screen 0 1280x1024x24" npm run e2e
+          else
+            npm run e2e
+          fi
