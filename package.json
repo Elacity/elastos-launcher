@@ -16,7 +16,7 @@
     "build:win": "npm run build:ts && electron-builder --win",
     "build:linux": "npm run build:ts && electron-builder --linux",
     "build:all": "npm run build:ts && electron-builder --mac --win --linux",
-    "test": "npm run build:ts && node --test test/launch-target.test.js"
+    "test": "npm run build:ts && node --test test/*.test.js"
   },
   "dependencies": {
     "electron-log": "^5.0.0",

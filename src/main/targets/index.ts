@@ -27,6 +27,15 @@ export {
 } from './preferences';
 export type { LaunchTargetPreferenceStore, LaunchTargetSelection } from './preferences';
 export { PC2_TARGET, RUNTIME_TARGET } from './descriptors';
+export {
+  findRuntimeBinary,
+  parseRuntimeVersion,
+  probeRuntimeInstallation,
+  RUNTIME_VERSION_ARGS,
+  UnsupportedRuntimePlatformError,
+  unsupportedPlatformError,
+} from './runtimeProbe';
+export type { RuntimeProbe, RuntimeProbeRequest } from './runtimeProbe';
 export type { HealthProbe, LaunchTarget, LaunchTargetDescriptor, LaunchTargetId, TargetStatus, UpdateCheck } from './types';
 
 export function createLaunchTarget(id: LaunchTargetId = DEFAULT_LAUNCH_TARGET): LaunchTarget {
