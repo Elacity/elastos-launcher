@@ -26,8 +26,10 @@ const platformNote = document.getElementById('platform-note');
 const targetSelect = document.getElementById('target-select');
 const stepsEl = document.getElementById('steps');
 const errorBox = document.getElementById('error-box');
+const errorTitle = document.getElementById('error-title');
 const errorText = document.getElementById('error-text');
 const retryBtn = document.getElementById('retry-btn');
+const fixBtn = document.getElementById('fix-btn');
 const diagnosticsBtn = document.getElementById('diagnostics-btn');
 const loginCheckbox = document.getElementById('login-checkbox');
 const loginRow = document.getElementById('login-row');
@@ -51,15 +53,28 @@ const statusLabels = {
   'not-installed': 'Not installed'
 };
 
-function showError(message) {
+async function showError(message) {
+  errorTitle.textContent = 'ElastOS needs attention';
   errorText.textContent = message;
   errorBox.classList.remove('hidden');
+  fixBtn.classList.add('hidden');
   addLog(message);
+  try {
+    const screen = await window.pc2.describeFailure();
+    if (!screen || !screen.title) return;
+    errorTitle.textContent = screen.title;
+    errorText.textContent = screen.message;
+    fixBtn.classList.toggle('hidden', !screen.fixLabel);
+    if (screen.fixLabel) fixBtn.textContent = screen.fixLabel;
+  } catch {
+    fixBtn.classList.add('hidden');
+  }
 }
 
 function clearError() {
   errorBox.classList.add('hidden');
   errorText.textContent = '';
+  fixBtn.classList.add('hidden');
 }
 
 function renderSteps(message) {
@@ -159,6 +174,23 @@ openBtn.addEventListener('click', async () => {
 });
 
 retryBtn.addEventListener('click', () => runInstall());
+
+fixBtn.addEventListener('click', async () => {
+  fixBtn.disabled = true;
+  try {
+    const result = await window.pc2.fixFailure();
+    if (result === 'ready') {
+      clearError();
+      await runInstall();
+      return;
+    }
+    await showError('That still needs attention.');
+  } catch (err) {
+    await showError(err && err.message ? err.message : 'Fix it did not finish.');
+  } finally {
+    fixBtn.disabled = false;
+  }
+});
 
 diagnosticsBtn.addEventListener('click', async () => {
   const text = await window.pc2.getDiagnostics();

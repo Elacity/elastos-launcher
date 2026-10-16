@@ -32,6 +32,8 @@ contextBridge.exposeInMainWorld('pc2', {
   setLaunchTarget: (id: string) => ipcRenderer.invoke('pc2:setLaunchTarget', id),
   getPreflight: () => ipcRenderer.invoke('pc2:getPreflight'),
   getDiagnostics: () => ipcRenderer.invoke('pc2:getDiagnostics'),
+  describeFailure: () => ipcRenderer.invoke('pc2:describeFailure'),
+  fixFailure: () => ipcRenderer.invoke('pc2:fixFailure'),
   setOpenAtLogin: (enabled: boolean) => ipcRenderer.invoke('pc2:setOpenAtLogin', enabled),
   
   // Event listeners
@@ -90,6 +92,14 @@ declare global {
       setLaunchTarget: (id: string) => Promise<string>;
       getPreflight: () => Promise<{ ok: boolean; checks: Array<{ id: string; level: string; message: string }> }>;
       getDiagnostics: () => Promise<string>;
+      describeFailure: () => Promise<{
+        kind: string;
+        title: string;
+        message: string;
+        retryLabel: string;
+        fixLabel: string | null;
+      }>;
+      fixFailure: () => Promise<'ready' | 'still-blocked'>;
       setOpenAtLogin: (enabled: boolean) => Promise<boolean>;
       onStatus: (callback: (status: PC2Status) => void) => () => void;
       onLog: (callback: (log: string) => void) => () => void;

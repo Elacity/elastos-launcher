@@ -1,6 +1,7 @@
 import * as pc2 from './pc2Manager';
 import { applyOpenAtLogin, readOpenAtLogin } from './targets/openAtLogin';
 import { buildDiagnostics, collectPreflight, PreflightReport } from './targets/preflight';
+import { collectFailureFacts, failureScreen, FailureScreen, fixCollectedFailure } from './targets/runtimeRecovery';
 import { createLaunchTargetStore, LaunchTargetPreferenceStore, resolveLaunchTargetId } from './targets/preferences';
 import { createLaunchTarget } from './targets';
 import { parseLaunchTargetId } from './targets/registry';
@@ -37,6 +38,8 @@ export interface LaunchController {
   getLaunchInfo(): Promise<LaunchInfo>;
   getPreflight(): Promise<PreflightReport>;
   getDiagnostics(): Promise<string>;
+  describeFailure(): Promise<FailureScreen>;
+  fixFailure(): Promise<'ready' | 'still-blocked'>;
   setOpenAtLogin(enabled: boolean): void;
   getOpenAtLogin(): boolean;
   shutdown(): void;
@@ -198,6 +201,14 @@ export function createLaunchController(options: LaunchControllerOptions = {}): L
       };
     },
     getPreflight: () => collectPreflight(),
+    async describeFailure() {
+      const preflight = active.id === 'runtime' ? await collectPreflight() : { ok: true, checks: [] };
+      return failureScreen(collectFailureFacts(lastError, preflight.checks));
+    },
+    async fixFailure() {
+      const preflight = active.id === 'runtime' ? await collectPreflight() : { ok: true, checks: [] };
+      return fixCollectedFailure(collectFailureFacts(lastError, preflight.checks));
+    },
     async getDiagnostics() {
       const preflight = active.id === 'runtime' ? await collectPreflight() : { ok: true, checks: [] };
       let channel = '';
