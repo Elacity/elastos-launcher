@@ -14,6 +14,8 @@ export interface RuntimePinFile {
   publisherGateway: string;
   fallbackInstallerUrl: string;
   maintainerDid: string;
+  /** SHA-256 of the exact install.sh bytes this release will execute. */
+  installerSha256: string | null;
   channels: Record<RuntimeChannelName, RuntimeChannelPin>;
 }
 
@@ -25,6 +27,7 @@ export interface ActiveRuntimePin {
   maintainerDid: string;
   publisherGateway: string;
   fallbackInstallerUrl: string;
+  installerSha256: string | null;
   /** True when this channel has a version and a head CID to verify. */
   publishable: boolean;
 }
@@ -49,6 +52,7 @@ export function parseRuntimePin(raw: unknown): RuntimePinFile {
     publisherGateway: pin.publisherGateway,
     fallbackInstallerUrl: pin.fallbackInstallerUrl,
     maintainerDid: pin.maintainerDid,
+    installerSha256: normalizeSha256(pin.installerSha256),
     channels: {
       stable: normalizeChannel(channels.stable),
       canary: normalizeChannel(channels.canary),
@@ -74,8 +78,15 @@ export function activeRuntimePin(pin: RuntimePinFile): ActiveRuntimePin {
     maintainerDid: pin.maintainerDid,
     publisherGateway: pin.publisherGateway,
     fallbackInstallerUrl: pin.fallbackInstallerUrl,
+    installerSha256: pin.installerSha256,
     publishable: Boolean(version && headCid),
   };
+}
+
+function normalizeSha256(value: string | null | undefined): string | null {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  return /^[0-9a-f]{64}$/.test(trimmed) ? trimmed : null;
 }
 
 function emptyToNull(value: string | null | undefined): string | null {

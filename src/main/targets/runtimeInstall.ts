@@ -2,6 +2,7 @@ import { execFile as execFileCb } from 'child_process';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import { installerChildEnv, ReleaseHeadError, sha256Equals, sha256Hex, verifyReleaseHead } from './releaseHead';
 import { ActiveRuntimePin, loadActiveRuntimePin } from './runtimePin';
 import {
   runtimeBinaryPath,
@@ -11,25 +12,6 @@ import {
 } from './runtimePaths';
 import { probeRuntimeInstallation, RuntimeProbe, RuntimeProbeRequest } from './runtimeProbe';
 import { runtimeInstallBlock } from './runtimeSupport';
-
-export const UNSIGNED_INSTALLER_MARKERS = ['__MAINTAINER_DID__', '__HEAD_CID__'] as const;
-
-export class UnsignedInstallerError extends Error {
-  readonly code = 'UNSIGNED_RUNTIME_INSTALLER';
-
-  constructor(marker: string) {
-    super(
-      `This installer is not signed for ElastOS. It still contains ${marker}. Download it again from the ElastOS publisher.`,
-    );
-    this.name = 'UnsignedInstallerError';
-  }
-}
-
-export function assertSignedInstaller(text: string): void {
-  for (const marker of UNSIGNED_INSTALLER_MARKERS) {
-    if (text.includes(marker)) throw new UnsignedInstallerError(marker);
-  }
-}
 
 export interface ReleaseHead {
   channel: string;
@@ -133,7 +115,11 @@ export interface RuntimeInstallDeps {
   pc2Dir?: string;
   probe?: (request: RuntimeProbeRequest) => Promise<RuntimeProbe>;
   fetchText: (url: string) => Promise<string>;
-  runInstaller: (scriptPath: string, args: readonly string[]) => Promise<CommandResult>;
+  runInstaller: (
+    scriptPath: string,
+    args: readonly string[],
+    env: NodeJS.ProcessEnv,
+  ) => Promise<CommandResult>;
   runSetup: (binary: string) => Promise<CommandResult>;
   writeFile: (file: string, contents: string) => void;
   readFile: (file: string) => string;
@@ -192,8 +178,10 @@ export async function installRuntime(
 
     let publisher: ReleaseHead | null = null;
     try {
-      publisher = parseReleaseHead(await deps.fetchText(releaseHeadUrl(deps.pin)));
-    } catch {
+      const raw = await deps.fetchText(releaseHeadUrl(deps.pin));
+      publisher = verifyReleaseHead(raw, deps.pin.maintainerDid);
+    } catch (err) {
+      if (err instanceof ReleaseHeadError || err instanceof PinMismatchError) throw err;
       throw new PinMismatchError('release-head');
     }
     const plan = planRuntimeInstall({
@@ -252,16 +240,32 @@ async function runInstallerStep(
   deps: RuntimeInstallDeps,
   onProgress: (message: string) => void,
 ): Promise<void> {
+  if (!deps.pin.installerSha256 || !deps.pin.headCid) {
+    throw new PinMismatchError('installerSha256');
+  }
   onProgress(DOWNLOAD);
   const script = await deps.fetchText(deps.pin.fallbackInstallerUrl);
-  assertSignedInstaller(script);
+  if (!sha256Equals(sha256Hex(script), deps.pin.installerSha256)) {
+    throw new PinMismatchError('installerSha256');
+  }
   const dir = path.join(deps.homeDir, '.elastos-launcher');
   deps.mkdirp(dir);
   const scriptPath = path.join(dir, 'install.sh');
   deps.writeFile(scriptPath, script);
+  const written = deps.readFile(scriptPath);
+  if (!sha256Equals(sha256Hex(written), deps.pin.installerSha256)) {
+    throw new PinMismatchError('installerSha256');
+  }
   writeStage(deps, 'binary');
   onProgress(INSTALLING);
-  await deps.runInstaller(scriptPath, ['--install-only']);
+  const args = [
+    '--install-only',
+    '--head-cid',
+    deps.pin.headCid,
+    '--maintainer-did',
+    deps.pin.maintainerDid,
+  ];
+  await deps.runInstaller(scriptPath, args, installerChildEnv(deps.env));
 }
 
 async function runSetupStep(
@@ -280,9 +284,14 @@ function writeStage(deps: RuntimeInstallDeps, stage: 'binary' | 'setup' | 'done'
   deps.writeFile(file, JSON.stringify({ stage, version: deps.pin.version, channel: deps.pin.channel }));
 }
 
-function exec(file: string, args: readonly string[], timeout: number): Promise<CommandResult> {
+function exec(
+  file: string,
+  args: readonly string[],
+  timeout: number,
+  env: NodeJS.ProcessEnv,
+): Promise<CommandResult> {
   return new Promise((resolve, reject) => {
-    execFileCb(file, args as string[], { timeout }, (err, stdout, stderr) => {
+    execFileCb(file, args as string[], { timeout, env }, (err, stdout, stderr) => {
       if (err) {
         reject(new Error((stderr || stdout || err.message).trim()));
         return;
@@ -302,8 +311,8 @@ export function defaultRuntimeInstallDeps(pin: ActiveRuntimePin = loadActiveRunt
     pin,
     pc2Dir: path.join(homeDir, '.pc2'),
     fetchText: fetchText,
-    runInstaller: (scriptPath, args) => exec('bash', [scriptPath, ...args], 15 * 60 * 1000),
-    runSetup: (binary) => exec(binary, ['setup'], 15 * 60 * 1000),
+    runInstaller: (scriptPath, args, env) => exec('bash', [scriptPath, ...args], 15 * 60 * 1000, env),
+    runSetup: (binary) => exec(binary, ['setup'], 15 * 60 * 1000, installerChildEnv(process.env)),
     writeFile: (file, contents) => fs.writeFileSync(file, contents),
     readFile: (file) => fs.readFileSync(file, 'utf8'),
     exists: (file) => {

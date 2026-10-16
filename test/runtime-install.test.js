@@ -1,19 +1,24 @@
 const assert = require('node:assert/strict');
+const { spawnSync } = require('node:child_process');
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
+
+const crypto = require('node:crypto');
 
 const {
   INTEL_MAC_MESSAGE,
   KVM_MESSAGE,
   activeRuntimePin,
-  assertSignedInstaller,
   defaultLaunchTargetForPin,
   installRuntime,
+  installerChildEnv,
   parseRuntimePin,
   planRuntimeInstall,
   runtimeDataDir,
   runtimeHostLockPath,
+  verifyReleaseHead,
   wslKvmMessage,
 } = require('../dist/main/targets');
 
@@ -23,30 +28,29 @@ const COMPONENTS = `${HOME}/.local/share/elastos/components.json`;
 const VERSION = '0.8.0-alpha.20';
 const CID = 'QmTAEJ8DAprsv5PbWcudofQwXrzL7ZjSgmhRmU8nqmwirf';
 const DID = 'did:key:z6MkgwHd2BCWe1jHMXPiR6H1q1RFPcv1YzhMbK5G1kBarbfe';
+const FIXTURE_DID = 'did:key:z6MkvDqGT54cXesYGvABpF1UapVNwjCqRcafi4Px6Thv5T3Z';
+const FIXTURE_VERSION = '0.7.1';
+const FIXTURE_RELEASE_CID = 'release-a';
+const SIGNED_HEAD = '{"payload":{"channel":"stable","latest_release_cid":"release-a","release_sha256":"3dcb060f99a9b300ace45ae82ac722189a9740a349fa631bbd7eb1fd9e0dcd36","schema":"elastos.release.head/v1","version":"0.7.1"},"signature":"8a248801f576beb6b053fa2f52637b2d3087f2804e44434c4d18abea47007dd24e81781f8c390d414d1b8b34055a06b81f0bd78dc83afa2ce152b59a8fce1101","signer_did":"did:key:z6MkvDqGT54cXesYGvABpF1UapVNwjCqRcafi4Px6Thv5T3Z"}';
+const SCRIPT = '#!/bin/bash\necho stamped-installer\n';
+const SCRIPT_SHA = crypto.createHash('sha256').update(SCRIPT).digest('hex');
 
 function canaryPin(overrides = {}) {
   return {
-    channel: 'canary',
-    version: VERSION,
-    headCid: CID,
-    maintainerDid: DID,
-    publisherGateway: 'https://elastos.elacitylabs.com',
-    fallbackInstallerUrl: 'https://elastos.elacitylabs.com/install.sh',
+    channel: 'stable',
+    version: FIXTURE_VERSION,
+    headCid: FIXTURE_RELEASE_CID,
+    maintainerDid: FIXTURE_DID,
+    publisherGateway: 'https://publisher.example',
+    fallbackInstallerUrl: 'https://publisher.example/install.sh',
+    installerSha256: SCRIPT_SHA,
     publishable: true,
     ...overrides,
   };
 }
 
-function releaseHead(overrides = {}) {
-  return JSON.stringify({
-    signer_did: DID,
-    payload: {
-      channel: 'canary',
-      version: VERSION,
-      latest_release_cid: CID,
-      ...overrides,
-    },
-  });
+function releaseHead() {
+  return SIGNED_HEAD;
 }
 
 function harness(overrides = {}) {
@@ -58,7 +62,12 @@ function harness(overrides = {}) {
     platform: 'linux',
     arch: 'x64',
     homeDir: HOME,
-    env: {},
+    env: {
+      PATH: '/usr/bin',
+      ELASTOS_HEAD_CID: 'QmEvil',
+      ELASTOS_MAINTAINER_DID: 'did:key:zevil',
+      ELASTOS_PUBLISHER_GATEWAY: 'https://evil.example',
+    },
     pin: canaryPin(),
     pc2Dir: PC2,
     probe: async () => {
@@ -66,17 +75,17 @@ function harness(overrides = {}) {
       if (probes === 1) return { kind: 'not-installed' };
       return {
         kind: 'version',
-        version: `ElastOS Runtime v${VERSION}`,
+        version: `ElastOS Runtime v${FIXTURE_VERSION}`,
         binaryPath: `${HOME}/.local/bin/elastos`,
       };
     },
     fetchText: async (url) => {
       calls.push(['fetch', url]);
       if (url.endsWith('/release-head.json')) return releaseHead();
-      return '#!/bin/bash\necho stamped-installer\n';
+      return SCRIPT;
     },
-    runInstaller: async (script, args) => {
-      calls.push(['installer', script, [...args]]);
+    runInstaller: async (script, args, env) => {
+      calls.push(['installer', script, [...args], env]);
       return { stdout: '', stderr: '' };
     },
     runSetup: async (binary) => {
@@ -99,6 +108,7 @@ test('the active field is the one-line channel switch', () => {
   assert.equal(file.active, 'canary');
   assert.equal(file.channels.canary.version, VERSION);
   assert.equal(file.channels.canary.headCid, CID);
+  assert.equal(file.installerSha256, '18768ef071a9f921fe0c1d902926c138e86f925dbaf5dfb9185fecb8789d6714');
   assert.equal(file.channels.stable.version, null);
   assert.equal(file.channels.stable.headCid, null);
 
@@ -128,11 +138,63 @@ test('data dir and host lock follow the launcher contract', () => {
   );
 });
 
-test('unsigned git install.sh is refused before it runs', async () => {
+test('a tampered release head is refused before install.sh runs', async () => {
+  let ran = false;
+  const tampered = SIGNED_HEAD.replace('"version":"0.7.1"', '"version":"0.7.2"');
+  const { deps, calls } = harness({
+    fetchText: async (url) => {
+      calls.push(['fetch', url]);
+      if (url.endsWith('/release-head.json')) return tampered;
+      return SCRIPT;
+    },
+    runInstaller: async () => {
+      ran = true;
+      return { stdout: '', stderr: '' };
+    },
+  });
+  await assert.rejects(() => installRuntime(deps, () => {}), /signature does not match/);
+  assert.equal(ran, false);
+  assert.equal(calls.some((call) => String(call[1]).endsWith('/install.sh')), false);
+  assert.throws(() => verifyReleaseHead(tampered, FIXTURE_DID), /signature does not match/);
+});
+
+test('a wrong maintainer DID is refused before install.sh runs', async () => {
+  let ran = false;
+  const { deps } = harness({
+    pin: canaryPin({ maintainerDid: DID }),
+    runInstaller: async () => {
+      ran = true;
+      return { stdout: '', stderr: '' };
+    },
+  });
+  await assert.rejects(() => installRuntime(deps, () => {}), /pinned maintainer DID/);
+  assert.equal(ran, false);
+  assert.throws(() => verifyReleaseHead(SIGNED_HEAD, DID), /pinned maintainer DID/);
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'elastos-head-'));
+  const file = path.join(dir, 'head.json');
+  fs.writeFileSync(file, SIGNED_HEAD);
+  const ok = spawnSync('python3', [
+    path.join(__dirname, '../scripts/verify-release-head.py'),
+    file,
+    'elastos.release.head.v1',
+    FIXTURE_DID,
+  ], { encoding: 'utf8' });
+  assert.equal(ok.status, 0, ok.stderr);
+  const bad = spawnSync('python3', [
+    path.join(__dirname, '../scripts/verify-release-head.py'),
+    file,
+    'elastos.release.head.v1',
+    DID,
+  ], { encoding: 'utf8' });
+  assert.notEqual(bad.status, 0);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('install.sh bytes must match the pinned hash before they run', async () => {
   let ran = false;
   const { deps } = harness({
     fetchText: async (url) => {
-      if (url.endsWith('/release-head.json')) return releaseHead();
+      if (url.endsWith('/release-head.json')) return SIGNED_HEAD;
       return 'MAINTAINER_DID=__MAINTAINER_DID__\nHEAD=__HEAD_CID__\n';
     },
     runInstaller: async () => {
@@ -140,9 +202,8 @@ test('unsigned git install.sh is refused before it runs', async () => {
       return { stdout: '', stderr: '' };
     },
   });
-  await assert.rejects(() => installRuntime(deps, () => {}), /not signed/);
+  await assert.rejects(() => installRuntime(deps, () => {}), /installerSha256/);
   assert.equal(ran, false);
-  assert.throws(() => assertSignedInstaller('__HEAD_CID__'), /not signed/);
 });
 
 test('a matching pin installs with --install-only, then setup, and leaves PC2 alone', async () => {
@@ -153,7 +214,22 @@ test('a matching pin installs with --install-only, then setup, and leaves PC2 al
   assert.equal(install.length, 1);
   assert.equal(install[0][1].endsWith('install.sh'), true);
   assert.equal(install[0][1].includes('install-fallback.sh'), false);
-  assert.deepEqual(install[0][2], ['--install-only']);
+  assert.deepEqual(install[0][2], [
+    '--install-only',
+    '--head-cid',
+    FIXTURE_RELEASE_CID,
+    '--maintainer-did',
+    FIXTURE_DID,
+  ]);
+  assert.equal(install[0][2].includes('--allow-unsigned'), false);
+  assert.equal(install[0][3].ELASTOS_HEAD_CID, undefined);
+  assert.equal(install[0][3].ELASTOS_MAINTAINER_DID, undefined);
+  assert.equal(install[0][3].ELASTOS_PUBLISHER_GATEWAY, undefined);
+  assert.equal(install[0][3].PATH, '/usr/bin');
+  assert.deepEqual(
+    installerChildEnv({ ELASTOS_HEAD_CID: 'QmEvil', PATH: '/bin' }),
+    { PATH: '/bin' },
+  );
   assert.equal(calls.some((call) => call[0] === 'setup'), true);
   assert.equal(JSON.stringify(calls).includes('clone'), false);
   assert.equal(mtimes.get(PC2), 1000);
@@ -165,7 +241,7 @@ test('an interrupted install resumes at setup and does not download again', asyn
   const { deps, calls } = harness({
     probe: async () => ({
       kind: 'version',
-      version: `ElastOS Runtime v${VERSION}`,
+      version: `ElastOS Runtime v${FIXTURE_VERSION}`,
       binaryPath: `${HOME}/.local/bin/elastos`,
     }),
   });
@@ -179,7 +255,7 @@ test('a finished install does not download again', async () => {
   const { deps, calls, files } = harness({
     probe: async () => ({
       kind: 'version',
-      version: `ElastOS Runtime v${VERSION}`,
+      version: `ElastOS Runtime v${FIXTURE_VERSION}`,
       binaryPath: `${HOME}/.local/bin/elastos`,
     }),
   });
@@ -232,15 +308,9 @@ test('a pinned install failure does not run a second installer', async () => {
 
 test('a publisher mismatch does not install', async () => {
   const { deps, calls } = harness({
-    fetchText: async (url) => {
-      calls.push(['fetch', url]);
-      if (url.endsWith('/release-head.json')) {
-        return releaseHead({ latest_release_cid: 'QmDifferent' });
-      }
-      return '#!/bin/bash\necho stamped\n';
-    },
+    pin: canaryPin({ version: '0.7.2' }),
   });
-  await assert.rejects(() => installRuntime(deps, () => {}), /headCid/);
+  await assert.rejects(() => installRuntime(deps, () => {}), /version/);
   assert.equal(calls.some((call) => call[0] === 'installer'), false);
   assert.equal(calls.some((call) => call[0] === 'fetch' && String(call[1]).endsWith('/install.sh')), false);
 });
