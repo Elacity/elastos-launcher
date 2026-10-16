@@ -17,6 +17,7 @@ test('the runtime smoke workflow has no continue-on-error', () => {
   assert.match(workflow, /runs-on: windows-2025/);
   assert.match(workflow, /bash scripts\/runtime-smoke\.sh/);
   assert.match(workflow, /pwsh -File scripts\/windows-elastos-distro\.ps1/);
+  assert.match(workflow, /bash scripts\/runtime-rollback\.sh/);
 });
 
 test('a missing wsl.exe fails the Windows job', () => {
@@ -49,6 +50,17 @@ test('the smoke passes the pinned head the way the pinned installer accepts it',
     /env -u ELASTOS_MAINTAINER_DID -u ELASTOS_PUBLISHER_GATEWAY \\\n {2}ELASTOS_HEAD_CID="\$\{head_cid\}" \\\n {2}bash "\$\{installer\}" --install-only --maintainer-did "\$\{maintainer\}"/,
   );
   assert.equal(/--head-cid/.test(script), false);
+});
+
+test('rollback uses the real binary between alpha.19 and alpha.20', () => {
+  const script = fs.readFileSync(path.join(root, 'scripts/runtime-rollback.sh'), 'utf8');
+  assert.match(script, /0\.8\.0-alpha\.19/);
+  assert.match(script, /0\.8\.0-alpha\.20/);
+  assert.match(script, /update --rollback-to "\$\{PREV_CID\}" --yes/);
+  assert.match(script, /update --yes/);
+  assert.match(script, /\/healthz is OK/);
+  assert.equal(/--head-cid/.test(script), false);
+  assert.match(script, /ELASTOS_RETAIN_FILE/);
 });
 
 test('the flattened smoke pin keeps the installer hash', () => {

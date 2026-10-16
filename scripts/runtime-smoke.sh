@@ -250,3 +250,6 @@ if curl -fsS --max-time 2 http://127.0.0.1:8090/healthz >/dev/null 2>&1; then
   exit 1
 fi
 echo "Gateway stopped cleanly"
+if [[ -n "${ELASTOS_RETAIN_FILE:-}" ]]; then
+  printf '%s\n' "${HOME}" > "${ELASTOS_RETAIN_FILE}"
+fi
