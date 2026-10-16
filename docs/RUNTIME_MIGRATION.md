@@ -2,7 +2,7 @@
 
 Status: the desktop app installs and supervises the ElastOS runtime only.
 
-Founder decision on 2026-10-16: the previous computer app is gone from this repository. The launcher does not import its data and does not delete other folders in the home directory. A runtime home starts empty.
+Founder decision on 2026-10-16: the previous computer app is gone from this repository. The launcher does not import its data. A runtime home starts empty. People who already have that install see Remove PC2. It lists the known paths and their sizes, and removes only those paths after a confirm.
 
 | Decision | What this tree does |
 |---|---|
@@ -44,6 +44,8 @@ The tray says Start, Stop, and Open my computer. There is no Computer menu and n
 
 Reset and uninstall remove only those runtime paths. A directory segment that contains a dot is refused unless it is `.local` or `.elastos-launcher`. That leaves every other home folder on disk.
 
+Remove PC2 is a separate action in `src/main/legacyPc2Removal.ts`. The button stays hidden until one of these is on disk: `~/.pc2`, `~/.elastos/node` when it is the old bundled Node 22.13.1 tree, a PC2 launch agent or autostart file, the copied AmneziaWG, WireGuard, and sing-box programs, `/etc/sudoers.d/elastos` (and the sudoers files the old install wrote), and a Windows WSL distro named `PC2`. The ElastOS distro is never unregistered. The confirm dialog lists each path and its size and offers “Back up my PC2 data first”, which writes a zip in Downloads. One privileged prompt covers the sudoers rules and those VPN programs. A failure says what is still there and saves a support bundle.
+
 Stop signals the gateway process group: `SIGTERM`, 15 seconds, then `SIGKILL`, after the pid has exited and `/healthz` has failed twice. Exit 75 restarts only when the binary was replaced on disk.
 
 On Windows the same installer runs inside distro `ElastOS` as root, and the Windows process reads `/healthz` on `127.0.0.1:8090`.
@@ -64,6 +66,7 @@ Check these before the runtime on `main` is marketed as a live product and this 
 - [ ] Tag build signs and notarizes with the existing secrets (`CSC_LINK`, `CSC_KEY_PASSWORD`, `APPLE_ID`, `APPLE_APP_SPECIFIC_PASSWORD`, `APPLE_TEAM_ID`). This environment has no Apple certificate and did not notarize a build.
 - [ ] No phone-home telemetry.
 - [x] Uninstall and Reset remove only the ElastOS program, its data directory, and the launcher stage file. A dotted directory other than `.local` or `.elastos-launcher` is refused, so other home folders stay on disk.
+- [x] Remove PC2 is separate from Reset and Uninstall. It is shown only when a legacy install is detected, lists those known paths and their sizes, and refuses runtime paths, symlink escapes, and any other path.
 - [ ] A gateway this launcher did not start is left running. Stop of one it did start signals the process group: `SIGTERM`, 15 seconds, then `SIGKILL`, and only after the pid is dead and `/healthz` has failed twice.
 - [ ] Diagnostics and the log panel do not contain `attach_secret` or the coordinate JSON files.
 - [x] Live rollback on the same run, job [`rollback (linux-x64)`](https://github.com/Elacity/elastos-launcher/actions/runs/38883782991/job/116916495924): install of `0.8.0-alpha.20` prints `/healthz is OK`, then `previous head QmULef49FjitVQPtLqSpzXcpAJpvaCueLzs31R6dWBUdsM is 0.8.0-alpha.19`, `elastos update --rollback-to QmULef49FjitVQPtLqSpzXcpAJpvaCueLzs31R6dWBUdsM --yes` prints `Installed version: ElastOS Runtime v0.8.0-alpha.19` and `/healthz is OK`, then `elastos update --yes` prints `Installed version: ElastOS Runtime v0.8.0-alpha.20`, `/healthz is OK`, and `Rollback returned to the pinned release`.

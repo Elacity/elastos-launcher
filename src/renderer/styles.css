@@ -541,7 +541,8 @@ body {
   padding: 24px;
   text-align: center;
   border: 1px solid var(--border);
-  max-width: 300px;
+  max-width: 360px;
+  width: calc(100% - 32px);
 }
 
 .confirm-icon {
@@ -575,6 +576,25 @@ body {
   padding: 8px 12px;
   border-radius: 6px;
   margin: 12px 0 !important;
+  white-space: pre-wrap;
+  text-align: left;
+  word-break: break-all;
+  max-height: 140px;
+  overflow: auto;
+}
+
+.confirm-backup {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  text-align: left;
+  font-size: 13px;
+  margin: 12px 0;
+  color: var(--text-normal);
+}
+
+.confirm-backup.hidden {
+  display: none;
 }
 
 .confirm-warning {
@@ -621,10 +641,16 @@ body {
 }
 
 /* Bottom Panel */
+#remove-pc2-btn {
+  width: 100%;
+  margin-bottom: 8px;
+}
+
 .bottom-panel {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  flex-wrap: wrap;
   padding: 12px 16px;
   background: var(--bg-panel);
   border-top: 1px solid var(--border);

@@ -136,6 +136,10 @@
           <h3 id="confirm-title">Uninstall ElastOS?</h3>
           <p id="confirm-body">This removes the ElastOS program and its data from this computer.</p>
           <p class="confirm-path" id="confirm-path">The ElastOS program and its data folder</p>
+          <label class="confirm-backup hidden" id="confirm-backup-row">
+            <input type="checkbox" id="confirm-backup">
+            <span>Back up my PC2 data first</span>
+          </label>
           <p class="confirm-warning">This action cannot be undone!</p>
           <div class="confirm-buttons">
             <button class="confirm-btn cancel" id="confirm-cancel">Cancel</button>
@@ -147,6 +151,7 @@
 
     <!-- Bottom Panel -->
     <div class="bottom-panel">
+      <button class="control-btn hidden" id="remove-pc2-btn" type="button">Remove PC2</button>
       <label class="login-row" id="login-row">
         <input type="checkbox" id="login-checkbox">
         <span>Open ElastOS when I sign in</span>
