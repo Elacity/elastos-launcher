@@ -214,6 +214,8 @@ ipcMain.handle('pc2:setLaunchTarget', async (_, id: string) => {
 });
 ipcMain.handle('pc2:getPreflight', () => launch.getPreflight());
 ipcMain.handle('pc2:getDiagnostics', () => launch.getDiagnostics());
+ipcMain.handle('pc2:describeFailure', () => launch.describeFailure());
+ipcMain.handle('pc2:fixFailure', () => launch.fixFailure());
 ipcMain.handle('pc2:setOpenAtLogin', (_, enabled: boolean) => {
   launch.setOpenAtLogin(enabled);
   return launch.getOpenAtLogin();
