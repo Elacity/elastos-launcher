@@ -5,6 +5,7 @@ import * as path from 'path';
 import { HEALTH_URL } from './runtimeGateway';
 import { loadActiveRuntimePin } from './runtimePin';
 import { runtimeInstallBlock, wslKvmMessage, detectWsl } from './runtimeSupport';
+import { detectWindows, hostPrompt, listDistros, lookupCommand } from './windowsHost';
 
 export const DISK_FLOOR_BYTES = 2 * 1024 * 1024 * 1024;
 
@@ -28,14 +29,38 @@ export interface PreflightInput {
   offline: boolean;
   wsl: boolean;
   kvm: boolean;
+  wslInstalled?: boolean;
+  distroReady?: boolean;
 }
 
 export function evaluatePreflight(input: PreflightInput): PreflightReport {
   const checks: PreflightCheck[] = [];
-  const platform = runtimeInstallBlock(input.platform, input.arch);
-  checks.push(platform
-    ? { id: 'platform', level: 'block', message: platform }
-    : { id: 'platform', level: 'pass', message: 'This computer can run ElastOS.' });
+  if (input.platform === 'win32') {
+    const prompt = hostPrompt({
+      platform: input.platform,
+      arch: input.arch,
+      wslInstalled: input.wslInstalled ?? false,
+      distroReady: input.distroReady ?? false,
+    });
+    const message = `${prompt.title}. ${prompt.body}`;
+    checks.push({
+      id: 'windows',
+      level: prompt.kind === 'ready' ? 'pass' : 'block',
+      message,
+    });
+    checks.push({
+      id: 'platform',
+      level: 'block',
+      message: prompt.kind === 'ready'
+        ? 'Windows is ready. This button cannot finish the install inside Linux yet. You do not type any commands.'
+        : message,
+    });
+  } else {
+    const platform = runtimeInstallBlock(input.platform, input.arch);
+    checks.push(platform
+      ? { id: 'platform', level: 'block', message: platform }
+      : { id: 'platform', level: 'pass', message: 'This computer can run ElastOS.' });
+  }
 
   if (input.freeBytes == null) {
     checks.push({ id: 'disk', level: 'warn', message: 'Could not check free disk space.' });
@@ -201,6 +226,13 @@ export async function collectPreflight(
   } catch {
     procVersion = '';
   }
+  let wslInstalled = false;
+  let distroReady = false;
+  if (platform === 'win32') {
+    const windows = await detectWindows({ platform, arch, lookup: lookupCommand, listDistros });
+    wslInstalled = windows.wslInstalled;
+    distroReady = windows.distroReady;
+  }
   return evaluatePreflight({
     platform,
     arch,
@@ -210,5 +242,7 @@ export async function collectPreflight(
     offline: await offline(),
     wsl: detectWsl(process.env, procVersion),
     kvm: fs.existsSync('/dev/kvm'),
+    wslInstalled,
+    distroReady,
   });
 }

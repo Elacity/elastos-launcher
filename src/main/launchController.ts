@@ -11,6 +11,7 @@ import { loadActiveRuntimePin } from './targets/runtimePin';
 import { runtimeHeadStore } from './targets/runtimeUpdate';
 import { rollbackRuntimeUpdate } from './targets/runtimeTarget';
 import { resetRuntimeOnThisComputer } from './targets/runtimeUninstall';
+import { fixWindowsOnThisComputer } from './targets/windowsHost';
 import { LaunchTarget, LaunchTargetId, TargetStatus, UpdateCheck } from './targets/types';
 
 export interface LaunchControllerOptions {
@@ -266,7 +267,12 @@ export function createLaunchController(options: LaunchControllerOptions = {}): L
     },
     async fixFailure() {
       const preflight = active.id === 'runtime' ? await collectPreflight() : { ok: true, checks: [] };
-      return fixCollectedFailure(collectFailureFacts(lastError, preflight.checks));
+      const facts = collectFailureFacts(lastError, preflight.checks);
+      if (failureScreen(facts).kind === 'windows') {
+        await fixWindowsOnThisComputer();
+        return 'ready';
+      }
+      return fixCollectedFailure(facts);
     },
     getDiagnostics: () => diagnosticsText(),
     saveSupportBundle: async () => saveCollectedSupportBundle(await diagnosticsText()),

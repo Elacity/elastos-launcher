@@ -7,7 +7,7 @@ import { runtimeBinaryPath, runtimeComponentsPath, runtimeDataDir, runtimeHostLo
 import { loadActiveRuntimePin } from './runtimePin';
 import { portBusy } from './preflight';
 
-export type FailureKind = 'port' | 'interrupted' | 'stale-lock' | 'offline' | 'other';
+export type FailureKind = 'port' | 'interrupted' | 'stale-lock' | 'offline' | 'windows' | 'other';
 
 export interface FailureCheck {
   id: string;
@@ -38,6 +38,7 @@ export interface RecoveryDeps {
   recheckOnline: () => Promise<boolean>;
   resumeSetup: () => Promise<void>;
   removeLock: (lockPath: string) => void;
+  enableWindows?: () => Promise<void>;
 }
 
 const GENERIC = 'Something went wrong. Try again. If it keeps happening, copy diagnostics.';
@@ -75,8 +76,18 @@ export function assertStaleLockPath(lockPath: string): void {
 
 export function failureScreen(facts: FailureFacts): FailureScreen {
   const kind = classify(facts);
+  if (kind === 'windows') {
+    const check = facts.checks.find((item) => item.id === 'windows' && item.level === 'block');
+    return {
+      kind,
+      title: 'Windows needs one step',
+      message: check?.message || 'Windows needs Linux support. Click Fix it. You do not type any commands.',
+      retryLabel: 'Try again',
+      fixLabel: 'Fix it',
+    };
+  }
   const copy = kind === 'other'
-    ? { title: 'ElastOS needs attention', message: plainError(facts.error) }
+    ? { title: 'ElastOS needs attention', message: plainError(facts.error, facts.checks) }
     : COPY[kind];
   return {
     kind,
@@ -89,6 +100,11 @@ export function failureScreen(facts: FailureFacts): FailureScreen {
 
 export async function applyFix(facts: FailureFacts, deps: RecoveryDeps): Promise<'ready' | 'still-blocked'> {
   const kind = classify(facts);
+  if (kind === 'windows') {
+    if (!deps.enableWindows) return 'still-blocked';
+    await deps.enableWindows();
+    return 'ready';
+  }
   if (kind === 'offline') {
     return (await deps.recheckOnline()) ? 'ready' : 'still-blocked';
   }
@@ -154,6 +170,7 @@ export async function fixCollectedFailure(facts: FailureFacts): Promise<'ready' 
 }
 
 function classify(facts: FailureFacts): FailureKind {
+  if (blocked(facts, 'windows')) return 'windows';
   if (blocked(facts, 'network') || /offline|not reachable|ENOTFOUND|getaddrinfo/i.test(facts.error)) {
     return 'offline';
   }
@@ -171,14 +188,15 @@ function blocked(facts: FailureFacts, id: string): boolean {
   return facts.checks.some((check) => check.id === id && check.level === 'block');
 }
 
-function plainError(error: string): string {
+function plainError(error: string, checks: FailureCheck[]): string {
   if (/attach_secret|runtime-coords|BEGIN [A-Z ]*PRIVATE KEY/i.test(error)) return GENERIC;
   const line = error.split('\n').map((part) => part.trim()).find(Boolean) ?? '';
-  if (!line || /^\s*at\s+/.test(line)) return GENERIC;
-  return line.replace(/^Error:\s*/, '');
+  if (line && !/^\s*at\s+/.test(line)) return line.replace(/^Error:\s*/, '');
+  const block = checks.find((check) => check.level === 'block');
+  return block?.message || GENERIC;
 }
 
-const COPY: Record<Exclude<FailureKind, 'other'>, { title: string; message: string }> = {
+const COPY: Record<Exclude<FailureKind, 'other' | 'windows'>, { title: string; message: string }> = {
   offline: {
     title: 'You are offline',
     message: 'ElastOS could not reach the internet, so nothing was installed. Connect, then click Fix it to check again.',
