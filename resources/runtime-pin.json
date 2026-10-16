@@ -1,0 +1,9 @@
+{
+  "channel": "stable",
+  "version": null,
+  "headCid": null,
+  "maintainerDid": "did:key:z6MkgwHd2BCWe1jHMXPiR6H1q1RFPcv1YzhMbK5G1kBarbfe",
+  "publisherGateway": "https://elastos.elacitylabs.com",
+  "fallbackInstallerUrl": "https://elastos.elacitylabs.com/install.sh",
+  "note": "Product pin. stable is published from runtime main. version and headCid stay null until a stable head exists. The smoke workflow uses resources/runtime-smoke-pin.json (canary, testing only)."
+}
