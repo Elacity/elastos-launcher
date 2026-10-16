@@ -107,7 +107,8 @@ test('an interrupted install continues setup and does not download', async () =>
   const input = facts({ binaryPresent: true, componentsPresent: false });
   const screen = failureScreen(input);
   assert.equal(screen.kind, 'interrupted');
-  assert.match(screen.message, /without downloading again/);
+  assert.match(screen.message, /check the signed release again/);
+  assert.match(screen.message, /installer is not downloaded again/);
   const world = deps();
   assert.equal(await applyFix(input, world), 'ready');
   assert.deepEqual(world.calls, ['setup']);

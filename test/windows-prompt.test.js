@@ -87,10 +87,11 @@ test('Windows asks once to enable Linux support and does not show a command', as
   const { windowsFixResult } = require('../dist/main/targets/runtimeRecovery');
   let enabled = false;
   const enable = async () => { enabled = true; };
-  assert.equal(await windowsFixResult(enable, async () => null), 'still-blocked');
+  assert.equal(await windowsFixResult(enable, async () => null, async () => true), 'still-blocked');
   assert.equal(enabled, true);
-  assert.equal(await windowsFixResult(async () => {}, async () => ({ status: 200, body: 'not ok' })), 'still-blocked');
-  assert.equal(await windowsFixResult(async () => {}, async () => ({ status: 200, body: 'OK' })), 'ready');
+  assert.equal(await windowsFixResult(async () => {}, async () => ({ status: 200, body: 'not ok' }), async () => true), 'still-blocked');
+  assert.equal(await windowsFixResult(async () => {}, async () => ({ status: 200, body: 'OK' }), async () => false), 'still-blocked');
+  assert.equal(await windowsFixResult(async () => {}, async () => ({ status: 200, body: 'OK' }), async () => true), 'ready');
   assert.equal(await applyFix(input, {
     recheckPort: async () => 'busy',
     recheckOnline: async () => false,
@@ -106,6 +107,16 @@ test('Windows asks once to enable Linux support and does not show a command', as
     removeLock: () => { throw new Error('should not remove a lock'); },
     enableWindows: async () => {},
     healthOk: async () => true,
+    gatewayIdentity: async () => false,
+  }), 'still-blocked');
+  assert.equal(await applyFix(input, {
+    recheckPort: async () => 'busy',
+    recheckOnline: async () => false,
+    resumeSetup: async () => { throw new Error('should not set up a download'); },
+    removeLock: () => { throw new Error('should not remove a lock'); },
+    enableWindows: async () => {},
+    healthOk: async () => true,
+    gatewayIdentity: async () => true,
   }), 'ready');
 });
 
