@@ -22,6 +22,9 @@ test('production ignores an environment pin that replaces the trust root', () =>
   const evil = writePin({ ...packaged, maintainerDid: 'did:key:zevil' });
   assert.equal(pinLoadMode({}), 'production');
   assert.equal(pinLoadMode({ NODE_TEST_CONTEXT: 'child' }), 'dev');
+  assert.equal(pinLoadMode({ NODE_TEST_CONTEXT: 'child' }, true), 'production');
+  assert.equal(pinLoadMode({ NODE_TEST_CONTEXT: 'child' }, false), 'dev');
+  assert.equal(pinLoadMode({}, false), 'dev');
   assert.equal(runtimePinCandidates({ ELASTOS_RUNTIME_PIN: evil }, 'production').includes(evil), false);
 
   assert.throws(

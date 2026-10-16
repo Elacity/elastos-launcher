@@ -117,15 +117,27 @@ export function runtimePinCandidates(
 
 export type PinLoadMode = 'dev' | 'production';
 
-/** Unit tests and an unpackaged Electron app may point at another pin file. */
-export function pinLoadMode(env: NodeJS.ProcessEnv = process.env): PinLoadMode {
-  if (env.NODE_TEST_CONTEXT) return 'dev';
+function readIsPackaged(): boolean | undefined {
   try {
     const electron = require('electron') as { app?: { isPackaged?: boolean } };
-    if (electron.app?.isPackaged === false) return 'dev';
+    if (typeof electron.app?.isPackaged === 'boolean') return electron.app.isPackaged;
   } catch {
-    // Plain Node is not a dev build of the app.
+    return undefined;
   }
+  return undefined;
+}
+
+/**
+ * A packaged app stays in production mode even when NODE_TEST_CONTEXT is set.
+ * An unpackaged app, and unit tests, may use a dev pin.
+ */
+export function pinLoadMode(
+  env: NodeJS.ProcessEnv = process.env,
+  packaged: boolean | undefined = readIsPackaged(),
+): PinLoadMode {
+  if (packaged === true) return 'production';
+  if (env.NODE_TEST_CONTEXT) return 'dev';
+  if (packaged === false) return 'dev';
   return 'production';
 }
 
