@@ -1,4 +1,7 @@
-import { spawn } from 'child_process';
+import { spawn, execFileSync } from 'child_process';
+import * as fs from 'fs';
+import * as os from 'os';
+import { runtimeDataDir, runtimeHostLockPath } from './runtimePaths';
 
 /** Supervised command from the launcher contract. */
 export const GATEWAY_ARGS = ['gateway', '--addr', '127.0.0.1:8090'] as const;
@@ -42,9 +45,35 @@ export function signalProcessGroup(
   if (!Number.isInteger(pid) || pid <= 0) return;
   try {
     kill(-pid, signal);
-  } catch {
-    // The process already left.
+  } catch (err) {
+    const code = err && typeof err === 'object' && 'code' in err
+      ? String((err as { code?: string }).code)
+      : '';
+    if (code === 'ESRCH') return;
+    const message = err instanceof Error ? err.message : String(err);
+    throw new Error(`Could not signal ElastOS (${signal}): ${message}`);
   }
+}
+
+/** A foreign OK on port 8090 is ElastOS only when the lock pid is that gateway. */
+export function foreignListenerIsElastos(input: {
+  lockText: string | null;
+  command: string | null;
+  pidAlive: (pid: number) => boolean;
+}): boolean {
+  if (!input.lockText) return false;
+  let parsed: { pid?: unknown; addr?: unknown };
+  try {
+    parsed = JSON.parse(input.lockText) as { pid?: unknown; addr?: unknown };
+  } catch {
+    return false;
+  }
+  if (typeof parsed.pid !== 'number' || !Number.isInteger(parsed.pid) || parsed.pid <= 0) return false;
+  if (parsed.addr !== '127.0.0.1:8090') return false;
+  if (!input.pidAlive(parsed.pid)) return false;
+  if (!input.command) return false;
+  const command = input.command.trim();
+  return /(^|[\\/\s])elastos(\.exe)?(\s|$)/i.test(command) && /\bgateway\b/.test(command);
 }
 
 export interface GatewaySupervisorDeps {
@@ -55,6 +84,7 @@ export interface GatewaySupervisorDeps {
   now: () => number;
   openUrl: (url: string) => void;
   log: (line: string) => void;
+  confirmForeign?: () => Promise<boolean>;
   graceMs?: number;
   healthTimeoutMs?: number;
   pollMs?: number;
@@ -209,6 +239,11 @@ export function createGatewaySupervisor(deps: GatewaySupervisorDeps): GatewaySup
             current = 'error';
             throw new Error('ElastOS is already running, but it is not answering yet. Wait a moment and click Open my computer.');
           }
+          const confirmed = deps.confirmForeign ? await deps.confirmForeign() : false;
+          if (!confirmed) {
+            current = 'error';
+            throw new Error('Something is answering on port 8090, but it is not the ElastOS gateway. Home was not opened.');
+          }
           foreign = true;
           owned = null;
           current = 'running';
@@ -319,7 +354,56 @@ export function createDefaultGatewaySupervisor(binary: string): GatewaySuperviso
     now: () => Date.now(),
     openUrl: openRuntimeHome,
     log: (line) => logSink(line),
+    confirmForeign: confirmInstalledGateway,
   });
+}
+
+function confirmInstalledGateway(): Promise<boolean> {
+  const lockPath = runtimeHostLockPath(runtimeDataDir(process.platform, os.homedir(), process.env));
+  let text: string | null = null;
+  try {
+    text = fs.readFileSync(lockPath, 'utf8');
+  } catch {
+    text = null;
+  }
+  let pid = 0;
+  try {
+    const parsed = JSON.parse(text ?? '') as { pid?: unknown };
+    pid = typeof parsed.pid === 'number' ? parsed.pid : 0;
+  } catch {
+    pid = 0;
+  }
+  return Promise.resolve(foreignListenerIsElastos({
+    lockText: text,
+    command: processCommand(pid),
+    pidAlive: (id) => {
+      try {
+        process.kill(id, 0);
+        return true;
+      } catch {
+        return false;
+      }
+    },
+  }));
+}
+
+function processCommand(pid: number): string | null {
+  if (!Number.isInteger(pid) || pid <= 0) return null;
+  if (process.platform === 'linux') {
+    try {
+      return fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8').replace(/\0/g, ' ').trim();
+    } catch {
+      return null;
+    }
+  }
+  try {
+    return execFileSync('ps', ['-p', String(pid), '-o', 'command='], {
+      encoding: 'utf8',
+      timeout: 1000,
+    }).trim();
+  } catch {
+    return null;
+  }
 }
 
 export function openRuntimeHome(): void {
