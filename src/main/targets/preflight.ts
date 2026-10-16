@@ -215,12 +215,54 @@ async function healthOk(): Promise<boolean> {
   }
 }
 
+/** Hostname of the pinned publisher. Cold preflight does not request a path. */
+export function publisherHost(gateway: string): string {
+  let parsed: URL;
+  try {
+    parsed = new URL(gateway);
+  } catch {
+    throw new Error('The ElastOS publisher address is not a URL.');
+  }
+  if (parsed.protocol !== 'https:' || !parsed.hostname) {
+    throw new Error('The ElastOS publisher address is not a URL.');
+  }
+  return parsed.hostname;
+}
+
+function connectPublisher(host: string, port: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const socket = net.connect({ host, port });
+    const finish = (ok: boolean) => {
+      socket.setTimeout(0);
+      socket.removeAllListeners();
+      socket.destroy();
+      resolve(ok);
+    };
+    socket.setTimeout(3000);
+    socket.once('connect', () => finish(true));
+    socket.once('timeout', () => finish(false));
+    socket.once('error', () => finish(false));
+  });
+}
+
+/**
+ * Cold open only checks that the publisher host accepts a connection on 443.
+ * The signed release head is fetched when the person starts Install.
+ */
+export async function publisherOffline(
+  gateway: string,
+  connect: (host: string, port: number) => Promise<boolean> = connectPublisher,
+): Promise<boolean> {
+  try {
+    return !(await connect(publisherHost(gateway), 443));
+  } catch {
+    return true;
+  }
+}
+
 async function offline(): Promise<boolean> {
   try {
-    const pin = loadActiveRuntimePin();
-    const url = `${pin.publisherGateway.replace(/\/$/, '')}/release-head.json`;
-    const response = await fetch(url, { signal: AbortSignal.timeout(3000) });
-    return !response.ok;
+    return publisherOffline(loadActiveRuntimePin().publisherGateway);
   } catch {
     return true;
   }

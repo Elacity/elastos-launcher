@@ -1,7 +1,15 @@
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
 const test = require('node:test');
 
-const { buildDiagnostics, evaluatePreflight, DISK_FLOOR_BYTES } = require('../dist/main/targets/preflight');
+const {
+  buildDiagnostics,
+  evaluatePreflight,
+  DISK_FLOOR_BYTES,
+  publisherHost,
+  publisherOffline,
+} = require('../dist/main/targets/preflight');
 const { linuxAutostartFile, syncLinuxAutostart } = require('../dist/main/targets/openAtLogin');
 const flow = require('../src/renderer/flow.js');
 
@@ -38,6 +46,24 @@ test('preflight blocks disk, offline, a busy port, and Intel Mac', () => {
   const kvm = evaluatePreflight({ ...base, wsl: true, kvm: false });
   assert.equal(kvm.ok, true);
   assert.match(kvm.checks.find((check) => check.id === 'kvm').message, /\/dev\/kvm/);
+});
+
+test('cold preflight reaches the publisher on port 443 and does not fetch the release head', async () => {
+  assert.equal(publisherHost('https://elastos.elacitylabs.com'), 'elastos.elacitylabs.com');
+  const seen = [];
+  assert.equal(await publisherOffline('https://elastos.elacitylabs.com/ignored', async (host, port) => {
+    seen.push({ host, port });
+    return true;
+  }), false);
+  assert.deepEqual(seen, [{ host: 'elastos.elacitylabs.com', port: 443 }]);
+  assert.equal(await publisherOffline('https://elastos.elacitylabs.com', async () => false), true);
+  assert.equal(await publisherOffline('not a url', async () => true), true);
+
+  const source = fs.readFileSync(path.join(__dirname, '../src/main/targets/preflight.ts'), 'utf8');
+  const offline = source.match(/async function offline\(\)[\s\S]*?\n\}/);
+  assert.ok(offline, 'offline function');
+  assert.equal(offline[0].includes('release-head.json'), false);
+  assert.equal(offline[0].includes('fetch('), false);
 });
 
 test('diagnostics leave out local secrets', () => {
