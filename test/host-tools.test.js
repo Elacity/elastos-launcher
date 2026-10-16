@@ -220,6 +220,44 @@ test('a hidden or stub python is provisioned and a working one is reused', async
   assert.equal(system.env.PATH.includes(`${path.sep}python${path.sep}bin`), false);
 });
 
+test('a tampered python archive is refused and nothing is unpacked', async () => {
+  const published = JSON.parse(fs.readFileSync(path.join(__dirname, '../resources/host-python.json'), 'utf8'));
+  const assets = Object.values(published.assets);
+  assert.equal(assets.length, 3);
+  for (const asset of assets) {
+    assert.match(asset.url, /^https:\/\/github\.com\/astral-sh\/python-build-standalone\/releases\/download\/20261013\//);
+    assert.match(asset.sha256, /^[0-9a-f]{64}$/);
+  }
+
+  const dir = tempDir();
+  const bytes = pythonArchive(dir);
+  const pin = pinFor(bytes);
+  const tampered = Buffer.from(bytes);
+  tampered[Math.floor(tampered.length / 2)] ^= 0xff;
+  assert.notEqual(crypto.createHash('sha256').update(tampered).digest('hex'), pin.assets['linux-x64'].sha256);
+
+  const home = path.join(dir, 'tampered');
+  await assert.rejects(
+    () => prepareInstallerEnvironment({
+      homeDir: home,
+      platform: 'linux',
+      arch: 'x64',
+      env: { ELASTOS_HIDE_HOST_TOOLS: '1', PATH: '/usr/bin' },
+      pin,
+      listLib: glibc,
+      canExec: bashOk,
+      download: async () => tampered,
+    }),
+    (err) => {
+      assert.equal(err.message, PYTHON_VERIFY_MESSAGE);
+      assert.equal(/xcode-select|terminal|apt-get/.test(err.message), false);
+      return true;
+    },
+  );
+  assert.equal(fs.existsSync(path.join(home, '.elastos-launcher', 'python', '.sha256')), false);
+  assert.equal(fs.existsSync(path.join(home, '.elastos-launcher', 'python', 'python', 'bin', 'python3')), false);
+});
+
 test('musl and a missing shell block install, and a bad python hash is refused', async () => {
   const dir = tempDir();
   await assert.rejects(
