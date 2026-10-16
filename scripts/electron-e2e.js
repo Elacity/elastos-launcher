@@ -48,18 +48,25 @@ async function main() {
   try {
     const page = await electronApp.firstWindow();
     const readyDeadline = Date.now() + 60000;
-    while (Date.now() < readyDeadline) {
+    let clicked = '';
+    while (Date.now() < readyDeadline && !clicked) {
       const label = (await page.locator('#open-label').innerText({ timeout: 5000 })).trim();
       const disabled = await page.locator('#open-btn').isDisabled();
-      if (label === 'Install' && !disabled) break;
-      await page.waitForTimeout(250);
+      if (label === 'Install' && !disabled) {
+        await page.click('#open-btn');
+        clicked = label;
+        break;
+      }
+      await page.waitForTimeout(200);
     }
-    const readyLabel = (await page.locator('#open-label').innerText()).trim();
-    if (readyLabel !== 'Install') {
-      throw new Error(`Install button did not become ready (button is ${readyLabel})`);
+    if (!clicked) {
+      const label = (await page.locator('#open-label').innerText()).trim();
+      const logs = await page.locator('#logs-content').innerText();
+      console.log('----- install log -----');
+      console.log(logs);
+      throw new Error(`Install button did not become ready (button is ${label})`);
     }
-    await page.click('#open-btn');
-    console.log('Clicked Install');
+    console.log(`Clicked ${clicked}`);
 
     const deadline = Date.now() + 20 * 60 * 1000;
     let lastPrinted = 0;

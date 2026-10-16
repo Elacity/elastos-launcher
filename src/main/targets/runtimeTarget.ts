@@ -111,15 +111,20 @@ export function createRuntimeTarget(): LaunchTarget {
 }
 
 async function runtimeCheckForUpdate(): Promise<UpdateCheck> {
-  const block = runtimeInstallBlock(process.platform, process.arch);
-  if (block) throw new Error(block);
-  const parsed = await checkRuntimeUpdate(runRuntimeCommand);
   let releaseUrl = '';
   try {
     releaseUrl = loadActiveRuntimePin().publisherGateway;
   } catch {
     releaseUrl = '';
   }
+  const notInstalled = toUpdateCheck('not installed', {
+    updateAvailable: false,
+    detail: 'not installed',
+    latest: null,
+  }, releaseUrl);
+  if (process.platform === 'win32' || runtimeInstallBlock(process.platform, process.arch)) return notInstalled;
+  if (!findRuntimeBinary(os.homedir(), process.env.PATH ?? '')) return notInstalled;
+  const parsed = await checkRuntimeUpdate(runRuntimeCommand);
   return toUpdateCheck(readRuntimeVersion(), parsed, releaseUrl);
 }
 
