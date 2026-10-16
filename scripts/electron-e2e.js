@@ -189,6 +189,15 @@ async function main() {
           windowsFix = 'running';
           console.log('Clicked Fix it to add the ElastOS Linux environment');
         } else if (windowsFix === 'running' && !fixHidden && !fixDisabled) {
+          // Fix it imports the distro and leaves the gateway down, so the
+          // screen can say it still needs attention. Install is the next click.
+          if ((label === 'Install' || label === 'Try again') && !openDisabled) {
+            await page.click('#open-btn');
+            windowsFix = 'installing';
+            console.log('Clicked Install after Windows setup');
+            await page.waitForTimeout(1000);
+            continue;
+          }
           console.log('----- install log -----');
           console.log(logs);
           throw new Error(errorText);
@@ -200,7 +209,7 @@ async function main() {
         ? await page.locator('#fix-btn').evaluate((node) => node.classList.contains('hidden'))
         : true;
       const fixDisabled = await page.locator('#fix-btn').isDisabled();
-      if (windowsFix === 'running' && label === 'Install' && !openDisabled && fixHidden && !fixDisabled) {
+      if (windowsFix === 'running' && (label === 'Install' || label === 'Try again') && !openDisabled && fixHidden && !fixDisabled) {
         await page.click('#open-btn');
         windowsFix = 'installing';
         console.log('Clicked Install after Windows setup');
@@ -211,7 +220,7 @@ async function main() {
         await page.waitForTimeout(1000);
         continue;
       }
-      if (errorVisible && errorText) {
+      if (errorVisible && errorText && errorText !== 'That still needs attention.') {
         console.log('----- install log -----');
         console.log(logs);
         throw new Error(errorText);
