@@ -1,4 +1,7 @@
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
 const test = require('node:test');
 
 const {
@@ -9,6 +12,8 @@ const {
   getLaunchTargetDescriptor,
   LAUNCH_TARGET_ENV,
   parseLaunchTargetId,
+  resolveLaunchTargetId,
+  createLaunchTargetStore,
   targetSupportsHost,
   PC2_TARGET,
   RUNTIME_TARGET,
@@ -66,4 +71,47 @@ test('PC2 target delegates to the existing manager without starting it', async (
   const target = createLaunchTarget('pc2');
   assert.equal(typeof target.getVersion(), 'string');
   assert.equal(typeof await target.isInstalled(), 'boolean');
+});
+
+test('launch target precedence is explicit, then env, then store, then PC2', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'elastos-launch-target-'));
+  const store = createLaunchTargetStore(dir);
+
+  assert.equal(resolveLaunchTargetId({}), 'pc2');
+  assert.equal(resolveLaunchTargetId({ env: {}, store }), 'pc2');
+
+  store.set('runtime');
+  assert.equal(resolveLaunchTargetId({ env: {}, store }), 'runtime');
+  assert.equal(
+    resolveLaunchTargetId({ env: { ELASTOS_LAUNCH_TARGET: 'pc2' }, store }),
+    'pc2',
+  );
+  assert.equal(
+    resolveLaunchTargetId({
+      explicit: 'runtime',
+      env: { ELASTOS_LAUNCH_TARGET: 'pc2' },
+      store,
+    }),
+    'runtime',
+  );
+
+  assert.equal(
+    resolveLaunchTargetId({
+      explicit: '   ',
+      env: { ELASTOS_LAUNCH_TARGET: 'runtime' },
+      store,
+    }),
+    'runtime',
+  );
+
+  store.set('nope');
+  assert.throws(() => resolveLaunchTargetId({ env: {}, store }), /Unknown launch target/);
+
+  store.delete();
+  assert.equal(store.get(), undefined);
+  assert.equal(resolveLaunchTargetId({ env: {}, store }), 'pc2');
+
+  const main = fs.readFileSync(path.join(__dirname, '../src/main/index.ts'), 'utf8');
+  assert.equal(main.includes('./targets'), false);
+  assert.equal(main.includes('pc2Manager'), true);
 });
