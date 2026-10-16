@@ -3,6 +3,7 @@
   "publisherGateway": "https://elastos.elacitylabs.com",
   "fallbackInstallerUrl": "https://elastos.elacitylabs.com/install.sh",
   "maintainerDid": "did:key:z6MkgwHd2BCWe1jHMXPiR6H1q1RFPcv1YzhMbK5G1kBarbfe",
+  "installerSha256": "18768ef071a9f921fe0c1d902926c138e86f925dbaf5dfb9185fecb8789d6714",
   "channels": {
     "stable": {
       "version": null,
@@ -13,5 +14,5 @@
       "headCid": "QmTAEJ8DAprsv5PbWcudofQwXrzL7ZjSgmhRmU8nqmwirf"
     }
   },
-  "note": "Testing pin. Change \"active\" from canary to stable when a stable head is published, and fill channels.stable in that same edit. That active field is the channel switch. Intel Mac has no signed release in this pin."
+  "note": "Testing pin. Change \"active\" from canary to stable when a stable head is published, and fill channels.stable in that same edit. installerSha256 is the SHA-256 of the install.sh bytes this release will execute. Intel Mac has no signed release in this pin."
 }

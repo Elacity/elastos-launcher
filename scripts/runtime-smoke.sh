@@ -80,12 +80,14 @@ if [[ -e "${pc2_dir}" ]]; then
   pc2_stamp="$(stat -c %Y "${pc2_dir}" 2>/dev/null || stat -f %m "${pc2_dir}")"
 fi
 
-python3 - "${pin_file}" "${work}/pin.match" <<'PY'
+python3 - "${pin_file}" "${work}/pin.match" "${work}/release-head.json" <<'PY'
 import json, sys, urllib.request
 pin = json.load(open(sys.argv[1]))
 url = pin["publisherGateway"].rstrip("/") + "/release-head.json"
 with urllib.request.urlopen(url, timeout=30) as response:
-    head = json.loads(response.read().decode())
+    raw = response.read()
+open(sys.argv[3], "wb").write(raw)
+head = json.loads(raw.decode())
 payload = head["payload"]
 print(f"publisher channel={payload.get('channel')} version={payload.get('version')} cid={payload.get('latest_release_cid')}")
 print(f"pin       channel={pin.get('channel')} version={pin.get('version')} cid={pin.get('headCid')}")
@@ -106,12 +108,27 @@ if [[ "${matched}" != "yes" ]]; then
   echo "Pinned release does not match the publisher. Install stopped." >&2
   exit 1
 fi
-echo "Pinned release matches the publisher. Installing that head."
+echo "Pinned release matches the publisher. Verifying the signature and installer hash."
+maintainer="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["maintainerDid"])' "${pin_file}")"
+head_cid="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["headCid"])' "${pin_file}")"
+want_sha="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["installerSha256"])' "${pin_file}")"
+python3 "${root}/scripts/verify-release-head.py" "${work}/release-head.json" elastos.release.head.v1 "${maintainer}"
 
 curl -fsSL --max-time 60 "${fallback}" -o "${installer}"
-# --install-only avoids opening a browser. Setup is a separate step so the
-# smoke owns the gateway process.
-bash "${installer}" --install-only
+if command -v sha256sum >/dev/null 2>&1; then
+  got_sha="$(sha256sum "${installer}" | awk '{print $1}')"
+else
+  got_sha="$(shasum -a 256 "${installer}" | awk '{print $1}')"
+fi
+if [[ "${got_sha}" != "${want_sha}" ]]; then
+  echo "install.sh SHA-256 ${got_sha} does not match the pin ${want_sha}" >&2
+  exit 1
+fi
+echo "install.sh SHA-256 matches the pin"
+# --install-only avoids opening a browser. The child environment cannot
+# override the head, the maintainer, or the publisher gateway.
+env -u ELASTOS_MAINTAINER_DID -u ELASTOS_PUBLISHER_GATEWAY -u ELASTOS_HEAD_CID \
+  bash "${installer}" --install-only --head-cid "${head_cid}" --maintainer-did "${maintainer}"
 
 runtime_bin="${HOME}/.local/bin/elastos"
 if [[ ! -x "${runtime_bin}" ]]; then

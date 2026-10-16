@@ -43,16 +43,20 @@ export {
 } from './runtimePin';
 export type { ActiveRuntimePin, RuntimePinFile } from './runtimePin';
 export {
-  assertSignedInstaller,
   installRuntime,
   parseReleaseHead,
   pinMismatchField,
   planRuntimeInstall,
   publisherMatchesPin,
   PinMismatchError,
-  UNSIGNED_INSTALLER_MARKERS,
-  UnsignedInstallerError,
 } from './runtimeInstall';
+export {
+  installerChildEnv,
+  sha256Equals,
+  sha256Hex,
+  verifyReleaseHead,
+  ReleaseHeadError,
+} from './releaseHead';
 export { INTEL_MAC_MESSAGE, KVM_MESSAGE, runtimeInstallBlock, wslKvmMessage } from './runtimeSupport';
 export {
   runtimeBinaryPath,
