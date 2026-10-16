@@ -14,17 +14,20 @@ import { runtimeBinaryPath, runtimeComponentsPath, runtimeDataDir } from './runt
 import { findRuntimeBinary, parseRuntimeVersion, probeRuntimeInstallation, RUNTIME_VERSION_ARGS } from './runtimeProbe';
 import { runtimeInstallBlock } from './runtimeSupport';
 import { uninstallRuntime } from './runtimeUninstall';
-import { LaunchTarget } from './types';
-
-function unavailable(action: string): Promise<never> {
-  return Promise.reject(new Error(
-    `ElastOS runtime target cannot ${action} yet. PC2 remains the default. See docs/RUNTIME_MIGRATION.md.`,
-  ));
-}
+import {
+  applyRuntimeUpdate,
+  checkRuntimeUpdate,
+  rollbackRuntime,
+  runRuntimeCommand,
+  runtimeHeadStore,
+  toUpdateCheck,
+} from './runtimeUpdate';
+import { loadActiveRuntimePin } from './runtimePin';
+import { LaunchTarget, UpdateCheck } from './types';
 
 /**
  * Runtime host. Install, start, stop, and uninstall follow the launcher
- * contract. Update still rejects until the next ticket.
+ * contract. Update reads `elastos update --check` stdout and can roll back.
  */
 export function createRuntimeTarget(): LaunchTarget {
   let supervisor: GatewaySupervisor | null = null;
@@ -74,13 +77,32 @@ export function createRuntimeTarget(): LaunchTarget {
       await supervisor.start();
     },
     install: (onProgress) => runtimeInstall.installRuntimeOnThisComputer(onProgress),
-    update: () => unavailable('update'),
+    update: (onProgress) => applyRuntimeUpdate(runRuntimeCommand, runtimeHeadStore(), onProgress),
     uninstall: () => runtimeUninstall(() => supervisor?.stop() ?? Promise.resolve()),
     getVersion: () => readRuntimeVersion(),
-    checkForUpdate: () => unavailable('check for updates'),
+    checkForUpdate: () => runtimeCheckForUpdate(),
     openInBrowser: () => openRuntimeHome(),
     getLogs: async (lines) => supervisor?.getLogs(lines) ?? '',
   };
+}
+
+async function runtimeCheckForUpdate(): Promise<UpdateCheck> {
+  const block = runtimeInstallBlock(process.platform, process.arch);
+  if (block) throw new Error(block);
+  const parsed = await checkRuntimeUpdate(runRuntimeCommand);
+  let releaseUrl = '';
+  try {
+    releaseUrl = loadActiveRuntimePin().publisherGateway;
+  } catch {
+    releaseUrl = '';
+  }
+  return toUpdateCheck(readRuntimeVersion(), parsed, releaseUrl);
+}
+
+export async function rollbackRuntimeUpdate(
+  onProgress: (message: string) => void = () => {},
+): Promise<void> {
+  await rollbackRuntime(runRuntimeCommand, runtimeHeadStore(), onProgress);
 }
 
 function readRuntimeVersion(): string {
