@@ -248,7 +248,7 @@ test('a matching pin installs with --install-only, then setup, and leaves PC2 al
   assert.match(progress.join('\n'), /about 2 minutes/);
 });
 
-test('an interrupted install resumes at setup and does not download again', async () => {
+test('an interrupted install rechecks the signed head and does not download the installer again', async () => {
   const { deps, calls, files } = harness({
     probe: async () => ({
       kind: 'version',
@@ -261,12 +261,13 @@ test('an interrupted install resumes at setup and does not download again', asyn
     sources: [{ name: 'default', head_cid: FIXTURE_HEAD_CID }],
   }));
   await installRuntime(deps, () => {});
-  assert.equal(calls.some((call) => call[0] === 'fetch'), false);
+  const headFetches = calls.filter((call) => call[0] === 'fetch' && String(call[1]).endsWith('/release-head.json'));
+  assert.equal(headFetches.length, 1);
   assert.equal(calls.some((call) => call[0] === 'installer'), false);
   assert.equal(calls.filter((call) => call[0] === 'setup').length, 1);
 });
 
-test('a finished install does not download again', async () => {
+test('a finished install rechecks the signed head and does not download again', async () => {
   const { deps, calls, files } = harness({
     probe: async () => ({
       kind: 'version',
@@ -280,7 +281,34 @@ test('a finished install does not download again', async () => {
     sources: [{ name: 'default', head_cid: FIXTURE_HEAD_CID }],
   }));
   await installRuntime(deps, () => {});
-  assert.deepEqual(calls, []);
+  const headFetches = calls.filter((call) => call[0] === 'fetch' && String(call[1]).endsWith('/release-head.json'));
+  assert.equal(headFetches.length, 1);
+  assert.equal(calls.some((call) => call[0] === 'installer'), false);
+  assert.equal(calls.some((call) => call[0] === 'setup'), false);
+});
+
+test('a local install that matches the pin is refused when the signed head does not', async () => {
+  let setup = false;
+  const { deps, calls, files } = harness({
+    probe: async () => ({
+      kind: 'version',
+      version: `ElastOS Runtime v${FIXTURE_VERSION}`,
+      binaryPath: `${HOME}/.local/bin/elastos`,
+    }),
+    fetchText: async () => SIGNED_HEAD.replace('"version":"0.7.1"', '"version":"0.7.2"'),
+    runSetup: async () => {
+      setup = true;
+      return { stdout: '', stderr: '' };
+    },
+  });
+  files.set(COMPONENTS, '{}');
+  files.set(SOURCES, JSON.stringify({
+    default_source: 'default',
+    sources: [{ name: 'default', head_cid: FIXTURE_HEAD_CID }],
+  }));
+  await assert.rejects(() => installRuntime(deps, () => {}), /signature does not match/);
+  assert.equal(setup, false);
+  assert.equal(calls.some((call) => call[0] === 'installer'), false);
 });
 
 test('Intel Mac gets a friendly message and does not download', async () => {
