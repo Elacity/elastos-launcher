@@ -73,7 +73,14 @@ if ($LASTEXITCODE -ne 0) {
   if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 }
 
-$unix = (& wsl.exe -d $Distro -u root -- wslpath -a (Get-Location).Path).Trim()
+# wsl treats '\' as an escape, so D:\a\repo becomes D:arepo. Forward slashes survive.
+$win = (Get-Location).Path.Replace('\', '/')
+$unixRaw = & wsl.exe -d $Distro -u root -- wslpath -a $win
+if ($null -eq $unixRaw) {
+  Write-Host 'wslpath did not return a Linux path.'
+  exit 1
+}
+$unix = $unixRaw.ToString().Trim()
 Write-Host "repo=$unix"
 if (-not $unix.StartsWith('/')) {
   Write-Host 'wslpath did not return a Linux path.'
