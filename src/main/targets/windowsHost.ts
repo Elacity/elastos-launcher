@@ -2,6 +2,7 @@ import { spawn } from 'child_process';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import { sha256Hex } from './releaseHead';
 
 export type WindowsKind = 'not-windows' | 'enable-wsl' | 'setup-distro' | 'ready';
 
@@ -19,8 +20,13 @@ export interface HostPrompt {
   actionLabel: 'Enable' | 'Set up' | null;
 }
 
+/** Ubuntu 24.04 WSL rootfs, release 20240423. Not the moving `current` alias. */
 export const ELASTOS_ROOTFS_URL =
-  'https://cloud-images.ubuntu.com/wsl/releases/24.04/current/ubuntu-noble-wsl-amd64-wsl.rootfs.tar.gz';
+  'https://cloud-images.ubuntu.com/wsl/releases/24.04/20240423/ubuntu-noble-wsl-amd64-wsl.rootfs.tar.gz';
+export const ELASTOS_ROOTFS_SHA256 =
+  '8251e27ffff381a4af5f41dcb94d867de3e0d9774a9241908ab34555d99315ea';
+export const ELASTOS_ROOTFS_BYTES = 356739129;
+export const ELASTOS_ROOTFS_MAX_BYTES = 400 * 1024 * 1024;
 
 const COMMAND_LEAK = /wsl\.exe|powershell|terminal|command prompt|\bcmd\b|\bbash\b|sudo /i;
 
@@ -127,8 +133,20 @@ export async function ensureElastosRootfs(deps: {
   dest: string;
   exists: (file: string) => boolean;
   download: (url: string, dest: string) => Promise<void>;
+  read?: (file: string) => Buffer;
+  accept?: (bytes: Buffer) => void;
 }): Promise<string> {
-  if (!deps.exists(deps.dest)) await deps.download(ELASTOS_ROOTFS_URL, deps.dest);
+  if (deps.exists(deps.dest)) {
+    if (!deps.read || !deps.accept) return deps.dest;
+    try {
+      deps.accept(deps.read(deps.dest));
+      return deps.dest;
+    } catch {
+      // The cached file is not the pinned rootfs.
+    }
+  }
+  await deps.download(ELASTOS_ROOTFS_URL, deps.dest);
+  if (deps.read && deps.accept) deps.accept(deps.read(deps.dest));
   return deps.dest;
 }
 
@@ -199,16 +217,48 @@ export async function fixWindowsOnThisComputer(): Promise<void> {
         try { return fs.statSync(file).isFile(); } catch { return false; }
       },
       download: downloadToFile,
+      read: (file) => fs.readFileSync(file),
+      accept: assertPinnedRootfs,
     }),
   });
 }
 
 async function downloadToFile(url: string, dest: string): Promise<void> {
+  if (url !== ELASTOS_ROOTFS_URL) {
+    throw new Error('Refusing to download a Linux environment that is not the pinned file.');
+  }
   const response = await fetch(url);
-  if (!response.ok) {
+  if (!response.ok || !response.body) {
     throw new Error('Could not download the Linux environment. Click Set up to try again.');
   }
-  const bytes = Buffer.from(await response.arrayBuffer());
+  const reader = response.body.getReader();
+  const chunks: Buffer[] = [];
+  let total = 0;
+  for (;;) {
+    const step = await reader.read();
+    if (step.done) break;
+    total += step.value.byteLength;
+    if (total > ELASTOS_ROOTFS_MAX_BYTES) {
+      await reader.cancel();
+      throw new Error('The Linux environment download is larger than ElastOS accepts.');
+    }
+    chunks.push(Buffer.from(step.value));
+  }
+  const bytes = Buffer.concat(chunks);
+  assertPinnedRootfs(bytes);
   fs.mkdirSync(path.dirname(dest), { recursive: true });
   fs.writeFileSync(dest, bytes);
+}
+
+/** Refuse a rootfs whose size or SHA-256 is not the pinned release. */
+export function assertPinnedRootfs(bytes: Buffer): void {
+  if (bytes.length > ELASTOS_ROOTFS_MAX_BYTES) {
+    throw new Error('The Linux environment download is larger than ElastOS accepts.');
+  }
+  if (bytes.length !== ELASTOS_ROOTFS_BYTES) {
+    throw new Error('The Linux environment download is not the pinned file.');
+  }
+  if (sha256Hex(bytes) !== ELASTOS_ROOTFS_SHA256) {
+    throw new Error('The Linux environment download does not match the pinned hash.');
+  }
 }
