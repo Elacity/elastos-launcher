@@ -2,6 +2,7 @@ import * as pc2 from './pc2Manager';
 import { createLaunchTargetStore, LaunchTargetPreferenceStore, resolveLaunchTargetId } from './targets/preferences';
 import { createLaunchTarget } from './targets';
 import { setRuntimeLogSink } from './targets/runtimeGateway';
+import { rollbackRuntimeUpdate } from './targets/runtimeTarget';
 import { LaunchTarget, TargetStatus, UpdateCheck } from './targets/types';
 
 export interface LaunchControllerOptions {
@@ -21,6 +22,7 @@ export interface LaunchController {
   install(onProgress: (message: string) => void): Promise<void>;
   update(onProgress: (message: string) => void): Promise<void>;
   uninstall(): Promise<void>;
+  rollback(onProgress?: (message: string) => void): Promise<void>;
   getVersion(): string;
   checkForUpdate(): Promise<UpdateCheck>;
   openInBrowser(): void;
@@ -107,6 +109,11 @@ export function createLaunchController(options: LaunchControllerOptions = {}): L
     install: (onProgress) => (pc2Mode ? target.install(onProgress) : runRuntime(() => target.install(onProgress))),
     update: (onProgress) => (pc2Mode ? target.update(onProgress) : runRuntime(() => target.update(onProgress))),
     uninstall: () => (pc2Mode ? target.uninstall() : runRuntime(() => target.uninstall())),
+    rollback: (onProgress) => (
+      pc2Mode
+        ? Promise.reject(new Error('PC2 does not roll back through the runtime.'))
+        : runRuntime(() => rollbackRuntimeUpdate(onProgress))
+    ),
     getVersion: () => (pc2Mode ? target.getVersion() : runRuntimeSync(() => target.getVersion())),
     checkForUpdate: () => (pc2Mode ? target.checkForUpdate() : runRuntime(() => target.checkForUpdate())),
     openInBrowser: () => {
