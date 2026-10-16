@@ -8,7 +8,24 @@ Sources, read from code rather than READMEs alone:
 - Shipped launcher tag `v1.4.0` (`6e28656`), which is `main` plus six unmerged commits. GitHub's latest launcher release is this tag, not `main`.
 - [`Elacity/elastos-runtime`](https://github.com/Elacity/elastos-runtime), `main` after tag `v0.7.1` (workspace version `0.7.1` in `elastos/Cargo.toml`). Release `v0.7.1` (2026-09-30) has binary tarballs attached.
 
-The product decision this plan assumes: the desktop app keeps launching PC2 until a runtime smoke test is green, then a flag flips the default. PC2 stays selectable through that flip.
+The product decision this plan assumes: the desktop app keeps launching PC2 until a runtime smoke test is green, then the runtime becomes the default. PC2 stays selectable and is deprecated about one month after that launch. There is no import of PC2 data. A runtime home starts empty.
+
+## Founder decisions (2026-10-16)
+
+| Topic | Decision |
+| --- | --- |
+| Update channel | Desktop follows `stable`, published from runtime `main`. Runtime `develop` maps to `canary` and is for testing only. |
+| Install | Each launcher release pins a signed runtime version, head CID, and maintainer DID. If that pinned install fails, fall back to the stamped hosted `install.sh --install-only`. |
+| Existing PC2 data | No import. Fresh runtime home. PC2 stays selectable. |
+| Default flip | Runtime becomes the default once the smoke test is green (`/healthz` is `OK` and `/home/` returns 200). |
+| PC2 lifetime | Deprecated about one month after the runtime launch. Remains selectable through that window. |
+| Windows | Ticket 11: runtime runs in a dedicated WSL2 distro, separate from today's PC2-via-WSL path. |
+| Intel Mac | A `darwin-x64` runtime build and CI will be added. The launcher probes that build the same way as Apple silicon once the binary exists. Native `win32` stays unsupported. |
+| Telemetry | No phone-home telemetry. Local logs only. |
+| Open URL | Still open. The supervised command in this plan remains `elastos gateway --addr 127.0.0.1:8090` and `/home/`. |
+| Remote tunnels | Still open. First runtime launch in this plan binds loopback. |
+
+On 2026-10-16 the public publisher `https://elastos.elacitylabs.com/release-head.json` was channel `canary`, version `0.8.0-alpha.20`, head `QmTAEJ8DAprsv5PbWcudofQwXrzL7ZjSgmhRmU8nqmwirf`, signer `did:key:z6MkgwHd2BCWe1jHMXPiR6H1q1RFPcv1YzhMbK5G1kBarbfe`. That is the testing channel, not the stable pin. A stable head was not published at that URL.
 
 ## 1. How the launcher runs PC2.net today
 
@@ -23,7 +40,7 @@ The launcher is an Electron 28 shell. It does not embed PC2. It clones `Elacity/
 | Renderer | `src/renderer/index.html`, `src/renderer/app.js` | Power button installs when status is `not-installed`, otherwise start/stop. URL label is the literal `localhost:4200`. Location dropdown is `~/.pc2` or `~/pc2.net`. |
 | Tray | `src/main/index.ts` lines 111–129 | "Start PC2" / "Stop PC2" / "Open in Browser". |
 
-There is no second product behind those handlers. `electron-store` is listed in `package.json` and is never imported. Environment, logs, and "which install" live in module memory and reset when the app restarts (`currentEnv` defaults to `'default'` in `src/main/pc2Manager.ts`).
+There is no second product behind those handlers. `electron-store` is a dependency. `src/main/targets/preferences.ts` is the only reader, and `src/main/index.ts` does not import it yet, so a cold start still calls `pc2Manager` only. The PC2 environment dropdown is still process memory and resets to `default` (`currentEnv` in `src/main/pc2Manager.ts`).
 
 ### Where it looks
 
@@ -252,10 +269,11 @@ Descriptors (not executed) record the health URL, open URL, binary, and supporte
 
 Runtime install does not clone the runtime repo and does not run `cargo` on the user's machine.
 
-1. If `~/.local/bin/elastos` runs and `elastos version` prints a version, skip download.
-2. Otherwise run the publisher installer with `--install-only` (or the equivalent steps: verify the signed head, install the binary and `components.json`). The git checkout of `install.sh` is not that script until anchors are stamped.
-3. Run `elastos setup` with the home profile if `components.json` says the profile is absent.
-4. Leave `~/.pc2` in place. Do not rename it, do not import it.
+1. If `~/.local/bin/elastos` runs and `elastos version` prints the pinned version, skip download.
+2. Otherwise install the signed head pinned in that launcher release (version, CID, maintainer DID). Verify the signature. Do not use the unsigned `install.sh` checked into the runtime git tree.
+3. If the pinned install fails, fall back to the stamped hosted `https://elastos.elacitylabs.com/install.sh --install-only`.
+4. Run `elastos setup` for the home profile when `components.json` does not already have it.
+5. Leave `~/.pc2` in place. Do not rename it and do not import it. The runtime home is empty.
 
 PC2 install stays `installPC2()`. The networking gauntlet stays on that path only.
 
@@ -263,7 +281,7 @@ PC2 install stays `installPC2()`. The networking gauntlet stays on that path onl
 
 Runtime start:
 
-- Refuse with a clear message on `darwin/x64` and on native `win32` (descriptor `platforms`).
+- Native `win32` is unsupported. Intel Mac (`darwin/x64`) is a supported probe target once the runtime publishes that build. Until the binary is on disk the probe reports not installed. Do not exec on an unsupported platform.
 - If `host-process.lock` is held, surface the runtime's own "another ElastOS host already owns" error. Do not kill a server the user started in a terminal.
 - Spawn `elastos gateway --addr 127.0.0.1:8090` in its own process group, stdout/stderr into the existing log ring.
 - Poll `http://127.0.0.1:8090/healthz` until the body contains `OK` or 60s elapse (setup can be slower than PC2's 30s node boot).
@@ -275,15 +293,15 @@ PC2 start/stop stay byte-for-byte until the IPC wiring PR, and after that stay t
 ### Update, rollback, coexistence
 
 - PC2 target keeps today's GitHub check + git reset.
-- Runtime target calls `elastos update --check` for the button label and `elastos update --yes` to apply. Rollback is `elastos update --rollback-to <cid>` once the previous head CID is stored next to the target preference. The launcher does not invent its own binary diff.
+- Runtime target calls `elastos update --check` and `elastos update --yes` on channel `stable` (published from runtime `main`). `canary` is only for testing a runtime `develop` build. Rollback is `elastos update --rollback-to <cid>` once the previous head CID is stored next to the target preference. The launcher does not invent its own binary diff.
 - Switching the preference from `runtime` back to `pc2` is the product rollback during the transition. It does not uninstall either tree.
 - Uninstall is per target. The PC2 path guard stays. A runtime uninstall may remove only `~/.local/bin/elastos` and `~/.local/share/elastos`, and only after a confirm dialog that prints those paths.
 
 ### Data and identity
 
-`~/.pc2` is a Puter/PC2 checkout (root package name `puter`) with its own wallet env and node data. The runtime data dir is a different identity and storage layout. Copying one onto the other would mix two products. First runtime launch is a new home. If a later bridge imports documents or keys, that is a runtime feature with its own review, not a `mv` in the launcher.
+`~/.pc2` is a Puter/PC2 checkout (root package name `puter`) with its own wallet env and node data. The runtime data dir is a different identity and storage layout. Founder decision: no PC2 import. First runtime launch is a new home.
 
-Do not add phone-home telemetry. This app's job is a local supervisor for a personal cloud. `electron-log` already writes local logs; the log panel is the support tool. A telemetry pipeline would be a separate product decision.
+No phone-home telemetry. `electron-log` writes local logs. The log panel is the support tool.
 
 LAN QR codes stay PC2-only. The runtime gateway in this plan binds loopback. `--public` starts a tunnel and is out of scope for the first runtime target.
 
@@ -301,14 +319,14 @@ Each ticket is one PR. Done means the check is green, not that the code exists.
 | 1 | Merge launcher `v1.4.0` back to `main` (ffmpeg, cmake, single password prompt, stapled notarization) before any install edits. | `git merge-base --is-ancestor v1.4.0 main` succeeds. Existing tag build workflow still packages macOS, Windows, and Linux. |
 | 2 | Persist `launchTarget` with `electron-store`. Precedence: explicit, then `ELASTOS_LAUNCH_TARGET`, then store, then `pc2`. Still no renderer control and still no runtime spawn. | Unit test covers all four layers. Deleting the store key returns `pc2`. App cold start with no env still calls `pc2Manager` only. |
 | 3 | Point IPC, preload, and tray at `createLaunchTarget` for the PC2 id only. Runtime id still rejects if forced. | Existing PC2 behavior: status, start, stop, install, update, logs. A test (or a main-process harness) asserts the PC2 target methods are the `pc2Manager` functions. Forcing `runtime` shows the stable error in the log panel and does not clone pc2.net. |
-| 4 | Runtime probe only: `~/.local/bin/elastos version` and platform check. No spawn. | On a fixture `PATH`, version parses. `darwin/x64` and `win32` return a typed "unsupported platform" without exec. `npm test` fakes the binary with a shell script. |
+| 4 | Runtime probe only: `~/.local/bin/elastos version` and platform check. No gateway spawn. | On a fixture `PATH`, version parses from a shell-script `elastos`. Native `win32` returns unsupported and does not exec. `darwin/x64` is probed the same way as arm64 (founder is adding that runtime build). |
 | 5 | Runtime repo: one-page launcher contract (command, addr, `/healthz` body, `/home/`, data dir, lock path, exit codes) checked into `elastos-runtime`. Confirm `elastos gateway --addr 127.0.0.1:8090` is the supported supervised Home entry, or add `elastos home --browser --no-open` and point the descriptor at it. | A runtime test already covers `/healthz` == `OK` (`gateway_tests`). The new doc links that test and the CLI flags. Descriptor `startArgs` in this repo updated in the same change if the flag lands. |
 | 6 | Install runtime via the stamped installer `--install-only`, then `elastos setup` for the home profile. Do not `git clone` the runtime. Do not touch `~/.pc2`. | A scripted smoke on Linux x64 and macOS arm64, using a pinned signed head: binary exists, `elastos version` matches the pin, `components.json` exists, `~/.pc2` mtime is unchanged. Unsigned git `install.sh` must fail the test. |
 | 7 | Spawn and health. Process group, poll `/healthz` for `OK`, open `/home/`, stream logs, stop the group, surface a held `host-process.lock` without killing it. | Smoke: start, `curl -fsS http://127.0.0.1:8090/healthz` prints `OK`, `curl -o /dev/null -w '%{http_code}' http://127.0.0.1:8090/home/` is `200`, stop, port refuses connections, no leftover `elastos` child. CI job is `workflow_dispatch` plus a release-branch cron, downloading the pinned runtime tarball or installer, not a full Rust build inside the launcher workflow. |
 | 8 | Runtime update button: `elastos update --check` / `elastos update --yes`. Remember the previous head CID. Add rollback control calling `elastos update --rollback-to`. | Test doubles for the CLI: check parses, apply invokes `--yes`, rollback invokes the stored CID. A live smoke upgrades a fixture one pinned head and rolls it back; `/healthz` is `OK` after both. |
 | 9 | Renderer target control, default still PC2. Copy and the confirm dialog must name the target and the directory. Hide runtime on Intel Mac and native Windows with the unsupported-platform reason. | UI test or a manual pass: cold launch shows PC2 and `localhost:4200`. Choosing runtime does not move `~/.pc2`. Choosing PC2 again starts PC2. Windows/Intel never enable the runtime option. |
-| 10 | Flip the default to `runtime` after ticket 7 has been green on macOS arm64 and Linux x64 for a release candidate. PC2 remains in the control. | Release checklist: new user with empty home gets `/healthz` `OK` and `/home/` `200` from the DMG/deb. Existing `~/.pc2` user is not migrated and can still select PC2. Tag build signs and notarizes as today. |
-| 11 | Windows. Follow `docs/WINDOWS.md`: WSL2 distro, not a native `elastos.exe`. Separate from the PC2 WSL `node dist/index.js` path. | A Windows smoke starts the distro, probes the URL the runtime contract names, and stops it. Until that exists, ticket 9 keeps Windows on PC2. |
+| 10 | Flip the default to `runtime` once the macOS arm64 and Linux x64 smoke is green. PC2 remains selectable and is deprecated about one month after that launch. | Release checklist: new user with an empty home gets `/healthz` `OK` and `/home/` `200` from the DMG/deb. Existing `~/.pc2` is not migrated and can still be selected. Tag build signs and notarizes as today. |
+| 11 | Windows: dedicated WSL2 distro for the runtime, not a native `elastos.exe`, and not the PC2 WSL path that runs `node dist/index.js`. | A Windows smoke starts that distro, probes the contracted URL, and stops it. Until that exists, Windows stays on PC2. |
 
 Tickets 5 and the runtime half of 6 belong in `elastos-runtime`. The rest belong here. Ticket 7 is the smoke the launch depends on: the launcher starts the runtime and gets a healthy response.
 
@@ -325,18 +343,15 @@ Tickets 5 and the runtime half of 6 belong in `elastos-runtime`. The rest belong
 - **Version compare.** `compareVersions` keeps three numeric fields. Runtime versions like `0.7.1-dev` need the runtime's own `update --check`, not that helper.
 - **Single-instance home.** QA that starts `elastos serve` and the launcher together will fail the lock on purpose.
 
-## 7. Open questions for the founder
+## 7. Open questions
 
-1. Is the first desktop launch `elastos gateway --addr 127.0.0.1:8090` opening `/home/`, or is the source-home staging URL (`localhost:61180/apps/home/`) the one you want users on? The code supports both binds; the installer docs say 8090 and `/home/`.
-2. May the launcher shell out to the published `https://elastos.elacitylabs.com/install.sh --install-only`, or do you want a pinned CID and maintainer DID baked into the Electron app at release time?
-3. Which update channel does the desktop app follow: `stable`, `canary`, or a new desktop channel?
-4. Should existing PC2 users be offered a one-time import of anything (files, wallet), or is a new runtime home the launch?
-5. How long must "switch back to PC2" stay in the UI after the default flips?
-6. Is remote access (today's WireGuard / AmneziaWG / sing-box and `.ela.city`) in the first runtime launcher, or does Home stay on loopback until the runtime's own tunnel is the path?
-7. Intel Mac: fail closed (matches the runtime installer), or is a Rosetta runtime binary planned before launch?
-8. Windows at launch: stay on the PC2-via-WSL path, or block on the WSL2 runtime distro in `docs/WINDOWS.md`?
-9. Confirm there is no phone-home telemetry requirement for the launcher.
-10. Who merges tag `v1.4.0` back to `main`? Until that lands, `main` is not the installer you shipped.
+Answered on 2026-10-16: update channel, install pin plus hosted fallback, no PC2 import, one-month PC2 deprecation after launch, runtime default after a green smoke, dedicated WSL2 distro, darwin-x64 runtime build, no telemetry. See the decisions table at the top.
+
+Still open:
+
+1. Confirm the first desktop URL is `http://127.0.0.1:8090/home/` (this plan) rather than the source-home staging URL `http://localhost:61180/apps/home/`.
+2. Is remote access (WireGuard, AmneziaWG, sing-box, `.ela.city`) in the first runtime launcher, or does Home stay on loopback until the runtime's own tunnel is the path?
+3. Who publishes the first `stable` head? The public publisher was serving `canary` `0.8.0-alpha.20` on 2026-10-16, so a stable pin cannot be filled until that head exists.
 
 ## Appendix — evidence index
 

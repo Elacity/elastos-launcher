@@ -20,6 +20,12 @@ export {
   parseLaunchTargetId,
   targetSupportsHost,
 } from './registry';
+export {
+  createLaunchTargetStore,
+  LAUNCH_TARGET_STORE_KEY,
+  resolveLaunchTargetId,
+} from './preferences';
+export type { LaunchTargetPreferenceStore, LaunchTargetSelection } from './preferences';
 export { PC2_TARGET, RUNTIME_TARGET } from './descriptors';
 export type { HealthProbe, LaunchTarget, LaunchTargetDescriptor, LaunchTargetId, TargetStatus, UpdateCheck } from './types';
 
