@@ -10,6 +10,8 @@ const {
   scrubRuntimeLog,
   signalProcessGroup,
   foreignListenerIsElastos,
+  healthListenInodes,
+  pidOwnsSocketInodes,
 } = require('../dist/main/targets/runtimeGateway');
 const { uninstallRuntime } = require('../dist/main/targets/runtimeUninstall');
 
@@ -119,6 +121,7 @@ test('a held host lock opens Home only when the listener is the ElastOS gateway'
       lockText: lock,
       command: '/home/user/.local/bin/elastos gateway --addr 127.0.0.1:8090',
       pidAlive: (pid) => pid === 7,
+      ownsSocket: (pid) => pid === 7,
     }),
   }).start();
   assert.equal(await pending, 'already-running');
@@ -152,6 +155,7 @@ test('a held host lock opens Home only when the listener is the ElastOS gateway'
       lockText: JSON.stringify({ pid: 9, role: 'other', addr: '127.0.0.1:8090' }),
       command: 'python3 -m http.server 8090',
       pidAlive: () => true,
+      ownsSocket: () => true,
     }),
   }).start(), /not the ElastOS gateway/);
   assert.deepEqual(impostor.opened, []);
@@ -159,7 +163,27 @@ test('a held host lock opens Home only when the listener is the ElastOS gateway'
     lockText: lock,
     command: '/home/user/.local/bin/elastos gateway --addr 127.0.0.1:8090',
     pidAlive: () => false,
+    ownsSocket: () => true,
   }), false);
+  assert.equal(foreignListenerIsElastos({
+    lockText: lock,
+    command: '/home/user/.local/bin/elastos gateway --addr 127.0.0.1:8090',
+    pidAlive: () => true,
+    ownsSocket: () => false,
+  }), false);
+});
+
+test('the health socket inode must belong to the lock pid', () => {
+  const tcp = [
+    '  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode',
+    '   0: 0100007F:1F9A 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 4242 1 0000000000000000 100 0 0 10 0',
+    '   1: 00000000:0050 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 9999 1 0000000000000000 100 0 0 10 0',
+  ].join('\n');
+  const inodes = healthListenInodes(tcp);
+  assert.deepEqual([...inodes], ['4242']);
+  assert.equal(pidOwnsSocketInodes(['socket:[4242]', 'pipe:[1]'], inodes), true);
+  assert.equal(pidOwnsSocketInodes(['socket:[9999]'], inodes), false);
+  assert.equal(pidOwnsSocketInodes([], inodes), false);
 });
 
 const REPLACED = 'host executable /bin/elastos was replaced on disk. Exiting stale host.\n';

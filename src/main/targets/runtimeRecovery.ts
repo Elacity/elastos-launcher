@@ -40,6 +40,7 @@ export interface RecoveryDeps {
   removeLock: (lockPath: string) => void;
   enableWindows?: () => Promise<void>;
   healthOk?: () => Promise<boolean>;
+  gatewayIdentity?: () => Promise<boolean>;
 }
 
 const GENERIC = 'Something went wrong. Try again. If it keeps happening, copy diagnostics.';
@@ -138,9 +139,10 @@ export function failureScreen(facts: FailureFacts): FailureScreen {
 export async function applyFix(facts: FailureFacts, deps: RecoveryDeps): Promise<'ready' | 'still-blocked'> {
   const kind = classify(facts);
   if (kind === 'windows') {
-    if (!deps.enableWindows || !deps.healthOk) return 'still-blocked';
+    if (!deps.enableWindows || !deps.healthOk || !deps.gatewayIdentity) return 'still-blocked';
     await deps.enableWindows();
-    return (await deps.healthOk()) ? 'ready' : 'still-blocked';
+    if (!(await deps.healthOk())) return 'still-blocked';
+    return (await deps.gatewayIdentity()) ? 'ready' : 'still-blocked';
   }
   if (kind === 'offline') {
     return (await deps.recheckOnline()) ? 'ready' : 'still-blocked';
@@ -203,9 +205,11 @@ export function collectFailureFacts(error: string, checks: FailureCheck[]): Fail
 export async function windowsFixResult(
   enable: () => Promise<void>,
   health: () => Promise<{ status: number; body: string } | null>,
+  identity: () => Promise<boolean>,
 ): Promise<'ready' | 'still-blocked'> {
   await enable();
-  return isHealthOk(await health()) ? 'ready' : 'still-blocked';
+  if (!isHealthOk(await health())) return 'still-blocked';
+  return (await identity()) ? 'ready' : 'still-blocked';
 }
 
 export async function fixCollectedFailure(facts: FailureFacts): Promise<'ready' | 'still-blocked'> {
@@ -262,7 +266,7 @@ const COPY: Record<Exclude<FailureKind, 'other' | 'windows'>, { title: string; m
   },
   interrupted: {
     title: 'The install did not finish',
-    message: 'ElastOS was downloaded, but setup did not finish. Click Fix it to continue setup without downloading again.',
+    message: 'ElastOS was downloaded, but setup did not finish. Click Fix it to check the signed release again and continue setup. The installer is not downloaded again.',
   },
   'stale-lock': {
     title: 'A previous ElastOS did not close',

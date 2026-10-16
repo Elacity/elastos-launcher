@@ -60,6 +60,7 @@ export function foreignListenerIsElastos(input: {
   lockText: string | null;
   command: string | null;
   pidAlive: (pid: number) => boolean;
+  ownsSocket: (pid: number) => boolean;
 }): boolean {
   if (!input.lockText) return false;
   let parsed: { pid?: unknown; addr?: unknown };
@@ -71,6 +72,7 @@ export function foreignListenerIsElastos(input: {
   if (typeof parsed.pid !== 'number' || !Number.isInteger(parsed.pid) || parsed.pid <= 0) return false;
   if (parsed.addr !== '127.0.0.1:8090') return false;
   if (!input.pidAlive(parsed.pid)) return false;
+  if (!input.ownsSocket(parsed.pid)) return false;
   if (!input.command) return false;
   const command = input.command.trim();
   return /(^|[\\/\s])elastos(\.exe)?(\s|$)/i.test(command) && /\bgateway\b/.test(command);
@@ -97,6 +99,28 @@ export interface GatewaySupervisor {
   openHome(): void;
   getLogs(lines?: number): string;
   phase(): 'running' | 'stopped' | 'starting' | 'stopping' | 'error';
+}
+
+/** Inodes of a LISTEN socket on 127.0.0.1:8090 from `/proc/net/tcp`. */
+export function healthListenInodes(tcp: string, port = 8090): Set<string> {
+  const want = `0100007F:${port.toString(16).toUpperCase().padStart(4, '0')}`;
+  const inodes = new Set<string>();
+  for (const line of tcp.split('\n')) {
+    const parts = line.trim().split(/\s+/);
+    if (parts.length < 10) continue;
+    if (parts[1]?.toUpperCase() !== want) continue;
+    if (parts[3] !== '0A') continue;
+    inodes.add(parts[9]);
+  }
+  return inodes;
+}
+
+export function pidOwnsSocketInodes(fdLinks: readonly string[], inodes: ReadonlySet<string>): boolean {
+  if (inodes.size === 0) return false;
+  return fdLinks.some((link) => {
+    const match = /socket:\[(\d+)\]/.exec(link);
+    return Boolean(match && inodes.has(match[1]));
+  });
 }
 
 export function isHealthOk(result: HealthResult | null): boolean {
@@ -358,7 +382,7 @@ export function createDefaultGatewaySupervisor(binary: string): GatewaySuperviso
   });
 }
 
-function confirmInstalledGateway(): Promise<boolean> {
+export function confirmInstalledGateway(): Promise<boolean> {
   const lockPath = runtimeHostLockPath(runtimeDataDir(process.platform, os.homedir(), process.env));
   let text: string | null = null;
   try {
@@ -384,7 +408,47 @@ function confirmInstalledGateway(): Promise<boolean> {
         return false;
       }
     },
+    ownsSocket: ownsHealthSocket,
   }));
+}
+
+function ownsHealthSocket(pid: number): boolean {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  if (process.platform === 'linux') {
+    let tcp = '';
+    try {
+      tcp = fs.readFileSync('/proc/net/tcp', 'utf8');
+    } catch {
+      return false;
+    }
+    const inodes = healthListenInodes(tcp);
+    const links: string[] = [];
+    try {
+      const dir = `/proc/${pid}/fd`;
+      for (const name of fs.readdirSync(dir)) {
+        try {
+          links.push(fs.readlinkSync(`${dir}/${name}`));
+        } catch {
+          // A descriptor can disappear between readdir and readlink.
+        }
+      }
+    } catch {
+      return false;
+    }
+    return pidOwnsSocketInodes(links, inodes);
+  }
+  if (process.platform === 'darwin') {
+    try {
+      const out = execFileSync('lsof', ['-nP', '-a', '-p', String(pid), '-iTCP:8090', '-sTCP:LISTEN'], {
+        encoding: 'utf8',
+        timeout: 2000,
+      });
+      return out.includes(String(pid)) && /127\.0\.0\.1:8090/.test(out);
+    } catch {
+      return false;
+    }
+  }
+  return false;
 }
 
 function processCommand(pid: number): string | null {
