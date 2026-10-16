@@ -40,3 +40,14 @@ jobs:
       - name: Import the ElastOS WSL2 distro and require /healthz
         shell: pwsh
         run: pwsh -File scripts/windows-elastos-distro.ps1
+
+  rollback:
+    name: rollback (linux-x64)
+    timeout-minutes: 60
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Roll 0.8.0-alpha.20 back to 0.8.0-alpha.19 and forward again
+        run: bash scripts/runtime-rollback.sh
