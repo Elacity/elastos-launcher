@@ -102,11 +102,11 @@ matched="$(cat "${work}/pin.match")"
 installer="${work}/install.sh"
 fallback="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["fallbackInstallerUrl"])' "${pin_file}")"
 
-if [[ "${matched}" == "yes" ]]; then
-  echo "Pinned release matches the publisher. Installing that head."
-else
-  echo "Pinned release does not match the publisher. Falling back to hosted install.sh --install-only."
+if [[ "${matched}" != "yes" ]]; then
+  echo "Pinned release does not match the publisher. Install stopped." >&2
+  exit 1
 fi
+echo "Pinned release matches the publisher. Installing that head."
 
 curl -fsSL --max-time 60 "${fallback}" -o "${installer}"
 # --install-only avoids opening a browser. Setup is a separate step so the
