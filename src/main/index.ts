@@ -1,7 +1,7 @@
 import { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage, shell } from 'electron';
 import * as path from 'path';
 import log from 'electron-log';
-import { createDefaultLaunchController, TargetStatus } from './launchController';
+import { createDefaultLaunchController, finishQuitAfterGatewayStop, TargetStatus } from './launchController';
 import { describeLegacyPc2OnThisComputer, removeLegacyPc2OnThisComputer, withSupportBundle } from './legacyPc2Removal';
 
 const launch = createDefaultLaunchController(process.env);
@@ -27,6 +27,7 @@ if (process.platform === 'darwin') {
 let mainWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
 let isQuitting = false;
+const quitGate = { started: false, ready: false };
 let currentStatus: TargetStatus = 'stopped';
 
 // Configure logging
@@ -234,7 +235,9 @@ app.on('activate', () => {
   }
 });
 
-app.on('before-quit', () => {
+app.on('before-quit', (event) => {
   isQuitting = true;
-  launch.shutdown();
+  void finishQuitAfterGatewayStop(quitGate, event, () => launch.shutdown(), () => {
+    app.quit();
+  });
 });
