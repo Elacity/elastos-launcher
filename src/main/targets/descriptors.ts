@@ -36,7 +36,7 @@ export const PC2_TARGET: LaunchTargetDescriptor = {
 export const RUNTIME_TARGET: LaunchTargetDescriptor = {
   id: 'runtime',
   displayName: 'ElastOS Runtime',
-  implemented: false,
+  implemented: true,
   installDir: '~/.local/share/elastos',
   binary: '~/.local/bin/elastos',
   startArgs: ['gateway', '--addr', '127.0.0.1:8090'],

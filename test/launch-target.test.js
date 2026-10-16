@@ -31,16 +31,16 @@ test('default target is PC2', () => {
   assert.equal(createLaunchTargetFromEnv({ OTHER: 'runtime' }).id, 'pc2');
 });
 
-test('runtime is opt-in and not implemented', async () => {
+test('runtime is opt-in and does not start until it is installed', async () => {
   assert.equal(parseLaunchTargetId('runtime'), 'runtime');
   assert.equal(parseLaunchTargetId('elastos-runtime'), 'runtime');
   assert.equal(currentLaunchTargetId({ [LAUNCH_TARGET_ENV]: 'runtime' }), 'runtime');
 
   const target = createLaunchTarget('runtime');
   assert.equal(target.id, 'runtime');
-  assert.equal(target.descriptor.implemented, false);
-  await assert.rejects(() => target.start(), /cannot start yet/);
-  assert.throws(() => target.getVersion(), /cannot read version yet/);
+  assert.equal(target.descriptor.implemented, true);
+  await assert.rejects(() => target.start(), /not installed yet/);
+  assert.equal(target.getVersion(), 'not installed');
 });
 
 test('unknown target ids fail closed', () => {
@@ -113,8 +113,8 @@ test('forcing runtime logs the stable error and does not install PC2', async () 
     }
     assert.equal(installs, 0);
     assert.equal(runtimeInstalls, 1);
-    await assert.rejects(() => controller.start(), /cannot start yet/);
-    assert.match(logs.join('\n'), /cannot start yet/);
+    await assert.rejects(() => controller.start(), /not installed yet/);
+    assert.match(logs.join('\n'), /not installed yet/);
     assert.equal(controller.target.id, 'runtime');
 
     const stored = createLaunchController({
