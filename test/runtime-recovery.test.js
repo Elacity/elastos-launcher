@@ -1,5 +1,6 @@
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
 
@@ -7,9 +8,11 @@ const {
   applyFix,
   assertStaleLockPath,
   failureScreen,
+  recheckPortWith,
 } = require('../dist/main/targets/runtimeRecovery');
+const { runtimeDataDir, runtimeHostLockPath } = require('../dist/main/targets/runtimePaths');
 
-const LOCK = path.join('/home/tester/.local/share/elastos', 'host-process.lock');
+const LOCK = runtimeHostLockPath(runtimeDataDir(process.platform, os.homedir(), process.env));
 const LOCK_TEXT = JSON.stringify({ pid: 4242, role: 'gateway', addr: '127.0.0.1:8090' });
 
 function facts(overrides = {}) {
@@ -101,6 +104,21 @@ test('a busy port is not cleared by killing another program', async () => {
     recheckPort: async () => 'ours',
   });
   assert.equal(await applyFix(input, ours), 'ready');
+
+  let confirms = 0;
+  assert.equal(await recheckPortWith({
+    portBusy: async () => false,
+    confirm: async () => { confirms += 1; return true; },
+  }), 'free');
+  assert.equal(confirms, 0);
+  assert.equal(await recheckPortWith({
+    portBusy: async () => true,
+    confirm: async () => false,
+  }), 'busy');
+  assert.equal(await recheckPortWith({
+    portBusy: async () => true,
+    confirm: async () => true,
+  }), 'ours');
 });
 
 test('an interrupted install continues setup and does not download', async () => {

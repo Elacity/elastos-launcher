@@ -56,7 +56,12 @@ function createWindow(): void {
 
   mainWindow.once('ready-to-show', async () => {
     mainWindow?.show();
-    
+    const prior = await launch.getLogs();
+    for (const line of prior.split('\n').filter(Boolean)) {
+      log.info(line);
+      mainWindow?.webContents.send('elastos:log', line);
+    }
+
     // Check initial status
     currentStatus = await launch.getStatus();
     mainWindow?.webContents.send('elastos:status', currentStatus);
@@ -203,6 +208,7 @@ ipcMain.handle('elastos:removeLegacyPc2', async (_event, backup: unknown, paths:
 });
 ipcMain.handle('elastos:describeFailure', () => launch.describeFailure());
 ipcMain.handle('elastos:fixFailure', () => launch.fixFailure());
+ipcMain.handle('elastos:resumeInstallPlan', () => launch.resumeInstallPlan());
 ipcMain.handle('elastos:setOpenAtLogin', (_, enabled: boolean) => {
   launch.setOpenAtLogin(enabled);
   return launch.getOpenAtLogin();
@@ -239,5 +245,16 @@ app.on('before-quit', (event) => {
   isQuitting = true;
   void finishQuitAfterGatewayStop(quitGate, event, () => launch.shutdown(), () => {
     app.quit();
+  }, {
+    log: (line) => log.error(line),
+    onStopping: () => {
+      currentStatus = 'stopping';
+      tray?.setToolTip('Stopping ElastOS…');
+      mainWindow?.webContents.send('elastos:status', 'stopping');
+      updateTrayMenu();
+      log.info('Stopping ElastOS before quit.');
+    },
+  }).catch((err: unknown) => {
+    log.error(err instanceof Error ? err.message : String(err));
   });
 });

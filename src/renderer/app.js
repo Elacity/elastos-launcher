@@ -443,6 +443,8 @@ async function refreshLaunch() {
 async function init() {
   try {
     await refreshLaunch();
+    const plan = await window.elastos.resumeInstallPlan();
+    if (plan === 'install') await runInstall();
   } catch (err) {
     console.error('Init error:', err);
     updateStatus('error');

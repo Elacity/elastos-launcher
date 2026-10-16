@@ -136,16 +136,49 @@ export function buildDiagnostics(info: {
 }
 
 const DROP_SUPPORT_LINE = /runtime-coords\.json|gateway-runtime-coords|home-runtime-coords|\bprivate key\b|BEGIN [A-Z0-9 ]*PRIVATE KEY/i;
+const SHIELD_DID = /\bdid:key:z[1-9A-HJ-NP-Za-km-z]+\b/g;
+const SHIELD_CID = /\bQm[1-9A-HJ-NP-Za-km-z]{44,}\b/g;
+const HIGH_ENTROPY = /[A-Za-z0-9+/=_-]{20,}/g;
+
+function shannonEntropy(token: string): number {
+  const counts = new Map<string, number>();
+  for (const ch of token) counts.set(ch, (counts.get(ch) ?? 0) + 1);
+  let entropy = 0;
+  for (const count of counts.values()) {
+    const p = count / token.length;
+    entropy -= p * Math.log2(p);
+  }
+  return entropy;
+}
+
+function shieldKeptTokens(text: string): { text: string; held: string[] } {
+  const held: string[] = [];
+  const shield = (match: string) => {
+    const token = `«kept${held.length}»`;
+    held.push(match);
+    return token;
+  };
+  return { text: text.replace(SHIELD_DID, shield).replace(SHIELD_CID, shield), held };
+}
+
+function restoreKeptTokens(text: string, held: string[]): string {
+  return text.replace(/«kept(\d+)»/g, (_match, index: string) => held[Number(index)] ?? '');
+}
+
+function redactHighEntropy(line: string): string {
+  return line.replace(HIGH_ENTROPY, (token) => (shannonEntropy(token) >= 3.5 ? '[removed]' : token));
+}
 
 /**
- * Drop PEM and coordinate-file lines, and redact secret assignments that
- * share a line with text worth keeping.
+ * Drop PEM and coordinate-file lines, redact labeled secrets, and redact an
+ * unlabeled high-entropy token. Release CIDs and did:key values stay.
  */
 export function scrubSupportText(text: string): string {
-  return text
+  const shielded = shieldKeptTokens(text);
+  const scrubbed = shielded.text
     .split('\n')
     .filter((line) => !DROP_SUPPORT_LINE.test(line))
-    .map((line) => line
+    .map((line) => redactHighEntropy(line
       .replace(/\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/g, '[removed]')
       .replace(/(\battach_secret\s*[:=]\s*)\S+/gi, '$1[removed]')
       .replace(/(\bapi[_-]?key\s*[:=]\s*)\S+/gi, '$1[removed]')
@@ -154,8 +187,9 @@ export function scrubSupportText(text: string): string {
       .replace(/(\bcookie\s*[:=]\s*)\S+/gi, '$1[removed]')
       .replace(/(\bauthorization\s*=\s*)\S+/gi, '$1[removed]')
       .replace(/bearer\s+\S+/gi, 'bearer [removed]')
-      .replace(/password\s*[:=]\s*\S+/gi, 'password [removed]'))
+      .replace(/password\s*[:=]\s*\S+/gi, 'password [removed]')))
     .join('\n');
+  return restoreKeptTokens(scrubbed, shielded.held);
 }
 
 export const SUPPORT_BUNDLE_NAME = 'ElastOS-support.txt';
@@ -169,12 +203,14 @@ export function saveSupportBundle(
   file: string,
   text: string,
   write: (file: string, contents: string) => void,
+  homeDir: string = os.homedir(),
+  platform: string = process.platform,
 ): string {
   if (path.basename(file) !== SUPPORT_BUNDLE_NAME) {
     throw new Error('Refusing to write the support bundle under another name.');
   }
   const normalized = file.split(path.sep).join('/');
-  if (!launcherOwnedDirectories(file) || /\/elastos\//.test(normalized)) {
+  if (!launcherOwnedDirectories(file, homeDir, platform, {}) || /\/elastos\//.test(normalized)) {
     throw new Error('Refusing to store the support bundle inside the ElastOS data directory.');
   }
   write(file, scrubSupportText(text));
@@ -193,7 +229,7 @@ export function saveCollectedSupportBundle(text: string, homeDir = os.homedir())
   return saveSupportBundle(file, text, (target, contents) => {
     fs.mkdirSync(path.dirname(target), { recursive: true });
     fs.writeFileSync(target, contents, { mode: 0o600 });
-  });
+  }, homeDir, process.platform);
 }
 
 export function freeBytes(dir: string): number | null {

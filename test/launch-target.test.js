@@ -11,6 +11,7 @@ const {
   getLaunchTargetDescriptor,
   LAUNCH_TARGET_ENV,
   parseLaunchTargetId,
+  RETIRED_PC2_NOTICE,
   resolveLaunchTargetId,
   targetSupportsHost,
   RUNTIME_TARGET,
@@ -40,29 +41,27 @@ test('unknown target ids fail closed', () => {
   assert.throws(() => parseLaunchTargetId('serve'), /Unknown launch target/);
   assert.throws(() => currentLaunchTargetId({ [LAUNCH_TARGET_ENV]: 'gateway' }), /Unknown launch target/);
   assert.throws(() => resolveLaunchTargetId({ explicit: 'other' }), /Unknown launch target/);
-  assert.throws(() => resolveLaunchTargetId({ explicit: 'pc2' }), /Unknown launch target/);
+  assert.equal(parseLaunchTargetId('pc2'), 'runtime');
+  assert.equal(parseLaunchTargetId(' PC2 '), 'runtime');
+  assert.equal(resolveLaunchTargetId({ explicit: 'pc2' }), 'runtime');
 });
 
-test('ELASTOS_LAUNCH_TARGET=pc2 opens the runtime', () => {
+test('ELASTOS_LAUNCH_TARGET=pc2 opens the runtime', async () => {
   const { createDefaultLaunchController, createLaunchController } = require('../dist/main/launchController');
-  const errors = [];
-  const original = console.error;
-  console.error = (...args) => { errors.push(args.join(' ')); };
-  try {
-    const controller = createDefaultLaunchController({ [LAUNCH_TARGET_ENV]: 'pc2' });
-    assert.equal(controller.target.id, 'runtime');
-  } finally {
-    console.error = original;
-  }
-  assert.match(errors.join('\n'), /pc2 is retired/);
-  assert.throws(
-    () => createLaunchController({ env: { [LAUNCH_TARGET_ENV]: 'pc2' } }),
-    /Unknown launch target/,
-  );
+  const fromEnv = createDefaultLaunchController({ [LAUNCH_TARGET_ENV]: 'pc2' });
+  assert.equal(fromEnv.target.id, 'runtime');
+  assert.match(await fromEnv.getLogs(), new RegExp(RETIRED_PC2_NOTICE.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  const fromExplicit = createLaunchController({ explicit: ' PC2 ', env: {} });
+  assert.equal(fromExplicit.target.id, 'runtime');
+  assert.match(await fromExplicit.getLogs(), /Opening the ElastOS runtime/);
+  const untouched = createLaunchController({ env: {} });
+  assert.equal((await untouched.getLogs()).includes('pc2 is retired'), false);
 });
 
 test('quit waits for the gateway this launcher started and leaves one it did not', async () => {
-  const { createLaunchController, finishQuitAfterGatewayStop } = require('../dist/main/launchController');
+  const { createLaunchController, finishQuitAfterGatewayStop, QUIT_STOP_BUDGET_MS } = require('../dist/main/launchController');
+  const { ForeignGatewayError } = require('../dist/main/targets/runtimeGateway');
+  assert.ok(QUIT_STOP_BUDGET_MS >= 30000);
   const controller = createLaunchController({ env: {} });
   let stopped = false;
   let release;
@@ -101,7 +100,7 @@ test('quit waits for the gateway this launcher started and leaves one it did not
 
   const foreign = createLaunchController({ env: {} });
   foreign.target.stop = async () => {
-    throw new Error('ElastOS is already running. This window did not start it, so Stop leaves it running.');
+    throw new ForeignGatewayError();
   };
   await foreign.shutdown();
   const foreignQuits = [];
@@ -112,6 +111,55 @@ test('quit waits for the gateway this launcher started and leaves one it did not
     () => { foreignQuits.push('quit'); },
   );
   assert.deepEqual(foreignQuits, ['quit']);
+
+  const plain = createLaunchController({ env: {} });
+  plain.target.stop = async () => {
+    throw new Error('ElastOS is already running. This window did not start it, so Stop leaves it running.');
+  };
+  await assert.rejects(() => plain.shutdown(), /did not start it/);
+
+  const unhandled = [];
+  const onUnhandled = (err) => { unhandled.push(err); };
+  process.on('unhandledRejection', onUnhandled);
+  try {
+    const logs = [];
+    const quits = [];
+    let stopped = false;
+    await finishQuitAfterGatewayStop(
+      { started: false, ready: false },
+      { preventDefault() {} },
+      () => new Promise(() => {}),
+      () => { quits.push('quit'); stopped = true; },
+      {
+        budgetMs: 30,
+        log: (line) => logs.push(line),
+        onStopping: () => logs.push('stopping'),
+      },
+    );
+    await finishQuitAfterGatewayStop(
+      { started: false, ready: false },
+      { preventDefault() {} },
+      () => Promise.reject(new Error('shutdown failed')),
+      () => { quits.push('quit'); },
+      { budgetMs: 200, log: (line) => logs.push(line) },
+    );
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(unhandled.length, 0);
+    assert.equal(stopped, true);
+    assert.deepEqual(quits, ['quit', 'quit']);
+    assert.equal(logs.includes('stopping'), true);
+    assert.match(logs.join('\n'), /did not stop before quit finished/);
+    assert.match(logs.join('\n'), /shutdown failed/);
+  } finally {
+    process.off('unhandledRejection', onUnhandled);
+  }
+
+  const main = fs.readFileSync(path.join(__dirname, '../src/main/index.ts'), 'utf8');
+  const app = fs.readFileSync(path.join(__dirname, '../src/renderer/app.js'), 'utf8');
+  assert.match(main, /Stopping ElastOS/);
+  assert.match(main, /elastos:resumeInstallPlan/);
+  assert.equal(main.includes('./targets'), false);
+  assert.match(app, /resumeInstallPlan/);
 });
 
 test('the runtime health contract is the gateway', () => {

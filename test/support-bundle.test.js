@@ -57,6 +57,17 @@ test('the support bundle has versions, health, and platform, and no secrets', ()
   assert.equal(mixed.includes('raw'), false);
   assert.equal(mixed.includes('eyJ'), false);
   assert.match(mixed, /attach_secret=\[removed\]/);
+
+  const cid = 'QmXuy56RTFzXaifTuyCbMb6Ky1p5wuM9iP8eFbMghHxWij';
+  const did = 'did:key:z6MkgwHd2BCWe1jHMXPiR6H1q1RFPcv1YzhMbK5G1kBarbfe';
+  const token = 'aB3dE6fG9hJ2kL5mN8pQ1rS4tU7vW0';
+  const unlabeled = scrubSupportText(`${cid} ${did}\n${token}\nsecret-line\ngateway said hello`);
+  assert.match(unlabeled, new RegExp(cid));
+  assert.match(unlabeled, new RegExp(did.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  assert.equal(unlabeled.includes(token), false);
+  assert.match(unlabeled, /secret-line/);
+  assert.match(unlabeled, /gateway said hello/);
+  assert.match(unlabeled, /\[removed\]/);
 });
 
 test('save support bundle writes only ElastOS-support.txt outside the data dirs', () => {
@@ -67,21 +78,21 @@ test('save support bundle writes only ElastOS-support.txt outside the data dirs'
   const written = new Map();
   saveSupportBundle(file, 'launcher: 1.4.0\nattach_secret=sekrit\n', (target, contents) => {
     written.set(target, contents);
-  });
+  }, home, 'linux');
   assert.equal(written.get(file).includes('sekrit'), false);
   assert.match(written.get(file), /launcher: 1\.4\.0/);
 
   const dotted = [];
   const dottedDesktop = 'C:/Users/jane.doe/Desktop/ElastOS-support.txt';
-  saveSupportBundle(dottedDesktop, 'launcher: 1.4.0\n', (target) => { dotted.push(target); });
+  saveSupportBundle(dottedDesktop, 'launcher: 1.4.0\n', (target) => { dotted.push(target); }, 'C:/Users/jane.doe', 'win32');
   assert.deepEqual(dotted, [dottedDesktop]);
 
   assert.throws(
-    () => saveSupportBundle(path.join(home, '.local/share/elastos/ElastOS-support.txt'), 'x', () => {}),
+    () => saveSupportBundle(path.join(home, '.local/share/elastos/ElastOS-support.txt'), 'x', () => {}, home, 'linux'),
     /ElastOS data directory/,
   );
   assert.throws(
-    () => saveSupportBundle(path.join(home, '.other/ElastOS-support.txt'), 'x', () => {}),
+    () => saveSupportBundle(path.join(home, '.other/ElastOS-support.txt'), 'x', () => {}, home, 'linux'),
     /ElastOS data directory/,
   );
   assert.throws(

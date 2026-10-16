@@ -15,6 +15,8 @@ export {
   getLaunchTargetDescriptor,
   LAUNCH_TARGET_ENV,
   parseLaunchTargetId,
+  RETIRED_PC2_NOTICE,
+  retiredPc2Notice,
   targetSupportsHost,
 } from './registry';
 export { resolveLaunchTargetId } from './preferences';

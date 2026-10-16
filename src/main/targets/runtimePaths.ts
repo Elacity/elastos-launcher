@@ -1,3 +1,4 @@
+import * as os from 'os';
 import * as path from 'path';
 
 /**
@@ -53,45 +54,73 @@ export function runtimeInstallStagePath(homeDir: string): string {
   return runtimeJoin(homeDir, '.elastos-launcher', 'install-stage.json');
 }
 
-/**
- * Exact files the launcher may remove or write, relative to the account home.
- * Anything else, including another data folder under that home, is refused.
- */
-const OWNED_RELATIVE_PATHS = new Set([
-  '.local/bin/elastos',
-  '.local/share/elastos',
-  '.local/share/elastos/host-process.lock',
-  'Library/Application Support/elastos',
-  'Library/Application Support/elastos/host-process.lock',
-  '.elastos-launcher/install-stage.json',
-  'Desktop/ElastOS-support.txt',
-  'ElastOS-support.txt',
-]);
+/** Written when Windows asks for a restart so the next open can continue Install. */
+export function runtimeResumeInstallPath(homeDir: string): string {
+  return runtimeJoin(homeDir, '.elastos-launcher', 'resume-install.json');
+}
 
-function accountNameOk(name: string): boolean {
-  return name !== '.' && name !== '..' && /^[A-Za-z0-9._-]+$/.test(name);
+export const SUPPORT_BUNDLE_FILE = 'ElastOS-support.txt';
+
+function slashPath(file: string): string {
+  return file.replace(/\\/g, '/');
+}
+
+function hasDotSegment(file: string): boolean {
+  return slashPath(file).split('/').some((segment) => segment === '.' || segment === '..');
+}
+
+function isAbsolutePath(file: string): boolean {
+  const normalized = slashPath(file);
+  return normalized.startsWith('/') || /^[A-Za-z]:\//.test(normalized);
+}
+
+function stripTrailingSlash(file: string): string {
+  const normalized = slashPath(file);
+  if (normalized.length > 1 && normalized.endsWith('/')) return normalized.replace(/\/+$/, '');
+  return normalized;
+}
+
+function compareKey(file: string, platform: string): string {
+  const normalized = stripTrailingSlash(file);
+  return platform === 'win32' || platform === 'darwin' ? normalized.toLowerCase() : normalized;
+}
+
+function withinHome(candidate: string, homeDir: string, platform: string): boolean {
+  const home = compareKey(homeDir, platform);
+  const value = compareKey(candidate, platform);
+  if (!home || !value) return false;
+  return value === home || value.startsWith(`${home}/`);
 }
 
 /**
- * True only for a runtime binary, data directory, host lock, install stage,
- * or support bundle under `/home/<account>`, `/Users/<account>`, or
- * `X:/Users/<account>`. A `..` segment never matches.
+ * True only when `file` is an absolute runtime path computed for this account.
+ * The home defaults to `os.homedir()`. A relative path, a `..` segment, another
+ * account, and a data directory outside that home are refused.
  */
-export function launcherOwnedDirectories(file: string): boolean {
-  const segments = file.replace(/\\/g, '/').split('/');
-  if (segments.some((segment) => segment === '.' || segment === '..')) return false;
-  const parts = segments.filter(Boolean);
-  let account = '';
-  let rest: string[] = [];
-  if (parts[0] === 'home' || parts[0] === 'Users') {
-    account = parts[1] || '';
-    rest = parts.slice(2);
-  } else if (/^[A-Za-z]:$/.test(parts[0] || '') && parts[1] === 'Users') {
-    account = parts[2] || '';
-    rest = parts.slice(3);
-  } else {
-    return false;
+export function launcherOwnedDirectories(
+  file: string,
+  homeDir: string = os.homedir(),
+  platform: string = process.platform,
+  env: NodeJS.ProcessEnv = process.env,
+): boolean {
+  if (!file || file.includes('\0') || hasDotSegment(file) || !isAbsolutePath(file)) return false;
+  if (!homeDir || homeDir.includes('\0') || hasDotSegment(homeDir) || !isAbsolutePath(homeDir)) return false;
+  const owned = [
+    runtimeBinaryPath(homeDir),
+    runtimeInstallStagePath(homeDir),
+    runtimeJoin(homeDir, 'Desktop', SUPPORT_BUNDLE_FILE),
+    runtimeJoin(homeDir, SUPPORT_BUNDLE_FILE),
+  ];
+  const xdg = env.XDG_DATA_HOME?.trim() ?? '';
+  const xdgUsable = platform === 'darwin'
+    || !xdg
+    || (!xdg.includes('\0') && !hasDotSegment(xdg) && withinHome(xdg, homeDir, platform));
+  if (xdgUsable) {
+    const data = runtimeDataDir(platform, homeDir, platform === 'darwin' ? {} : env);
+    if (!hasDotSegment(data) && withinHome(data, homeDir, platform)) {
+      owned.push(data, runtimeHostLockPath(data));
+    }
   }
-  if (!accountNameOk(account)) return false;
-  return OWNED_RELATIVE_PATHS.has(rest.join('/'));
+  const key = compareKey(file, platform);
+  return owned.some((candidate) => compareKey(candidate, platform) === key);
 }

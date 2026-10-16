@@ -14,8 +14,12 @@ const {
   legacyPc2DescribeRuns,
   parseWslDistroList,
   isPc2ServiceFile,
-  pkexecPromptMessage,
-  pkexecShouldTrySudo,
+  PKEXEC_SENTINEL,
+  pkexecDismissedMessage,
+  pkexecMissingMessage,
+  pkexecNotAuthorizedMessage,
+  pkexecScriptMessage,
+  runOnePrivilegedRm,
   privilegedRemovalScript,
   removeDiscoveredLegacyPc2,
   removeLegacyPc2,
@@ -427,16 +431,80 @@ test('a shared PM2 unit is not removed as PC2', () => {
 });
 
 test('pkexec exits 126 and 127 do not continue as sudo', () => {
-  assert.equal(pkexecShouldTrySudo(126, ''), false);
-  assert.equal(pkexecShouldTrySudo(127, 'ENOENT'), false);
-  assert.equal(pkexecShouldTrySudo(1, ''), false);
-  assert.equal(pkexecShouldTrySudo(null, 'ENOENT'), true);
-  for (const status of [126, 127]) {
-    const message = pkexecPromptMessage(status);
-    assert.match(message, /administrator prompt could not be shown/);
-    assert.match(message, new RegExp(`pkexec exited ${status}`));
-    assert.match(message, /PC2 system files are still there/);
+  const file = '/etc/systemd/system/pc2.service';
+  const calls = [];
+  function run(command, args) {
+    calls.push(command);
+    assert.equal(command === 'sudo', false);
+    const err = new Error(command);
+    if (calls.length === 1 && command === 'pkexec') {
+      assert.match(args[2], new RegExp(PKEXEC_SENTINEL));
+      assert.match(args[2], /pc2\.service/);
+    }
+    err.code = scenario.code;
+    err.status = scenario.status;
+    err.stdout = scenario.stdout;
+    err.stderr = scenario.stderr;
+    throw err;
   }
+  const scenario = { code: 'ENOENT', status: null, stdout: '', stderr: '' };
+  assert.throws(
+    () => runOnePrivilegedRm([file], { execFileSync: run, platform: 'linux', stillPresent: () => true }),
+    (err) => {
+      assert.equal(err.message, pkexecMissingMessage());
+      return true;
+    },
+  );
+  assert.deepEqual(calls, ['pkexec']);
+
+  calls.length = 0;
+  scenario.code = '';
+  scenario.status = 126;
+  assert.throws(
+    () => runOnePrivilegedRm([file], { execFileSync: run, platform: 'linux', stillPresent: () => true }),
+    (err) => {
+      assert.equal(err.message, pkexecDismissedMessage());
+      assert.match(err.message, /not changed/);
+      return true;
+    },
+  );
+
+  calls.length = 0;
+  scenario.status = 127;
+  assert.throws(
+    () => runOnePrivilegedRm([file], { execFileSync: run, platform: 'linux', stillPresent: () => true }),
+    (err) => {
+      assert.equal(err.message, pkexecNotAuthorizedMessage());
+      return true;
+    },
+  );
+
+  calls.length = 0;
+  scenario.status = 127;
+  scenario.stdout = `${PKEXEC_SENTINEL}\n`;
+  scenario.stderr = 'rm: cannot remove';
+  assert.throws(
+    () => runOnePrivilegedRm([file], { execFileSync: run, platform: 'linux', stillPresent: () => true }),
+    (err) => {
+      assert.equal(err.message, pkexecScriptMessage(127, [file]));
+      assert.equal(err.message.includes('not authorized'), false);
+      assert.match(err.message, /pc2\.service/);
+      return true;
+    },
+  );
+
+  calls.length = 0;
+  scenario.status = 2;
+  scenario.stdout = `${PKEXEC_SENTINEL}\n`;
+  assert.throws(
+    () => runOnePrivilegedRm([file], { execFileSync: run, platform: 'linux', stillPresent: () => false }),
+    (err) => {
+      assert.equal(err.message, pkexecScriptMessage(2, []));
+      assert.equal(err.message.includes('still there'), false);
+      return true;
+    },
+  );
+  assert.equal(calls.includes('sudo'), false);
 });
 
 test('PC2 process selection ignores the ElastOS runtime', () => {

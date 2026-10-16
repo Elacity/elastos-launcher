@@ -18,7 +18,7 @@ try {
   Write-Output 'WSL feature state: not readable without an extra admin query'
 }
 
-Write-Output 'WSL_REBOOT_GAP: a windows-2025 runner cannot finish Install from WSL disabled, because turning Linux support on reboots the machine. Enable runs wsl --install --no-distribution. When that output says reboot or restart, ElastOS says: Restart Windows, then open ElastOS and click Install.'
+Write-Output 'WSL_REBOOT_GAP: a windows-2025 runner cannot finish Install from WSL disabled, because turning Linux support on reboots the machine. Enable runs wsl --install --no-distribution. When that output says reboot or restart, ElastOS says: Restart Windows. When you open ElastOS again, Install continues. The next open continues Install only if Linux support is on.'
 
 node --test test/windows-prompt.test.js
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

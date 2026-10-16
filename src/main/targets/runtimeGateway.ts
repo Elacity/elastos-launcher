@@ -11,6 +11,21 @@ export const ALREADY_OWNS_TEXT = 'another ElastOS host already owns';
 export const EXIT_BINARY_REPLACED = 75;
 export const STOP_GRACE_MS = 15_000;
 
+/** A gateway this window did not start. Callers match the type, not the sentence. */
+export class ForeignGatewayError extends Error {
+  readonly code = 'foreign-gateway';
+
+  constructor() {
+    super('ElastOS is already running. This window did not start it, so Stop leaves it running.');
+    this.name = 'ForeignGatewayError';
+  }
+}
+
+export function isForeignGatewayError(err: unknown): boolean {
+  return err instanceof ForeignGatewayError
+    || (err instanceof Error && (err as { code?: unknown }).code === 'foreign-gateway');
+}
+
 export interface HealthResult {
   status: number;
   body: string;
@@ -282,7 +297,7 @@ export function createGatewaySupervisor(deps: GatewaySupervisorDeps): GatewaySup
       if (!owned) {
         const health = await deps.fetchHealth();
         if (isHealthOk(health)) {
-          throw new Error('ElastOS is already running. This window did not start it, so Stop leaves it running.');
+          throw new ForeignGatewayError();
         }
         foreign = false;
         current = 'stopped';

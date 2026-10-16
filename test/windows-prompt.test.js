@@ -1,5 +1,6 @@
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
 
@@ -16,6 +17,10 @@ const {
   ensureElastosRootfs,
   hostPrompt,
   importDistroArgs,
+  markInstallResumeAfterReboot,
+  planAfterWindowsRestart,
+  resumeInstallPlanOnThisComputer,
+  runHostAction,
   WINDOWS_REBOOT_MESSAGE,
 } = require('../dist/main/targets/windowsHost');
 
@@ -225,6 +230,41 @@ test('distro detection and the rootfs download are explicit', async () => {
   assert.equal(replaced, true);
   assert.equal(downloaded.includes('/current/'), false);
   assert.match(downloaded, /\/20240423\//);
+});
+
+test('the next open continues Install only after Linux support is on', async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'elastos-resume-'));
+  try {
+    assert.equal(planAfterWindowsRestart({ marker: false, wslInstalled: true }), 'none');
+    assert.equal(await resumeInstallPlanOnThisComputer({ homeDir: home, platform: 'win32', wslInstalled: true }), 'none');
+    let marked = 0;
+    await assert.rejects(
+      () => runHostAction('enable-wsl', {
+        spawnHidden: async () => ({ code: 1, stdout: 'A reboot is required.\n', stderr: '' }),
+        onReboot: () => { marked += 1; },
+      }),
+      (err) => {
+        assert.equal(err.message, WINDOWS_REBOOT_MESSAGE);
+        assert.match(err.message, /Install continues/);
+        return true;
+      },
+    );
+    assert.equal(marked, 1);
+    markInstallResumeAfterReboot(home);
+    const marker = path.join(home, '.elastos-launcher', 'resume-install.json');
+    assert.equal(JSON.parse(fs.readFileSync(marker, 'utf8')).resume, 'install');
+    assert.equal(await resumeInstallPlanOnThisComputer({ homeDir: home, platform: 'win32', wslInstalled: false }), 'wait');
+    assert.equal(fs.existsSync(marker), true);
+    assert.equal(await resumeInstallPlanOnThisComputer({ homeDir: home, platform: 'linux' }), 'wait');
+    assert.equal(await resumeInstallPlanOnThisComputer({ homeDir: home, platform: 'win32', wslInstalled: true }), 'install');
+    assert.equal(fs.existsSync(marker), false);
+    const app = fs.readFileSync(path.join(__dirname, '../src/renderer/app.js'), 'utf8');
+    const firstRun = fs.readFileSync(path.join(__dirname, '../docs/FIRST_RUN.md'), 'utf8');
+    assert.match(app, /plan === 'install'/);
+    assert.match(firstRun, /Install continues/);
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+  }
 });
 
 test('enabling Linux support says to restart when Windows asks for a reboot', async () => {
