@@ -367,6 +367,23 @@ Still open:
 2. Is remote access (WireGuard, AmneziaWG, sing-box, `.ela.city`) in the first runtime launcher, or does Home stay on loopback until the runtime's own tunnel is the path?
 3. Who publishes the first `stable` head? The public publisher was serving `canary` `0.8.0-alpha.20` on 2026-10-16, so a stable pin cannot be filled until that head exists.
 
+## 8. Release readiness
+
+Check these before the runtime on `main` is marketed as a live product and this launcher is the no-code way in. The Install button, the gateway supervisor, and the canary pin are in this stack. They are not a signed release by themselves.
+
+- [ ] Land launcher PR #5 (`v1.4.0`) before the tag build. It is the notarization that waits for Apple, fails on rejection, and staples the DMG. This stack is based on `1.2.7`. Merging both onto `main` conflicts in `package.json`: keep version `1.4.0` and the `test` script.
+- [ ] Fill `channels.stable` in `resources/runtime-pin.json`, then change `"active"` from `canary` to `stable`. That `active` field is the channel switch. Until a stable head exists, the pin stays on canary `0.8.0-alpha.20`.
+- [x] Linux x64 click path, local, 2026-10-16, canary `0.8.0-alpha.20`: publisher pin matched, `install.sh --install-only`, `components.json` present, `/healthz` body `OK`, `/home/` HTTP 200, `SIGTERM` then the port closed. `scripts/runtime-smoke.sh` is that path. The GitHub job is still `continue-on-error`.
+- [ ] macOS arm64 job in `.github/workflows/runtime-smoke.yml` green on a real Apple silicon runner. It was not executed in this Linux environment.
+- [ ] Remove `continue-on-error` from the Linux and macOS smoke jobs once both are green.
+- [ ] Windows: the WSL2 job skips with `SMOKE_SKIPPED` when the runner has no distro. A dedicated ElastOS distro is still ticket 11. Do not treat a skip as a passed Windows install. If `/dev/kvm` is missing, the screen says the local Browser needs it.
+- [ ] Intel Mac: the screen says “not yet supported on Intel Macs”. There is no signed `darwin-x64` release in the pin. The version probe can still see a binary later.
+- [ ] Tag build signs and notarizes with the existing secrets (`CSC_LINK`, `CSC_KEY_PASSWORD`, `APPLE_ID`, `APPLE_APP_SPECIFIC_PASSWORD`, `APPLE_TEAM_ID`). This environment has no Apple certificate and did not notarize a build.
+- [ ] No phone-home telemetry. No import of `~/.pc2`. Uninstall of the runtime refuses a PC2 path.
+- [ ] A gateway this launcher did not start is left running. Stop of one it did start is `SIGTERM`, 15 seconds, then `SIGKILL`.
+- [ ] Diagnostics and the log panel do not contain `attach_secret` or the coordinate JSON files.
+- [ ] Live rollback is still unchecked. The public publisher had one canary head, so there was no older signed head to roll back to. The command is covered by a test double.
+
 ## Appendix — evidence index
 
 Launcher (`main` @ `2efa553` unless noted):
