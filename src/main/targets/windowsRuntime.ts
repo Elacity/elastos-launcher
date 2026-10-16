@@ -66,6 +66,23 @@ if not isinstance(pid, int) or pid <= 0:
 os.kill(-pid, signal.SIGKILL if name == 'KILL' else signal.SIGTERM)
 `.trim();
 
+const LOCK_PID_HELPER = `
+import json
+doc = json.load(open('/root/.local/share/elastos/host-process.lock'))
+pid = doc.get('pid')
+if not isinstance(pid, int) or pid <= 0:
+    raise SystemExit(1)
+print(pid)
+`.trim();
+
+const LOCK_ALIVE_HELPER = `
+import os, sys
+pid = int(sys.argv[1])
+if pid <= 0:
+    raise SystemExit(1)
+os.kill(pid, 0)
+`.trim();
+
 const FACTS_HELPER = `
 import json, os
 lock_path = '/root/.local/share/elastos/host-process.lock'
@@ -384,6 +401,17 @@ function runHost(args: readonly string[], timeoutMs: number): Promise<number> {
   });
 }
 
+/** Signal the gateway recorded in the distro host lock. Never uses pid 0. */
+export function signalDistroLock(
+  signal: NodeJS.Signals,
+  stopInside: (name: 'TERM' | 'KILL') => void = (name) => {
+    runWslSync(distroStopArgs(name), undefined, 5000);
+  },
+): void {
+  const name = signal === 'SIGKILL' ? 'KILL' : 'TERM';
+  stopInside(name);
+}
+
 export function signalDistroGateway(
   wslPid: number,
   signal: NodeJS.Signals,
@@ -392,9 +420,8 @@ export function signalDistroGateway(
     runWslSync(distroStopArgs(name), undefined, 5000);
   },
 ): void {
-  const name = signal === 'SIGKILL' ? 'KILL' : 'TERM';
   try {
-    stopInside(name);
+    signalDistroLock(signal, stopInside);
   } catch {
     // The lock may already be gone.
   }
@@ -456,14 +483,65 @@ export function createDistroGatewaySupervisor() {
     openUrl: openRuntimeHome,
     log: emitRuntimeLog,
     confirmForeign: confirmDistroGateway,
-    adoptInstalled: () => ({
-      pid: 0,
-      onOutput() {},
-      onExit() {},
-      hasExited() { return true; },
-      signal(signal) { signalDistroGateway(0, signal); },
-    }),
+    adoptInstalled: () => adoptDistroGatewayProcess(),
   });
+}
+
+/**
+ * The gateway pid inside the ElastOS distro, from its host lock.
+ * Returns null when the lock is missing or the pid is not a positive integer.
+ */
+export function readDistroLockPid(
+  run: (args: readonly string[]) => { code: number; stdout: string } = (args) => runWslSync(args, undefined, 8000),
+): number | null {
+  try {
+    const result = run(['python3', '-c', LOCK_PID_HELPER]);
+    if (result.code !== 0) return null;
+    const pid = Number(String(result.stdout).trim());
+    if (!Number.isInteger(pid) || pid <= 0) return null;
+    return pid;
+  } catch {
+    return null;
+  }
+}
+
+export function distroPidAlive(
+  pid: number,
+  run: (args: readonly string[]) => { code: number } = (args) => runWslSync(args, undefined, 8000),
+): boolean {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    return run(['python3', '-c', LOCK_ALIVE_HELPER, String(pid)]).code === 0;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Adopt the installed distro gateway. The signal goes to that pid's group
+ * inside the distro. hasExited asks the distro whether the pid is still there.
+ * A missing pid is not adopted, and pid 0 is never signaled.
+ */
+export function adoptDistroGatewayProcess(deps: {
+  readPid?: () => number | null;
+  alive?: (pid: number) => boolean;
+  signal?: (pid: number, signal: NodeJS.Signals) => void;
+} = {}): GatewayProcess | null {
+  const readPid = deps.readPid ?? (() => readDistroLockPid());
+  const alive = deps.alive ?? ((pid: number) => distroPidAlive(pid));
+  const signalInside = deps.signal ?? ((pid: number, signal: NodeJS.Signals) => {
+    if (!Number.isInteger(pid) || pid <= 0) return;
+    signalDistroLock(signal);
+  });
+  const pid = readPid();
+  if (pid == null || pid <= 0) return null;
+  return {
+    pid,
+    onOutput() {},
+    onExit() {},
+    hasExited() { return !alive(pid); },
+    signal(signal) { signalInside(pid, signal); },
+  };
 }
 
 export function distroIsInstalled(): boolean {

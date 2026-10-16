@@ -58,7 +58,10 @@ export interface LaunchTarget {
   isInstalled(): Promise<boolean>;
   getStatus(): Promise<TargetStatus>;
   start(): Promise<void>;
+  /** Stop a gateway this window started. Does not adopt one it did not start. */
   stop(): Promise<void>;
+  /** Reset and Uninstall, after the confirm dialog, may adopt the installed gateway. */
+  stopForRemoval(): Promise<void>;
   forceStop?(): void;
   restart(): Promise<void>;
   install(onProgress: (message: string) => void): Promise<void>;

@@ -554,6 +554,51 @@ test('pkexec exits 126 and 127 do not continue as sudo', () => {
   assert.equal(calls.includes('sudo'), false);
 });
 
+test('macOS removal splits AppleScript line endings and does not treat a path as a cancel', () => {
+  const file = '/Library/LaunchDaemons/com.elacity.pc2.plist';
+  const calls = [];
+  const scenario = { stdout: 'ELASTOS_PKEXEC_CHECKED\r', throwMessage: '' };
+  function run(command, args) {
+    calls.push(String(args[1]));
+    if (scenario.throwMessage) {
+      const err = new Error(scenario.throwMessage);
+      err.stdout = '';
+      err.stderr = '';
+      throw err;
+    }
+    return scenario.stdout;
+  }
+  runOnePrivilegedRm([file], { execFileSync: run, platform: 'darwin' });
+  assert.match(calls[0], /without altering line endings/);
+
+  scenario.stdout = `LEFT:${file}\rELASTOS_PKEXEC_CHECKED\n`;
+  assert.throws(
+    () => runOnePrivilegedRm([file], { execFileSync: run, platform: 'darwin' }),
+    (err) => {
+      assert.equal(err.message, pkexecScriptMessage(1, [file]));
+      return true;
+    },
+  );
+
+  scenario.throwMessage = 'osascript failed /tmp/x-128';
+  assert.throws(
+    () => runOnePrivilegedRm([file], { execFileSync: run, platform: 'darwin' }),
+    (err) => {
+      assert.equal(err.message, 'osascript failed /tmp/x-128');
+      return true;
+    },
+  );
+
+  scenario.throwMessage = 'User canceled. (-128)';
+  assert.throws(
+    () => runOnePrivilegedRm([file], { execFileSync: run, platform: 'darwin' }),
+    (err) => {
+      assert.equal(err.message, pkexecDismissedMessage());
+      return true;
+    },
+  );
+});
+
 test('PC2 process selection ignores the ElastOS runtime', () => {
   const pids = selectPc2Pids([
     { pid: 4, command: '/home/tester/.local/bin/elastos gateway' },

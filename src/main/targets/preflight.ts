@@ -144,7 +144,7 @@ export function buildDiagnostics(info: {
 const DROP_SUPPORT_LINE = /runtime-coords\.json|gateway-runtime-coords|home-runtime-coords|\bprivate key\b|BEGIN [A-Z0-9 ]*PRIVATE KEY/i;
 const SHIELD_DID = /\bdid:key:z[1-9A-HJ-NP-Za-km-z]+\b/g;
 const SHIELD_CID = /\bQm[1-9A-HJ-NP-Za-km-z]{44,}\b/g;
-const SHIELD_CID_V1 = /\bb[a-z2-7]{50,}\b/g;
+const SHIELD_CID_V1 = /\bbaf[ykz][a-z2-7]{50,}\b/g;
 const HIGH_ENTROPY = /[A-Za-z0-9+/_-]{20,}/g;
 
 function shannonEntropy(token: string): number {
@@ -188,19 +188,39 @@ function restoreKeptTokens(text: string, held: string[], nonce: string): string 
   });
 }
 
+const KNOWN_SECRET = /^(?:AKIA|ASIA)[0-9A-Z]{16}$|^gh[pousr]_[A-Za-z0-9]{16,}$|^github_pat_[A-Za-z0-9_]{16,}$|^sk-[A-Za-z0-9_-]{16,}$/;
+
+/** A 40- or 64-character hex hash kept on its own or beside a hash label. Other hex of 32 or more is a secret. */
+function isDiagnosticHex(token: string, line: string): boolean {
+  if (token.length !== 40 && token.length !== 64) return false;
+  if (line.trim() === token) return true;
+  return /\b(sha-?256|sha-?1|checksum|hash|cid|commit|installer)\b/i.test(line);
+}
+
 /** Paths, hashes, ids, and names a support bundle needs. A mixed-case secret is not one of these. */
-function keepDiagnosticToken(token: string): boolean {
-  if (/^[0-9a-fA-F]+$/.test(token)) return true;
-  if (/^[0-9a-fA-F-]{32,}$/.test(token) && token.includes('-')) return true;
-  if (/^[A-Z][A-Z0-9_]*$/.test(token)) return true;
-  if (/^b[a-z2-7]{50,}$/.test(token)) return true;
+function keepDiagnosticToken(token: string, line: string): boolean {
+  if (KNOWN_SECRET.test(token)) return false;
+  if (/^[0-9a-fA-F]+$/.test(token)) {
+    if (token.length >= 32) return isDiagnosticHex(token, line);
+    return true;
+  }
+  if (/^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(token)) return true;
+  if (/^[A-Z][A-Z0-9_]*$/.test(token)) {
+    if (token.includes('_') || token.length < 16 || !/\d/.test(token)) return true;
+    return false;
+  }
+  if (/^baf[ykz][a-z2-7]{50,}$/.test(token)) return true;
   if (/^Qm[1-9A-HJ-NP-Za-km-z]{44,}$/.test(token)) return true;
   return false;
 }
 
 function redactHighEntropy(line: string): string {
   return line.replace(HIGH_ENTROPY, (token) => {
-    if (keepDiagnosticToken(token)) return token;
+    if (KNOWN_SECRET.test(token)) return '[removed]';
+    if (keepDiagnosticToken(token, line)) return token;
+    if (/^[0-9a-fA-F]{32,}$/.test(token)) return '[removed]';
+    if (/^[A-Z][A-Z0-9]{15,}$/.test(token) && /\d/.test(token)) return '[removed]';
+    if (/^[a-z0-9]{32,}$/.test(token) && shannonEntropy(token) >= 3.5) return '[removed]';
     const mixed = /[a-z]/.test(token) && /[A-Z]/.test(token) && /\d/.test(token);
     if (mixed && token.length >= 20 && shannonEntropy(token) >= 3.5) return '[removed]';
     return token;
@@ -208,8 +228,10 @@ function redactHighEntropy(line: string): string {
 }
 
 /**
- * Drop PEM and coordinate-file lines. Redact labeled secrets and an unlabeled
- * mixed-case token of 20 or more characters with high entropy. Keep paths, hex hashes, CIDs,
+ * Drop PEM and coordinate-file lines. Redact labeled secrets, known secret
+ * prefixes (AWS keys, ghp_ tokens, sk- keys), hex of 32 or more characters
+ * that is not a 40- or 64-character hash, and an unlabeled mixed-case token
+ * of 20 or more characters with high entropy. Keep paths, those hashes, CIDs,
  * did:key values, versions, UUIDs, and UPPER_SNAKE names. An unlabeled secret
  * shorter than that, or with low entropy, is not redacted.
  */
@@ -224,6 +246,7 @@ export function scrubSupportText(text: string): string {
       .replace(/(\bapi[_-]?key\s*[:=]\s*)\S+/gi, '$1[removed]')
       .replace(/(\baccess_token\s*[:=]\s*)\S+/gi, '$1[removed]')
       .replace(/(\btoken\s*[:=]\s*)\S+/gi, '$1[removed]')
+      .replace(/(\bseed\s*[:=]\s*)\S+/gi, '$1[removed]')
       .replace(/(\bcookie\s*[:=]\s*)\S+/gi, '$1[removed]')
       .replace(/(\bauthorization\s*=\s*)\S+/gi, '$1[removed]')
       .replace(/bearer\s+\S+/gi, 'bearer [removed]')

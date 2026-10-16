@@ -112,7 +112,11 @@ export interface GatewaySupervisorDeps {
 
 export interface GatewaySupervisor {
   start(): Promise<'started' | 'already-running'>;
-  stop(): Promise<void>;
+  /**
+   * Stop the gateway this window started. `adopt` is only for Reset and
+   * Uninstall, after the person confirmed. Quit, Stop, and Restart omit it.
+   */
+  stop(options?: { adopt?: boolean }): Promise<void>;
   /** SIGKILL the process group this supervisor is stopping. Used when quit runs out of time. */
   forceKill(): void;
   openHome(): void;
@@ -297,12 +301,13 @@ export function createGatewaySupervisor(deps: GatewaySupervisorDeps): GatewaySup
         return 'started';
       }
     },
-    async stop() {
+    async stop(options?: { adopt?: boolean }) {
       if (!owned) {
         const health = await deps.fetchHealth();
         if (isHealthOk(health)) {
-          const confirmed = deps.confirmForeign ? await deps.confirmForeign() : false;
-          const adopted = confirmed ? deps.adoptInstalled?.() ?? null : null;
+          const adopted = options?.adopt
+            ? (deps.confirmForeign && await deps.confirmForeign() ? deps.adoptInstalled?.() ?? null : null)
+            : null;
           if (!adopted) throw new ForeignGatewayError();
           owned = adopted;
         } else {

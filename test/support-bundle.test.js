@@ -90,9 +90,33 @@ test('the support bundle has versions, health, and platform, and no secrets', ()
   assert.match(kept, /0\.8\.0-alpha\.21/);
   assert.match(kept, /«kept0»/);
   assert.equal(kept.includes(token), false);
+
+  const aws = 'AKIAIOSFODNN7EXAMPLE';
+  const totp = 'JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP';
+  const ghp = `ghp_${'a1b2c3d4e5f60718'}extra`;
+  const sk = 'sk-abcdefghijklmnopqrstuvwxyz';
+  const hex32 = '0123456789abcdef0123456789abcdef';
+  const lower = 'k3n8q1w7z4m6p0r2t9v5x8c1b4d7f0a2';
+  const bkey = 'bkeymfrggzdfmztwyl2mvtgcz3nmv3gk3tjor2w4zdfoj2gc4tjoq';
+  const labeled = scrubSupportText(`seed=${hash}`);
+  const query = scrubSupportText(`https://example.test/x?s=${hash}`);
+  const secrets = scrubSupportText([aws, totp, ghp, sk, hex32, lower, bkey].join('\n'));
+  for (const secret of [aws, totp, ghp, sk, hex32, lower, bkey, hash]) {
+    if (secret === hash) continue;
+    assert.equal(secrets.includes(secret), false, secret);
+  }
+  assert.match(secrets, /\[removed\]/);
+  assert.equal(labeled.includes(hash), false);
+  assert.match(labeled, /seed=\[removed\]/);
+  assert.equal(query.includes(hash), false);
+  assert.match(scrubSupportText(hash), new RegExp(hash));
+  assert.match(scrubSupportText(`sha256 ${hash}`), new RegExp(hash));
+  assert.match(scrubSupportText('secret-line'), /secret-line/);
+  assert.match(scrubSupportText('ELASTOS_LAUNCH_TARGET=pc2'), /ELASTOS_LAUNCH_TARGET/);
   const doc = fs.readFileSync(path.join(__dirname, '../docs/RUNTIME_MIGRATION.md'), 'utf8');
   assert.match(doc, /unlabeled secret shorter than that, or with low entropy/);
   assert.match(doc, /secret-line/);
+  assert.match(doc, /ghp_/);
 });
 
 test('save support bundle writes only ElastOS-support.txt outside the data dirs', () => {

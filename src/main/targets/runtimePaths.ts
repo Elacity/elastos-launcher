@@ -60,6 +60,11 @@ export function runtimeResumeInstallPath(homeDir: string): string {
   return runtimeJoin(homeDir, '.elastos-launcher', 'resume-install.json');
 }
 
+/** Exclusive claim for that resume. Reset removes it with the marker. */
+export function runtimeResumeInstallLockPath(homeDir: string): string {
+  return `${runtimeResumeInstallPath(homeDir)}.lock`;
+}
+
 export const SUPPORT_BUNDLE_FILE = 'ElastOS-support.txt';
 
 function slashPath(file: string): string {
@@ -111,6 +116,46 @@ export function elastosDataDirMarked(dataDir: string): boolean {
     || isRegularFile(runtimeJoin(dataDir, 'components.json'));
 }
 
+const RUNTIME_DATA_FILES = new Set(['components.json', 'host-process.lock', 'sources.json']);
+
+/**
+ * A custom data directory this launcher may reset: it exists as a real
+ * directory and is empty, or every entry is one of the runtime's own files.
+ * Anything else, including a symlink, is foreign. A missing directory is absent.
+ */
+function customXdgContents(dataDir: string): 'owned' | 'foreign' | 'absent' {
+  let stat: fs.Stats;
+  try {
+    stat = fs.lstatSync(dataDir);
+  } catch {
+    return 'absent';
+  }
+  if (stat.isSymbolicLink() || !stat.isDirectory()) return 'foreign';
+  let names: string[];
+  try {
+    names = fs.readdirSync(dataDir);
+  } catch {
+    return 'foreign';
+  }
+  for (const name of names) {
+    if (!RUNTIME_DATA_FILES.has(name) || !isRegularFile(path.join(dataDir, name))) return 'foreign';
+  }
+  return 'owned';
+}
+
+/** Names the path when a custom data directory holds files Reset must not delete. */
+export function foreignRuntimeDataMessage(
+  dataDir: string,
+  homeDir: string,
+  platform: string,
+  env: NodeJS.ProcessEnv,
+): string | null {
+  const extra = customXdgDataDir(homeDir, platform, env);
+  if (!extra || compareKey(extra, platform) !== compareKey(dataDir, platform)) return null;
+  if (customXdgContents(dataDir) !== 'foreign') return null;
+  return `will not reset ${dataDir} because it contains files that are not part of the runtime. Move those files out, then reset.`;
+}
+
 function customXdgDataDir(
   homeDir: string,
   platform: string,
@@ -127,9 +172,11 @@ function customXdgDataDir(
 
 /**
  * True only for an exact default runtime path of this account, or for an XDG
- * data directory that holds the ElastOS lock or marker. The home defaults to
+ * data directory under that home that is empty, holds only the runtime's own
+ * files, or holds the ElastOS lock or marker. The home defaults to
  * `os.homedir()`. A relative path, a `..` segment, another account, a data
- * directory outside that home, and a bare `<dir>/elastos` are refused.
+ * directory outside that home, and a bare `<dir>/elastos` are refused. A
+ * custom directory that contains anything else is refused by name.
  */
 export function launcherOwnedDirectories(
   file: string,
@@ -145,6 +192,7 @@ export function launcherOwnedDirectories(
     runtimeBinaryPath(homeDir),
     runtimeInstallStagePath(homeDir),
     runtimeResumeInstallPath(homeDir),
+    runtimeResumeInstallLockPath(homeDir),
     runtimeJoin(homeDir, 'Desktop', SUPPORT_BUNDLE_FILE),
     runtimeJoin(homeDir, SUPPORT_BUNDLE_FILE),
   ];
@@ -152,8 +200,11 @@ export function launcherOwnedDirectories(
     owned.push(data, runtimeHostLockPath(data));
   }
   const extra = customXdgDataDir(homeDir, platform, env);
-  if (extra && compareKey(extra, platform) !== compareKey(data, platform) && marked(extra)) {
-    owned.push(extra, runtimeHostLockPath(extra));
+  if (extra && compareKey(extra, platform) !== compareKey(data, platform)) {
+    const contents = customXdgContents(extra);
+    if (contents === 'owned' || (contents !== 'foreign' && marked(extra))) {
+      owned.push(extra, runtimeHostLockPath(extra));
+    }
   }
   const key = compareKey(file, platform);
   return owned.some((candidate) => compareKey(candidate, platform) === key);

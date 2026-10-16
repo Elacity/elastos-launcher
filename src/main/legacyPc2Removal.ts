@@ -1225,7 +1225,7 @@ export function privilegedRemovalScript(
 export function pkexecRemainingFiles(output: string): { checked: boolean; remaining: string[] } {
   const remaining: string[] = [];
   let checked = false;
-  for (const line of output.split(/\r?\n/)) {
+  for (const line of output.split(/\r\n|\r|\n/)) {
     if (line === PKEXEC_CHECKED) checked = true;
     else if (line.startsWith('LEFT:')) remaining.push(line.slice('LEFT:'.length));
   }
@@ -1257,7 +1257,7 @@ export function runOnePrivilegedRm(
     return parsed.checked ? parsed.remaining : files.slice();
   };
   if (platform === 'darwin') {
-    const apple = `do shell script ${JSON.stringify(script)} with administrator privileges`;
+    const apple = `do shell script ${JSON.stringify(script)} with administrator privileges without altering line endings`;
     try {
       const stdout = run('osascript', ['-e', apple], { encoding: 'utf8', timeout: 120000 });
       const remaining = remainingFrom(String(stdout ?? ''));
@@ -1265,7 +1265,7 @@ export function runOnePrivilegedRm(
     } catch (err) {
       if (err instanceof Error && err.message.startsWith('The removal command stopped')) throw err;
       const text = `${err instanceof Error ? err.message : ''}\n${commandOutput(err)}`;
-      if (/user canceled|-\s*128/i.test(text)) throw new Error(pkexecDismissedMessage());
+      if (/user canceled|\(-128\)/i.test(text)) throw new Error(pkexecDismissedMessage());
       throw err;
     }
     return;
