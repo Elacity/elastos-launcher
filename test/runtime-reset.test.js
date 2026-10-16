@@ -4,7 +4,7 @@ const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
 
-const { removeVerifiedTarget, resetRuntime } = require('../dist/main/targets/runtimeUninstall');
+const { removeVerifiedTarget, resetRuntime, sweepRemovalHoldings } = require('../dist/main/targets/runtimeUninstall');
 const { launcherOwnedDirectories } = require('../dist/main/targets/runtimePaths');
 const { ForeignGatewayError } = require('../dist/main/targets/runtimeGateway');
 const flow = require('../src/renderer/flow.js');
@@ -30,6 +30,7 @@ test('reset removes the runtime program, data, and unfinished install', async ()
     '/home/tester/.local/bin/elastos',
     '/home/tester/.local/share/elastos',
     '/home/tester/.elastos-launcher/install-stage.json',
+    '/home/tester/.elastos-launcher/resume-install.json',
   ]);
   assert.deepEqual(removed, calls.slice(1));
 });
@@ -55,9 +56,14 @@ test('a dotted account name is still a launcher path', async () => {
   assert.equal(launcherOwnedDirectories('D:/Profiles/u/.local/bin/elastos', 'D:/Profiles/u', 'win32', {}), true);
   assert.equal(launcherOwnedDirectories('home/u/.local/bin/elastos', '/home/u', 'linux', {}), false);
   assert.equal(launcherOwnedDirectories('/home/other/.local/bin/elastos', '/home/tester', 'linux', {}), false);
-  assert.equal(launcherOwnedDirectories('/home/tester/.xdg/elastos', '/home/tester', 'linux', { XDG_DATA_HOME: '/home/tester/.xdg' }), true);
+  assert.equal(launcherOwnedDirectories('/home/tester/.xdg/elastos', '/home/tester', 'linux', { XDG_DATA_HOME: '/home/tester/.xdg' }), false);
+  assert.equal(launcherOwnedDirectories('/home/tester/elastos', '/home/tester', 'linux', { XDG_DATA_HOME: '/home/tester' }), false);
+  assert.equal(launcherOwnedDirectories('/home/tester/Documents/elastos', '/home/tester', 'linux', { XDG_DATA_HOME: '/home/tester/Documents' }), false);
+  assert.equal(launcherOwnedDirectories('/home/tester/xdg/elastos', '/home/tester', 'linux', { XDG_DATA_HOME: 'xdg' }), false);
+  assert.equal(launcherOwnedDirectories('/home/t2/.local/share/elastos', '/home/t', 'linux', {}), false);
+  assert.equal(launcherOwnedDirectories('/home/tester/.elastos-launcher/resume-install.json', '/home/tester', 'linux', {}), true);
   assert.equal(launcherOwnedDirectories('/var/lib/elastos', '/home/tester', 'linux', { XDG_DATA_HOME: '/var/lib' }), false);
-  assert.equal(launcherOwnedDirectories('/home/tester/.local/share/elastos', '/home/tester', 'linux', { XDG_DATA_HOME: '/var/lib' }), false);
+  assert.equal(launcherOwnedDirectories('/home/tester/.local/share/elastos', '/home/tester', 'linux', { XDG_DATA_HOME: '/var/lib' }), true);
 
   const removed = [];
   await resetRuntime({
@@ -74,6 +80,7 @@ test('a dotted account name is still a launcher path', async () => {
     '/home/jane.doe/.local/bin/elastos',
     '/home/jane.doe/.local/share/elastos',
     '/home/jane.doe/.elastos-launcher/install-stage.json',
+    '/home/jane.doe/.elastos-launcher/resume-install.json',
   ]);
 });
 
@@ -241,6 +248,29 @@ test('real home names are owned and a real symlink is not followed', async () =>
   }
 });
 
+test('an XDG data directory is owned only with the ElastOS lock or marker', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'elastos-xdg-'));
+  try {
+    const home = path.join(root, 'home');
+    const data = path.join(home, 'Documents', 'elastos');
+    fs.mkdirSync(data, { recursive: true });
+    const env = { XDG_DATA_HOME: path.join(home, 'Documents') };
+    assert.equal(launcherOwnedDirectories(data, home, 'linux', env), false);
+    const lock = path.join(data, 'host-process.lock');
+    fs.symlinkSync(path.join(root, 'missing'), lock);
+    assert.equal(launcherOwnedDirectories(data, home, 'linux', env), false);
+    fs.rmSync(lock);
+    fs.writeFileSync(lock, '{}\n');
+    assert.equal(launcherOwnedDirectories(data, home, 'linux', env), true);
+    fs.rmSync(lock);
+    fs.writeFileSync(path.join(data, 'components.json'), '{}\n');
+    assert.equal(launcherOwnedDirectories(data, home, 'linux', env), true);
+    assert.equal(launcherOwnedDirectories(path.join(home, '.local', 'share', 'elastos'), home, 'linux', env), true);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('a replacement between look and delete is not removed', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'elastos-swap-'));
   try {
@@ -276,6 +306,51 @@ test('a replacement between look and delete is not removed', () => {
         fs.symlinkSync(outside, target);
       },
     }), /changed|symlink/);
+    assert.equal(fs.readFileSync(path.join(outside, 'secret'), 'utf8'), 'SECRET');
+
+    fs.rmSync(target, { force: true });
+    fs.writeFileSync(target, 'original');
+    assert.throws(() => removeVerifiedTarget(target, {
+      beforeRename() {
+        fs.rmSync(target);
+        fs.writeFileSync(target, 'decoy');
+      },
+      afterHoldingCheck() {
+        fs.writeFileSync(target, 'SECRET');
+      },
+    }), /changed/);
+    assert.equal(fs.readFileSync(target, 'utf8'), 'SECRET');
+    for (const name of fs.readdirSync(root)) {
+      if (name.startsWith('.elastos-removing-')) fs.rmSync(path.join(root, name), { force: true });
+    }
+
+    fs.rmSync(target, { force: true });
+    fs.mkdirSync(target);
+    assert.throws(() => removeVerifiedTarget(target, {
+      afterHoldingCheck() {
+        const holding = fs.readdirSync(root).find((name) => name.startsWith('.elastos-removing-'));
+        fs.rmSync(path.join(root, holding), { recursive: true, force: true });
+        fs.symlinkSync(outside, path.join(root, holding));
+      },
+    }), /symlink|changed|inspected/);
+    assert.equal(fs.readFileSync(path.join(outside, 'secret'), 'utf8'), 'SECRET');
+
+    for (const name of fs.readdirSync(root)) {
+      if (name.startsWith('.elastos-removing-')) fs.rmSync(path.join(root, name), { force: true });
+    }
+    fs.rmSync(target, { recursive: true, force: true });
+    fs.mkdirSync(target);
+    assert.throws(() => removeVerifiedTarget(target, {
+      remove() { throw new Error('disk full'); },
+    }), /\.elastos-removing-[0-9]+-[0-9a-f]{16}-/);
+    const leaked = fs.readdirSync(root).filter((name) => name.startsWith('.elastos-removing-'));
+    assert.equal(leaked.length, 1);
+    sweepRemovalHoldings(root);
+    assert.equal(fs.existsSync(path.join(root, leaked[0])), false);
+
+    const linked = path.join(root, '.elastos-removing-1-aaaaaaaaaaaaaaaa-elastos');
+    fs.symlinkSync(outside, linked);
+    assert.throws(() => sweepRemovalHoldings(root), /could not finish removing/);
     assert.equal(fs.readFileSync(path.join(outside, 'secret'), 'utf8'), 'SECRET');
   } finally {
     fs.rmSync(root, { recursive: true, force: true });

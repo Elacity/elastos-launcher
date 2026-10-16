@@ -43,6 +43,15 @@ export function createRuntimeTarget(): LaunchTarget {
     return findRuntimeBinary(os.homedir(), process.env.PATH ?? '');
   }
 
+  async function stopGateway(): Promise<void> {
+    if (!supervisor) {
+      supervisor = process.platform === 'win32'
+        ? createDistroGatewaySupervisor()
+        : createDefaultGatewaySupervisor(binary() ?? runtimeBinaryPath(os.homedir()));
+    }
+    await supervisor.stop();
+  }
+
   return {
     id: 'runtime',
     descriptor: RUNTIME_TARGET,
@@ -78,24 +87,18 @@ export function createRuntimeTarget(): LaunchTarget {
       if (!supervisor) supervisor = createDefaultGatewaySupervisor(file);
       await supervisor.start();
     },
-    stop: async () => {
-      if (supervisor) {
-        await supervisor.stop();
-        return;
-      }
-      if (isHealthOk(await readHealth())) {
-        throw new ForeignGatewayError();
-      }
+    stop: () => stopGateway(),
+    forceStop: () => {
+      supervisor?.forceKill();
     },
     restart: async () => {
+      await stopGateway();
       if (process.platform === 'win32') {
-        if (supervisor) await supervisor.stop();
         if (!distroIsInstalled()) throw new Error('ElastOS is not installed yet. Click Install.');
         if (!supervisor) supervisor = createDistroGatewaySupervisor();
         await supervisor.start();
         return;
       }
-      if (supervisor) await supervisor.stop();
       const file = binary();
       if (!file) throw new Error('ElastOS is not installed yet. Click Install.');
       if (!supervisor) supervisor = createDefaultGatewaySupervisor(file);
@@ -103,7 +106,7 @@ export function createRuntimeTarget(): LaunchTarget {
     },
     install: (onProgress) => runtimeInstall.installRuntimeOnThisComputer(onProgress),
     update: (onProgress) => applyRuntimeUpdate(runRuntimeCommand, runtimeHeadStore(), headVerify(), onProgress),
-    uninstall: () => runtimeUninstall(() => supervisor?.stop() ?? Promise.resolve()),
+    uninstall: () => runtimeUninstall(() => stopGateway()),
     getVersion: () => (process.platform === 'win32' ? readDistroVersion() : readRuntimeVersion()),
     checkForUpdate: () => runtimeCheckForUpdate(),
     openInBrowser: () => openRuntimeHome(),

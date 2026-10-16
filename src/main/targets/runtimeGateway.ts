@@ -102,6 +102,8 @@ export interface GatewaySupervisorDeps {
   openUrl: (url: string) => void;
   log: (line: string) => void;
   confirmForeign?: () => Promise<boolean>;
+  /** A process for the installed gateway when this window did not start it. */
+  adoptInstalled?: () => GatewayProcess | null;
   graceMs?: number;
   healthTimeoutMs?: number;
   pollMs?: number;
@@ -111,6 +113,8 @@ export interface GatewaySupervisorDeps {
 export interface GatewaySupervisor {
   start(): Promise<'started' | 'already-running'>;
   stop(): Promise<void>;
+  /** SIGKILL the process group this supervisor is stopping. Used when quit runs out of time. */
+  forceKill(): void;
   openHome(): void;
   getLogs(lines?: number): string;
   phase(): 'running' | 'stopped' | 'starting' | 'stopping' | 'error';
@@ -297,11 +301,15 @@ export function createGatewaySupervisor(deps: GatewaySupervisorDeps): GatewaySup
       if (!owned) {
         const health = await deps.fetchHealth();
         if (isHealthOk(health)) {
-          throw new ForeignGatewayError();
+          const confirmed = deps.confirmForeign ? await deps.confirmForeign() : false;
+          const adopted = confirmed ? deps.adoptInstalled?.() ?? null : null;
+          if (!adopted) throw new ForeignGatewayError();
+          owned = adopted;
+        } else {
+          foreign = false;
+          current = 'stopped';
+          return;
         }
-        foreign = false;
-        current = 'stopped';
-        return;
       }
       intentionalStop = true;
       current = 'stopping';
@@ -320,6 +328,14 @@ export function createGatewaySupervisor(deps: GatewaySupervisorDeps): GatewaySup
       }
       current = 'error';
       throw new Error('ElastOS is still running.');
+    },
+    forceKill() {
+      if (!owned) return;
+      try {
+        owned.signal('SIGKILL');
+      } catch {
+        // Quit still closes. The error from stop() is logged by the caller.
+      }
     },
     openHome() {
       deps.openUrl(HOME_URL);
@@ -398,16 +414,11 @@ export function createDefaultGatewaySupervisor(binary: string): GatewaySuperviso
     openUrl: openRuntimeHome,
     log: (line) => logSink(line),
     confirmForeign: confirmInstalledGateway,
+    adoptInstalled: adoptInstalledGatewayProcess,
   });
 }
 
-export function confirmInstalledGateway(): Promise<boolean> {
-  if (process.platform === 'win32') {
-    const windows = require('./windowsRuntime') as {
-      confirmDistroGateway: () => Promise<boolean>;
-    };
-    return windows.confirmDistroGateway();
-  }
+function readHostLock(): { text: string | null; pid: number } {
   const lockPath = runtimeHostLockPath(runtimeDataDir(process.platform, os.homedir(), process.env));
   let text: string | null = null;
   try {
@@ -422,7 +433,11 @@ export function confirmInstalledGateway(): Promise<boolean> {
   } catch {
     pid = 0;
   }
-  return Promise.resolve(foreignListenerIsElastos({
+  return { text, pid };
+}
+
+function hostLockIsInstalledGateway(text: string | null, pid: number): boolean {
+  return foreignListenerIsElastos({
     lockText: text,
     command: processCommand(pid),
     pidAlive: (id) => {
@@ -434,7 +449,41 @@ export function confirmInstalledGateway(): Promise<boolean> {
       }
     },
     ownsSocket: ownsHealthSocket,
-  }));
+  });
+}
+
+export function confirmInstalledGateway(): Promise<boolean> {
+  if (process.platform === 'win32') {
+    const windows = require('./windowsRuntime') as {
+      confirmDistroGateway: () => Promise<boolean>;
+    };
+    return windows.confirmDistroGateway();
+  }
+  const { text, pid } = readHostLock();
+  return Promise.resolve(hostLockIsInstalledGateway(text, pid));
+}
+
+/** The installed gateway from the host lock, so Stop can signal a process this window did not spawn. */
+export function adoptInstalledGatewayProcess(): GatewayProcess | null {
+  if (process.platform === 'win32') return null;
+  const { text, pid } = readHostLock();
+  if (!hostLockIsInstalledGateway(text, pid) || pid <= 0) return null;
+  return {
+    pid,
+    onOutput() {},
+    onExit() {},
+    hasExited() {
+      try {
+        process.kill(pid, 0);
+        return false;
+      } catch {
+        return true;
+      }
+    },
+    signal(signal) {
+      signalProcessGroup(pid, signal);
+    },
+  };
 }
 
 function ownsHealthSocket(pid: number): boolean {

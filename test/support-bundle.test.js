@@ -68,6 +68,31 @@ test('the support bundle has versions, health, and platform, and no secrets', ()
   assert.match(unlabeled, /secret-line/);
   assert.match(unlabeled, /gateway said hello/);
   assert.match(unlabeled, /\[removed\]/);
+
+  const hash = '5d546fc004fc2435fa142eb8f42ed8de5eb4725963dc22f7e6671014a80eb560';
+  const cidv1 = 'bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi';
+  const uuid = '550e8400-e29b-41d4-a716-446655440000';
+  const kept = scrubSupportText([
+    hash,
+    cidv1,
+    'ELASTOS_LAUNCH_TARGET=pc2 is retired. Opening the ElastOS runtime.',
+    '/usr/local/bin/elastos',
+    uuid,
+    '0.8.0-alpha.21',
+    '«kept0»',
+    token,
+  ].join('\n'));
+  assert.match(kept, new RegExp(hash));
+  assert.match(kept, new RegExp(cidv1));
+  assert.match(kept, /ELASTOS_LAUNCH_TARGET=pc2 is retired/);
+  assert.match(kept, /\/usr\/local\/bin\/elastos/);
+  assert.match(kept, new RegExp(uuid));
+  assert.match(kept, /0\.8\.0-alpha\.21/);
+  assert.match(kept, /«kept0»/);
+  assert.equal(kept.includes(token), false);
+  const doc = fs.readFileSync(path.join(__dirname, '../docs/RUNTIME_MIGRATION.md'), 'utf8');
+  assert.match(doc, /unlabeled secret shorter than that, or with low entropy/);
+  assert.match(doc, /secret-line/);
 });
 
 test('save support bundle writes only ElastOS-support.txt outside the data dirs', () => {

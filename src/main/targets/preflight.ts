@@ -1,10 +1,10 @@
+import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as net from 'net';
 import * as os from 'os';
 import * as path from 'path';
 import { HEALTH_URL } from './runtimeGateway';
 import { launcherOwnedDirectories } from './runtimePaths';
-import { loadActiveRuntimePin } from './runtimePin';
 import { BASH_MESSAGE, detectLinuxLibc, MUSL_MESSAGE, resolveBash } from './hostTools';
 import { runtimeInstallBlock, wslKvmMessage, detectWsl } from './runtimeSupport';
 import { detectWindows, hostPrompt, listDistros, lookupCommand } from './windowsHost';
@@ -29,6 +29,8 @@ export interface PreflightInput {
   portBusy: boolean;
   healthOk: boolean;
   offline: boolean;
+  /** False on a cold open, which does not connect to the publisher. */
+  networkChecked?: boolean;
   wsl: boolean;
   kvm: boolean;
   wslInstalled?: boolean;
@@ -81,9 +83,13 @@ export function evaluatePreflight(input: PreflightInput): PreflightReport {
     checks.push({ id: 'port', level: 'pass', message: 'Port 8090 is free.' });
   }
 
-  checks.push(input.offline
-    ? { id: 'network', level: 'block', message: 'You appear to be offline. Connect to the internet and try again.' }
-    : { id: 'network', level: 'pass', message: 'The network is reachable.' });
+  if (input.networkChecked === false) {
+    checks.push({ id: 'network', level: 'pass', message: 'The network is checked when Install starts.' });
+  } else {
+    checks.push(input.offline
+      ? { id: 'network', level: 'block', message: 'You appear to be offline. Connect to the internet and try again.' }
+      : { id: 'network', level: 'pass', message: 'The network is reachable.' });
+  }
 
   if (input.platform === 'linux' && input.libc === 'musl') {
     checks.push({ id: 'libc', level: 'block', message: MUSL_MESSAGE });
@@ -138,7 +144,8 @@ export function buildDiagnostics(info: {
 const DROP_SUPPORT_LINE = /runtime-coords\.json|gateway-runtime-coords|home-runtime-coords|\bprivate key\b|BEGIN [A-Z0-9 ]*PRIVATE KEY/i;
 const SHIELD_DID = /\bdid:key:z[1-9A-HJ-NP-Za-km-z]+\b/g;
 const SHIELD_CID = /\bQm[1-9A-HJ-NP-Za-km-z]{44,}\b/g;
-const HIGH_ENTROPY = /[A-Za-z0-9+/=_-]{20,}/g;
+const SHIELD_CID_V1 = /\bb[a-z2-7]{50,}\b/g;
+const HIGH_ENTROPY = /[A-Za-z0-9+/_-]{20,}/g;
 
 function shannonEntropy(token: string): number {
   const counts = new Map<string, number>();
@@ -151,27 +158,60 @@ function shannonEntropy(token: string): number {
   return entropy;
 }
 
-function shieldKeptTokens(text: string): { text: string; held: string[] } {
+function shieldNonce(text: string): string {
+  const alphabet = 'abcdefghijklmnopqrstuvwxyz0123456789';
+  for (;;) {
+    const nonce = Array.from(crypto.randomBytes(8), (byte) => alphabet[byte % alphabet.length]).join('');
+    if (!text.includes(nonce)) return nonce;
+  }
+}
+
+function shieldKeptTokens(text: string): { text: string; held: string[]; nonce: string } {
+  const nonce = shieldNonce(text);
   const held: string[] = [];
   const shield = (match: string) => {
-    const token = `«kept${held.length}»`;
+    const token = `\u0000${nonce}${held.length}\u0000`;
     held.push(match);
     return token;
   };
-  return { text: text.replace(SHIELD_DID, shield).replace(SHIELD_CID, shield), held };
+  return {
+    text: text.replace(SHIELD_DID, shield).replace(SHIELD_CID, shield).replace(SHIELD_CID_V1, shield),
+    held,
+    nonce,
+  };
 }
 
-function restoreKeptTokens(text: string, held: string[]): string {
-  return text.replace(/«kept(\d+)»/g, (_match, index: string) => held[Number(index)] ?? '');
+function restoreKeptTokens(text: string, held: string[], nonce: string): string {
+  return text.replace(new RegExp(`\u0000${nonce}(\\d+)\u0000`, 'g'), (match, index: string) => {
+    const value = held[Number(index)];
+    return typeof value === 'string' ? value : match;
+  });
+}
+
+/** Paths, hashes, ids, and names a support bundle needs. A mixed-case secret is not one of these. */
+function keepDiagnosticToken(token: string): boolean {
+  if (/^[0-9a-fA-F]+$/.test(token)) return true;
+  if (/^[0-9a-fA-F-]{32,}$/.test(token) && token.includes('-')) return true;
+  if (/^[A-Z][A-Z0-9_]*$/.test(token)) return true;
+  if (/^b[a-z2-7]{50,}$/.test(token)) return true;
+  if (/^Qm[1-9A-HJ-NP-Za-km-z]{44,}$/.test(token)) return true;
+  return false;
 }
 
 function redactHighEntropy(line: string): string {
-  return line.replace(HIGH_ENTROPY, (token) => (shannonEntropy(token) >= 3.5 ? '[removed]' : token));
+  return line.replace(HIGH_ENTROPY, (token) => {
+    if (keepDiagnosticToken(token)) return token;
+    const mixed = /[a-z]/.test(token) && /[A-Z]/.test(token) && /\d/.test(token);
+    if (mixed && token.length >= 20 && shannonEntropy(token) >= 3.5) return '[removed]';
+    return token;
+  });
 }
 
 /**
- * Drop PEM and coordinate-file lines, redact labeled secrets, and redact an
- * unlabeled high-entropy token. Release CIDs and did:key values stay.
+ * Drop PEM and coordinate-file lines. Redact labeled secrets and an unlabeled
+ * mixed-case token of 20 or more characters with high entropy. Keep paths, hex hashes, CIDs,
+ * did:key values, versions, UUIDs, and UPPER_SNAKE names. An unlabeled secret
+ * shorter than that, or with low entropy, is not redacted.
  */
 export function scrubSupportText(text: string): string {
   const shielded = shieldKeptTokens(text);
@@ -189,7 +229,7 @@ export function scrubSupportText(text: string): string {
       .replace(/bearer\s+\S+/gi, 'bearer [removed]')
       .replace(/password\s*[:=]\s*\S+/gi, 'password [removed]')))
     .join('\n');
-  return restoreKeptTokens(scrubbed, shielded.held);
+  return restoreKeptTokens(scrubbed, shielded.held, shielded.nonce);
 }
 
 export const SUPPORT_BUNDLE_NAME = 'ElastOS-support.txt';
@@ -292,8 +332,8 @@ function connectPublisher(host: string, port: number): Promise<boolean> {
 }
 
 /**
- * Cold open only checks that the publisher host accepts a connection on 443.
- * The signed release head is fetched when the person starts Install.
+ * True when the publisher host does not accept a connection on port 443.
+ * Install fetches the signed release head. A cold open does not call this.
  */
 export async function publisherOffline(
   gateway: string,
@@ -301,14 +341,6 @@ export async function publisherOffline(
 ): Promise<boolean> {
   try {
     return !(await connect(publisherHost(gateway), 443));
-  } catch {
-    return true;
-  }
-}
-
-async function offline(): Promise<boolean> {
-  try {
-    return publisherOffline(loadActiveRuntimePin().publisherGateway);
   } catch {
     return true;
   }
@@ -339,7 +371,8 @@ export async function collectPreflight(
     freeBytes: freeBytes(process.platform === 'win32' ? process.cwd() : '/'),
     portBusy: busy,
     healthOk: healthy,
-    offline: await offline(),
+    offline: false,
+    networkChecked: false,
     wsl: detectWsl(process.env, procVersion),
     kvm: fs.existsSync('/dev/kvm'),
     wslInstalled,

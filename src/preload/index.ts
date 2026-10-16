@@ -32,6 +32,7 @@ contextBridge.exposeInMainWorld('elastos', {
   describeFailure: () => ipcRenderer.invoke('elastos:describeFailure'),
   fixFailure: () => ipcRenderer.invoke('elastos:fixFailure'),
   resumeInstallPlan: () => ipcRenderer.invoke('elastos:resumeInstallPlan'),
+  finishResumeInstall: (ok: boolean) => ipcRenderer.invoke('elastos:finishResumeInstall', ok === true),
   setOpenAtLogin: (enabled: boolean) => ipcRenderer.invoke('elastos:setOpenAtLogin', enabled),
 
   onStatus: (callback: (status: RuntimeStatus) => void) => {
@@ -102,6 +103,7 @@ declare global {
       }>;
       fixFailure: () => Promise<'ready' | 'still-blocked'>;
       resumeInstallPlan: () => Promise<'install' | 'wait' | 'none'>;
+      finishResumeInstall: (ok: boolean) => Promise<void>;
       setOpenAtLogin: (enabled: boolean) => Promise<boolean>;
       onStatus: (callback: (status: RuntimeStatus) => void) => () => void;
       onLog: (callback: (log: string) => void) => () => void;

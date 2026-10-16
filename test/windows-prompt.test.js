@@ -17,6 +17,8 @@ const {
   ensureElastosRootfs,
   hostPrompt,
   importDistroArgs,
+  finishResumeInstall,
+  prepareWindowsImportDir,
   markInstallResumeAfterReboot,
   planAfterWindowsRestart,
   resumeInstallPlanOnThisComputer,
@@ -131,18 +133,31 @@ test('a missing ElastOS distro is one Set up action, and a ready host does not a
   assert.equal(setup.actionLabel, 'Set up');
   assertPromptHasNoCommands(setup);
   const seen = [];
+  const prepared = [];
   await applyWindowsFix(
     { platform: 'win32', arch: 'x64', wslInstalled: true, distroReady: false },
     {
       installDir: 'C:\\ElastOS\\distro',
       ensureRootfs: async () => 'C:\\ElastOS\\rootfs.tar.gz',
+      prepareImportDir: (dir) => prepared.push(dir),
       spawnHidden: async (file, args, options) => {
         seen.push({ file, args: [...args], hide: options.windowsHide });
         return 0;
       },
     },
   );
+  assert.deepEqual(prepared, ['C:\\ElastOS\\distro']);
   assert.deepEqual(seen[0].args, importDistroArgs('C:\\ElastOS\\distro', 'C:\\ElastOS\\rootfs.tar.gz'));
+  const importDir = fs.mkdtempSync(path.join(os.tmpdir(), 'elastos-import-'));
+  const empty = path.join(importDir, 'distro');
+  try {
+    prepareWindowsImportDir(empty);
+    assert.equal(fs.statSync(empty).isDirectory(), true);
+    fs.writeFileSync(path.join(empty, 'keep'), 'x');
+    assert.throws(() => prepareWindowsImportDir(empty), /Click Set up/);
+  } finally {
+    fs.rmSync(importDir, { recursive: true, force: true });
+  }
   assert.equal(seen[0].hide, true);
   assert.equal(seen[0].args.includes('Ubuntu'), false);
 
@@ -256,11 +271,40 @@ test('the next open continues Install only after Linux support is on', async () 
     assert.equal(await resumeInstallPlanOnThisComputer({ homeDir: home, platform: 'win32', wslInstalled: false }), 'wait');
     assert.equal(fs.existsSync(marker), true);
     assert.equal(await resumeInstallPlanOnThisComputer({ homeDir: home, platform: 'linux' }), 'wait');
-    assert.equal(await resumeInstallPlanOnThisComputer({ homeDir: home, platform: 'win32', wslInstalled: true }), 'install');
+    assert.equal(await resumeInstallPlanOnThisComputer({
+      homeDir: home,
+      platform: 'win32',
+      wslInstalled: true,
+      installed: async () => true,
+    }), 'none');
+    assert.equal(fs.existsSync(marker), true);
+    assert.equal(await resumeInstallPlanOnThisComputer({
+      homeDir: home,
+      platform: 'win32',
+      installed: async () => false,
+      detect: async () => { throw new Error('wsl'); },
+    }), 'wait');
+    assert.equal(fs.existsSync(marker), true);
+    const plans = await Promise.all([
+      resumeInstallPlanOnThisComputer({ homeDir: home, platform: 'win32', wslInstalled: true, installed: async () => false }),
+      resumeInstallPlanOnThisComputer({ homeDir: home, platform: 'win32', wslInstalled: true, installed: async () => false }),
+    ]);
+    assert.deepEqual(plans.slice().sort(), ['install', 'none']);
+    assert.equal(fs.existsSync(marker), true);
+    finishResumeInstall(home, false);
+    assert.equal(fs.existsSync(marker), true);
+    assert.equal(await resumeInstallPlanOnThisComputer({
+      homeDir: home,
+      platform: 'win32',
+      wslInstalled: true,
+      installed: async () => false,
+    }), 'install');
+    finishResumeInstall(home, true);
     assert.equal(fs.existsSync(marker), false);
     const app = fs.readFileSync(path.join(__dirname, '../src/renderer/app.js'), 'utf8');
     const firstRun = fs.readFileSync(path.join(__dirname, '../docs/FIRST_RUN.md'), 'utf8');
-    assert.match(app, /plan === 'install'/);
+    assert.match(app, /plan !== 'install'/);
+    assert.match(app, /finishResumeInstall/);
     assert.match(firstRun, /Install continues/);
   } finally {
     fs.rmSync(home, { recursive: true, force: true });

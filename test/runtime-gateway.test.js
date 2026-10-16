@@ -408,6 +408,54 @@ test('stop does not kill a gateway this launcher did not start', async () => {
   assert.deepEqual(world.signals, []);
 });
 
+test('stop adopts an installed gateway this window did not start', async () => {
+  const signals = [];
+  let health = { status: 200, body: 'OK' };
+  let clock = 0;
+  const adopted = fakeProcess(77);
+  adopted.signal = (sig) => {
+    signals.push(sig);
+    if (sig === 'SIGTERM') {
+      health = null;
+      adopted.exit(0);
+    }
+  };
+  const sup = createGatewaySupervisor({
+    binary: '/home/tester/.local/bin/elastos',
+    spawn() { throw new Error('must not spawn'); },
+    fetchHealth: async () => health,
+    sleep: async () => { clock += 1000; },
+    now: () => clock,
+    openUrl: () => {},
+    log: () => {},
+    graceMs: 3000,
+    pollMs: 1000,
+    confirmForeign: async () => true,
+    adoptInstalled: () => adopted,
+  });
+  await sup.stop();
+  assert.deepEqual(signals, ['SIGTERM']);
+  assert.equal(sup.phase(), 'stopped');
+
+  const refused = [];
+  const foreign = createGatewaySupervisor({
+    binary: '/home/tester/.local/bin/elastos',
+    spawn() { throw new Error('must not spawn'); },
+    fetchHealth: async () => ({ status: 200, body: 'OK' }),
+    sleep: async () => {},
+    now: () => 0,
+    openUrl: () => {},
+    log: () => {},
+    confirmForeign: async () => false,
+    adoptInstalled: () => {
+      refused.push('adopt');
+      return adopted;
+    },
+  });
+  await assert.rejects(() => foreign.stop(), (err) => err instanceof ForeignGatewayError);
+  assert.deepEqual(refused, []);
+});
+
 test('logs omit attach secrets', async () => {
   const world = supervisor();
   let polls = 0;

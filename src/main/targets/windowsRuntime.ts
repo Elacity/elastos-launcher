@@ -456,6 +456,13 @@ export function createDistroGatewaySupervisor() {
     openUrl: openRuntimeHome,
     log: emitRuntimeLog,
     confirmForeign: confirmDistroGateway,
+    adoptInstalled: () => ({
+      pid: 0,
+      onOutput() {},
+      onExit() {},
+      hasExited() { return true; },
+      signal(signal) { signalDistroGateway(0, signal); },
+    }),
   });
 }
 

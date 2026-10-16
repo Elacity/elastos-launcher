@@ -60,8 +60,8 @@ test('ELASTOS_LAUNCH_TARGET=pc2 opens the runtime', async () => {
 
 test('quit waits for the gateway this launcher started and leaves one it did not', async () => {
   const { createLaunchController, finishQuitAfterGatewayStop, QUIT_STOP_BUDGET_MS } = require('../dist/main/launchController');
-  const { ForeignGatewayError } = require('../dist/main/targets/runtimeGateway');
-  assert.ok(QUIT_STOP_BUDGET_MS >= 30000);
+  const { ForeignGatewayError, STOP_GRACE_MS } = require('../dist/main/targets/runtimeGateway');
+  assert.ok(QUIT_STOP_BUDGET_MS >= 2 * STOP_GRACE_MS + 3 * 2000);
   const controller = createLaunchController({ env: {} });
   let stopped = false;
   let release;
@@ -154,12 +154,27 @@ test('quit waits for the gateway this launcher started and leaves one it did not
     process.off('unhandledRejection', onUnhandled);
   }
 
+  const order = [];
+  await finishQuitAfterGatewayStop(
+    { started: false, ready: false },
+    { preventDefault() {} },
+    () => new Promise(() => {}),
+    () => { order.push('quit'); },
+    { budgetMs: 30, onBudget: () => { order.push('kill'); } },
+  );
+  assert.deepEqual(order, ['kill', 'quit']);
+
   const main = fs.readFileSync(path.join(__dirname, '../src/main/index.ts'), 'utf8');
   const app = fs.readFileSync(path.join(__dirname, '../src/renderer/app.js'), 'utf8');
   assert.match(main, /Stopping ElastOS/);
   assert.match(main, /elastos:resumeInstallPlan/);
+  assert.match(main, /forceStopGateway/);
   assert.equal(main.includes('./targets'), false);
   assert.match(app, /resumeInstallPlan/);
+  assert.match(app, /finishResumeInstall/);
+  const replay = main.slice(main.indexOf('ready-to-show'), main.indexOf('Check initial status'));
+  assert.match(replay, /elastos:log/);
+  assert.equal(/log\.info/.test(replay), false);
 });
 
 test('the runtime health contract is the gateway', () => {

@@ -56,9 +56,10 @@ function createWindow(): void {
 
   mainWindow.once('ready-to-show', async () => {
     mainWindow?.show();
+    // Replay into this window only. Writing the same lines back to the file
+    // log duplicates them each time macOS creates the window again.
     const prior = await launch.getLogs();
     for (const line of prior.split('\n').filter(Boolean)) {
-      log.info(line);
       mainWindow?.webContents.send('elastos:log', line);
     }
 
@@ -209,6 +210,9 @@ ipcMain.handle('elastos:removeLegacyPc2', async (_event, backup: unknown, paths:
 ipcMain.handle('elastos:describeFailure', () => launch.describeFailure());
 ipcMain.handle('elastos:fixFailure', () => launch.fixFailure());
 ipcMain.handle('elastos:resumeInstallPlan', () => launch.resumeInstallPlan());
+ipcMain.handle('elastos:finishResumeInstall', (_event, ok: unknown) => {
+  launch.finishResumeInstall(ok === true);
+});
 ipcMain.handle('elastos:setOpenAtLogin', (_, enabled: boolean) => {
   launch.setOpenAtLogin(enabled);
   return launch.getOpenAtLogin();
@@ -247,6 +251,7 @@ app.on('before-quit', (event) => {
     app.quit();
   }, {
     log: (line) => log.error(line),
+    onBudget: () => launch.forceStopGateway(),
     onStopping: () => {
       currentStatus = 'stopping';
       tray?.setToolTip('Stopping ElastOS…');
