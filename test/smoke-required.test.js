@@ -1,5 +1,7 @@
 const assert = require('node:assert/strict');
+const { spawnSync } = require('node:child_process');
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
 
@@ -27,4 +29,30 @@ test('a missing wsl.exe fails the Windows job', () => {
   assert.match(windows, /exit \$code\s*$/);
   assert.match(windows, /\.Replace\('\\', '\/'\)/);
   assert.match(windows, /if \(\$null -eq \$unixRaw\) \{\s*Write-Host 'wslpath did not return a Linux path\.'\s*exit 1\s*\}/);
+});
+
+test('the smoke header does not describe a fallback install', () => {
+  const script = fs.readFileSync(path.join(root, 'scripts/runtime-smoke.sh'), 'utf8');
+  const workflowHead = workflow.split('\n').slice(0, 8).join('\n');
+  const scriptHead = script.split('\n').slice(0, 8).join('\n');
+  assert.equal(/falls back/i.test(workflowHead), false);
+  assert.equal(/falls back/i.test(scriptHead), false);
+  assert.match(workflowHead, /install stops/);
+  assert.match(scriptHead, /install stops/);
+});
+
+test('the flattened smoke pin keeps the installer hash', () => {
+  const script = fs.readFileSync(path.join(root, 'scripts/runtime-smoke.sh'), 'utf8');
+  const match = script.match(/python3 - "\$\{raw_pin\}" "\$\{work\}\/pin\.json" <<'PY'\n([\s\S]*?)\nPY/);
+  assert.ok(match, 'smoke flatten block');
+  const pin = path.join(root, 'resources/runtime-pin.json');
+  const out = path.join(os.tmpdir(), `elastos-pin-flat-${process.pid}.json`);
+  const result = spawnSync('python3', ['-', pin, out], { input: match[1], encoding: 'utf8' });
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  const flat = JSON.parse(fs.readFileSync(out, 'utf8'));
+  const raw = JSON.parse(fs.readFileSync(pin, 'utf8'));
+  assert.equal(flat.installerSha256, raw.installerSha256);
+  assert.match(flat.installerSha256, /^[0-9a-f]{64}$/);
+  assert.equal(flat.channel, 'canary');
+  assert.equal(flat.headCid, raw.channels.canary.headCid);
 });
