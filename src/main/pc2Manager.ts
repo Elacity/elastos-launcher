@@ -939,7 +939,190 @@ function commandExists(bin: string): boolean {
   } catch { return false; }
 }
 
+// ─────────────────────────────────────────────────────────────────────
+// Xcode Command Line Tools bootstrap (macOS only, GUI dialog, no terminal)
+//
+// Without CLT, the launcher cannot `git clone` (used to build amneziawg-go
+// and amnezia-wg-tools from source) or invoke `make`. Apple's official
+// install mechanism is `xcode-select --install`, which pops a system
+// dialog asking the user to click "Install". No terminal interaction
+// required; no password required.
+//
+// CLT install runs in a separate Apple process — we cannot wait on it
+// programmatically, so we poll `xcode-select -p` every 10s until it
+// returns success or we hit a 20-minute ceiling.
+// ─────────────────────────────────────────────────────────────────────
+async function ensureXcodeCommandLineTools(onProgress: (msg: string) => void): Promise<void> {
+  if (!IS_MAC) return;
+
+  try {
+    execSync('xcode-select -p', { env: shellEnv, stdio: 'ignore' });
+    emitLog('Xcode Command Line Tools already installed');
+    return;
+  } catch { /* not installed, fall through */ }
+
+  onProgress('Installing Xcode Command Line Tools (Apple system dialog)...');
+  emitLog('Xcode CLT missing — triggering Apple installer GUI dialog');
+
+  // Best-effort trigger. Exits non-zero if installer is already running,
+  // which is fine — we proceed to the polling loop either way.
+  try {
+    execSync('xcode-select --install 2>&1', { env: shellEnv });
+  } catch { /* dialog may already be open */ }
+
+  const MAX_WAIT_MS = 20 * 60 * 1000;
+  const POLL_INTERVAL_MS = 10 * 1000;
+  const startedAt = Date.now();
+
+  while (Date.now() - startedAt < MAX_WAIT_MS) {
+    await new Promise(r => setTimeout(r, POLL_INTERVAL_MS));
+    try {
+      execSync('xcode-select -p', { env: shellEnv, stdio: 'ignore' });
+      emitLog('Xcode Command Line Tools installed');
+      return;
+    } catch {
+      const elapsedMin = Math.floor((Date.now() - startedAt) / 60000);
+      onProgress(`Waiting for Xcode CLT install (${elapsedMin}m elapsed, click 'Install' on the Apple dialog if not done)...`);
+    }
+  }
+
+  throw new Error(
+    'Xcode Command Line Tools install timed out after 20 minutes. ' +
+    'Please complete the Apple installer dialog and click "Install PC2" again.'
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Elevated setup — the SINGLE GUI password prompt of the entire install
+//
+// All operations that need root on macOS are consolidated into one bash
+// script run under one osascript-driven password prompt. After this runs:
+//
+//   • Homebrew is installed (or already present) in its standard prefix
+//   • The brew prefix (/opt/homebrew on Apple Silicon, /usr/local on Intel)
+//     is owned by the regular user, so future `brew install X` runs
+//     without sudo
+//   • /usr/local/bin is owned by the regular user, so the sing-box
+//     manual-download fallback can `cp` into it without sudo
+//   • /etc/sudoers.d/elastos pre-grants NOPASSWD for wg-quick, awg-quick,
+//     killall amneziawg-go, and rm -rf /var/run/amneziawg/ at BOTH
+//     possible brew paths — so runtime VPN operations never prompt
+//
+// Idempotent — re-running this is a no-op when everything is already
+// in place. Skips the prompt entirely on machines that are already set up.
+// ─────────────────────────────────────────────────────────────────────
+async function elevatedSetup(onProgress: (msg: string) => void): Promise<void> {
+  if (!IS_MAC) return; // Linux uses apt-get with its own per-call sudo prompts
+
+  const user = os.userInfo().username;
+  const userUid = os.userInfo().uid;
+  const brewPrefix = IS_ARM ? '/opt/homebrew' : '/usr/local';
+
+  // Detect whether the elevated block is needed at all. If a returning
+  // user already has Homebrew installed, sudoers configured, and
+  // /usr/local/bin user-owned, we skip the password prompt entirely.
+  const brewInstalled = commandExists('brew') || fs.existsSync(`${brewPrefix}/bin/brew`);
+  const sudoersExists = fs.existsSync('/etc/sudoers.d/elastos');
+  let usrLocalBinUserOwned = false;
+  try {
+    usrLocalBinUserOwned = fs.statSync('/usr/local/bin').uid === userUid;
+  } catch { /* dir might not exist on a truly fresh Mac */ }
+
+  if (brewInstalled && sudoersExists && usrLocalBinUserOwned) {
+    emitLog('Privileged setup already complete (skipping password prompt)');
+    return;
+  }
+
+  onProgress('macOS first-time setup — 1 password prompt coming up...');
+  emitLog('One-time password prompt to install Homebrew + configure VPN permissions');
+
+  // The script is idempotent. Every step checks current state before acting,
+  // so re-running after a partial failure is safe.
+  const script = `#!/bin/bash
+set -e
+echo "[elastos-setup] Starting privileged setup at $(date)"
+
+# Pre-create the Homebrew install location with USER ownership so future
+# 'brew install X' calls (which the launcher makes for ffmpeg, cmake,
+# wireguard-tools, go, sing-box) run without ANY sudo prompt.
+echo "[elastos-setup] Pre-staging ${brewPrefix} with user ownership"
+mkdir -p "${brewPrefix}"
+chown -R "${user}":admin "${brewPrefix}" 2>/dev/null || true
+
+# Pre-create /usr/local/bin with user ownership. On Intel Macs this is
+# inside ${brewPrefix} already, but on Apple Silicon /usr/local/bin is
+# a separate, system-owned location that the sing-box manual-download
+# fallback writes to. Pre-chowning makes that 'cp' work without sudo.
+echo "[elastos-setup] Pre-staging /usr/local/bin"
+mkdir -p /usr/local/bin
+chown "${user}":admin /usr/local/bin 2>/dev/null || true
+
+# Install Homebrew if missing. Run as the regular user (Homebrew refuses
+# to run as root) via 'sudo -u'. NONINTERACTIVE=1 skips the 'Press RETURN
+# to continue' prompt. Because ${brewPrefix} is pre-created with user
+# ownership, the installer's internal sudo calls are not needed.
+if [ ! -x "${brewPrefix}/bin/brew" ]; then
+  echo "[elastos-setup] Installing Homebrew (3-5 minutes)..."
+  sudo -u "${user}" -H bash -c 'NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"'
+else
+  echo "[elastos-setup] Homebrew already installed at ${brewPrefix}/bin/brew"
+fi
+
+# Pre-write the consolidated sudoers entry. This grants NOPASSWD for the
+# VPN tools at BOTH possible brew paths (Apple Silicon AND Intel) so the
+# rules apply no matter which brew prefix is in use. The runtime
+# 'wg-quick up' / 'awg-quick up' calls match by absolute path → NOPASSWD
+# applies → no per-tool sudo prompt.
+#
+# 'visudo -c' validates the syntax before we trust the file. A broken
+# sudoers.d entry can lock the user out of sudo entirely, so this check
+# is non-negotiable — if it fails, we delete the file and abort.
+echo "[elastos-setup] Writing /etc/sudoers.d/elastos"
+cat > /etc/sudoers.d/elastos <<'SUDOERS_EOF'
+# Auto-generated by ElastOS Launcher v1.2.9+. Do not edit by hand.
+# Re-generated each time the launcher runs first-time setup.
+${user} ALL=(ALL) NOPASSWD: /opt/homebrew/bin/wg-quick, /usr/local/bin/wg-quick
+${user} ALL=(ALL) NOPASSWD:SETENV: /opt/homebrew/bin/awg-quick, /usr/local/bin/awg-quick
+${user} ALL=(ALL) NOPASSWD: /usr/bin/killall amneziawg-go
+${user} ALL=(ALL) NOPASSWD: /bin/rm -rf /var/run/amneziawg/
+SUDOERS_EOF
+chmod 440 /etc/sudoers.d/elastos
+if ! visudo -c -f /etc/sudoers.d/elastos; then
+  rm -f /etc/sudoers.d/elastos
+  echo "[elastos-setup] FATAL: generated sudoers failed validation — removed"
+  exit 1
+fi
+
+# Clean up legacy per-tool sudoers files from launcher <= v1.2.8. The
+# new /etc/sudoers.d/elastos supersedes both, and leaving them in place
+# wastes a sudoers lookup on every wg-quick/awg-quick invocation.
+rm -f /etc/sudoers.d/wireguard /etc/sudoers.d/amneziawg 2>/dev/null || true
+
+echo "[elastos-setup] Privileged setup complete at $(date)"
+`;
+
+  const tmpScript = path.join(os.tmpdir(), `elastos-setup-${Date.now()}.sh`);
+  fs.writeFileSync(tmpScript, script, { mode: 0o755 });
+
+  try {
+    const { stdout, stderr } = await sudoExec(`bash "${tmpScript}"`);
+    if (stdout && stdout.trim()) emitLog(stdout.trim());
+    if (stderr && stderr.trim()) emitLog(`[elevated-setup-stderr] ${stderr.trim()}`);
+  } finally {
+    try { fs.unlinkSync(tmpScript); } catch { /* best-effort cleanup */ }
+  }
+}
+
 async function setupNetworking(pc2Dir: string, onProgress: (msg: string) => void): Promise<void> {
+  // Bootstrap macOS prerequisites BEFORE anything else. Two GUI dialogs
+  // happen here on a truly fresh Mac (Apple's CLT installer if needed,
+  // then our consolidated password prompt). On a Mac that's already set
+  // up, both are silent no-ops. After these two calls, every subsequent
+  // 'brew install X', 'git clone', and 'wg-quick up' runs without any
+  // further user interaction.
+  await ensureXcodeCommandLineTools(onProgress);
+  await elevatedSetup(onProgress);
+
   const brewPrefix = IS_MAC ? (execSync('brew --prefix 2>/dev/null || echo /usr/local', { env: shellEnv }).toString().trim()) : '';
   const binDir = IS_MAC ? `${brewPrefix}/bin` : '/usr/local/bin';
 
@@ -957,15 +1140,11 @@ async function setupNetworking(pc2Dir: string, onProgress: (msg: string) => void
     } catch (e: any) { emitLog(`WireGuard install warning: ${e.message}`); }
   }
 
-  // WireGuard sudoers
-  const wgQuickPath = commandExists('wg-quick') ? execSync('which wg-quick', { env: shellEnv }).toString().trim() : '';
-  if (wgQuickPath) {
-    try {
-      const user = os.userInfo().username;
-      await sudoExec(`sh -c "echo '${user} ALL=(ALL) NOPASSWD: ${wgQuickPath}' > /etc/sudoers.d/wireguard && chmod 440 /etc/sudoers.d/wireguard"`);
-      emitLog('WireGuard permissions configured');
-    } catch (e: any) { emitLog(`WireGuard sudoers warning: ${e.message}`); }
-  }
+  // WireGuard sudoers — handled upfront by elevatedSetup() on macOS via
+  // /etc/sudoers.d/elastos (wildcard covering both brew paths). Linux
+  // still uses the per-call sudo prompt for apt-get above; no separate
+  // sudoers entry needed because Linux 'wg-quick up' runs via the user's
+  // existing sudo session, not via a NOPASSWD pre-grant.
 
   // AmneziaWG
   if (!commandExists('amneziawg-go')) {
@@ -1011,7 +1190,11 @@ async function setupNetworking(pc2Dir: string, onProgress: (msg: string) => void
     } catch (e: any) { emitLog(`AmneziaWG tools warning: ${e.message}`); }
   }
 
-  // Patch awg-quick
+  // Patch awg-quick to fix upstream bugs (path references that point at
+  // wireguard's runtime dir instead of amneziawg's). On macOS, awg-quick
+  // now lives in a user-owned brew prefix (thanks to elevatedSetup's
+  // pre-chown), so sed can edit it in place without sudo. Linux still
+  // writes to a system path so keeps the sudo prompt.
   if (commandExists('awg-quick')) {
     try {
       const awqPath = execSync('which awg-quick', { env: shellEnv }).toString().trim();
@@ -1019,22 +1202,21 @@ async function setupNetworking(pc2Dir: string, onProgress: (msg: string) => void
       if (content.includes('/var/run/wireguard/$INTERFACE.name') || content.includes('cmd wg ')) {
         emitLog('Patching awg-quick (fixing upstream bugs)...');
         const sedFlag = IS_MAC ? "-i ''" : '-i.bak';
-        await sudoExec(`sed ${sedFlag} -e 's|/var/run/wireguard/\\$INTERFACE\\.name|/var/run/amneziawg/\\$INTERFACE.name|g' -e 's|/var/run/wireguard/\\$REAL_INTERFACE\\.sock|/var/run/amneziawg/\\$REAL_INTERFACE.sock|g' -e 's|cmd wg setconf|cmd awg setconf|g' -e 's|cmd wg showconf|cmd awg showconf|g' -e 's|wg show interfaces|awg show interfaces|g' "${awqPath}" && rm -f "${awqPath}.bak" 2>/dev/null || true`);
+        const sedCmd = `sed ${sedFlag} -e 's|/var/run/wireguard/\\$INTERFACE\\.name|/var/run/amneziawg/\\$INTERFACE.name|g' -e 's|/var/run/wireguard/\\$REAL_INTERFACE\\.sock|/var/run/amneziawg/\\$REAL_INTERFACE.sock|g' -e 's|cmd wg setconf|cmd awg setconf|g' -e 's|cmd wg showconf|cmd awg showconf|g' -e 's|wg show interfaces|awg show interfaces|g' "${awqPath}" && rm -f "${awqPath}.bak" 2>/dev/null || true`;
+        if (IS_MAC) {
+          execSync(sedCmd, { env: shellEnv });
+        } else {
+          await sudoExec(sedCmd);
+        }
         emitLog('awg-quick patched');
       }
     } catch (e: any) { emitLog(`awg-quick patch warning: ${e.message}`); }
   }
 
-  // AmneziaWG sudoers
-  if (commandExists('awg-quick')) {
-    try {
-      const user = os.userInfo().username;
-      const awqPath = execSync('which awg-quick', { env: shellEnv }).toString().trim();
-      const killallPath = commandExists('killall') ? execSync('which killall', { env: shellEnv }).toString().trim() : '/usr/bin/killall';
-      await sudoExec(`sh -c "printf '${user} ALL=(ALL) NOPASSWD:SETENV: ${awqPath}\\n${user} ALL=(ALL) NOPASSWD: ${killallPath} amneziawg-go\\n${user} ALL=(ALL) NOPASSWD: /bin/rm -rf /var/run/amneziawg/\\n' > /etc/sudoers.d/amneziawg && chmod 440 /etc/sudoers.d/amneziawg"`);
-      emitLog('AmneziaWG permissions configured');
-    } catch (e: any) { emitLog(`AmneziaWG sudoers warning: ${e.message}`); }
-  }
+  // AmneziaWG sudoers — handled upfront by elevatedSetup() on macOS via
+  // /etc/sudoers.d/elastos (wildcard covering both brew paths + killall
+  // amneziawg-go + rm -rf /var/run/amneziawg/). No per-tool sudo prompt
+  // here on macOS. Linux uses its existing per-call sudo flow.
 
   // sing-box
   if (!commandExists('sing-box') && !fs.existsSync('/usr/local/bin/sing-box')) {
@@ -1061,6 +1243,54 @@ async function setupNetworking(pc2Dir: string, onProgress: (msg: string) => void
     } catch (e: any) { emitLog(`sing-box install warning: ${e.message}`); }
   }
 
+  // FFmpeg — required by pc2-node's dashPackager for AV1/H.264 transcode at
+  // mint time. Without it, video minting fails with "FFmpeg not found" the
+  // moment the user uploads a video in the Creator app. start-local.sh and
+  // install-arm.sh both install it (see CONTRIBUTING.md Install Parity Rule);
+  // this block restores parity for launcher users.
+  if (!commandExists('ffmpeg')) {
+    onProgress('Installing FFmpeg (media encoder)...');
+    emitLog('Installing FFmpeg — required for video minting...');
+    try {
+      if (IS_MAC) {
+        execSync('brew install ffmpeg 2>&1', { env: shellEnv, timeout: 300000 });
+      } else {
+        await sudoExec('apt-get install -y ffmpeg');
+      }
+      if (commandExists('ffmpeg')) {
+        // libsvtav1 is included in modern ffmpeg builds and unlocks AV1
+        // encoding (smaller files, slower CPU). H.264 always works.
+        const hasAV1 = (() => {
+          try {
+            execSync('ffmpeg -encoders 2>&1 | grep -q libsvtav1', { env: shellEnv });
+            return true;
+          } catch { return false; }
+        })();
+        emitLog(`FFmpeg installed (${hasAV1 ? 'AV1 + H.264' : 'H.264 only'})`);
+      } else {
+        emitLog('FFmpeg install completed but binary not on PATH — video minting may not work');
+      }
+    } catch (e: any) { emitLog(`FFmpeg install warning: ${e.message} — video minting may not work`); }
+  }
+
+  // cmake — needed by node-datachannel's source-build fallback when no
+  // prebuild matches the user's Node ABI. Prebuilds usually cover us, but
+  // when they don't, the install dies with "OMG CMake executable is missing"
+  // and the user has to manually `brew install cmake` and retry. Same
+  // parity issue as ffmpeg: start-local.sh installs it, launcher didn't.
+  if (!commandExists('cmake')) {
+    onProgress('Installing cmake (native build dep)...');
+    emitLog('Installing cmake — fallback for native module compilation...');
+    try {
+      if (IS_MAC) {
+        execSync('brew install cmake 2>&1', { env: shellEnv, timeout: 120000 });
+      } else {
+        await sudoExec('apt-get install -y cmake');
+      }
+      if (commandExists('cmake')) emitLog('cmake installed');
+    } catch (e: any) { emitLog(`cmake install warning: ${e.message}`); }
+  }
+
   // Particle auth .env
   const particleEnv = path.join(pc2Dir, 'packages', 'particle-auth', '.env');
   if (!fs.existsSync(particleEnv)) {
@@ -1084,6 +1314,15 @@ export async function installPC2(onProgress: (message: string) => void): Promise
   const nodeDir = IS_WINDOWS ? getWSLNodeDir() : getPC2NodeDir();
   
   emitLog(`Installing PC2 to ${pc2Dir}...`);
+
+  // macOS: ensure Command Line Tools (which provide `git`) exist BEFORE the
+  // first git step below. Without this, a clean Mac shows a false "Error" —
+  // `git clone` triggers Apple's CLT install dialog AND exits non-zero, the
+  // install loop rejects, and the UI flips to Error even though the tools are
+  // downloading fine in the background. ensureXcodeCommandLineTools() is
+  // idempotent (it also runs later in setupNetworking), so this is a no-op
+  // once CLT is present — and a no-op entirely on Windows/Linux.
+  await ensureXcodeCommandLineTools(onProgress);
   
   // Step 1: Ensure we have our bundled Node.js (guaranteed compatible)
   if (!hasBundledNode() && !IS_WINDOWS) {

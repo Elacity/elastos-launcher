@@ -39,15 +39,30 @@ Before merging any change to the install scripts, verify:
 
 | Tool | Purpose | Installed By |
 |------|---------|-------------|
+| Xcode Command Line Tools | macOS git + make for source builds | Launcher (auto-triggers Apple system dialog); terminal scripts assume present |
+| Homebrew | macOS package manager (required prereq) | Launcher (auto-installs via single password prompt); terminal scripts auto-install |
 | Node.js 20+ | Runtime | All |
 | PM2 | Process manager | Terminal scripts only (launcher manages process directly) |
 | WireGuard | Fast encrypted tunnel | All |
 | AmneziaWG | DPI-resistant stealth | All |
 | sing-box 1.13.0 | VLESS Reality TCP stealth | All |
 | awg-quick (patched) | AmneziaWG interface manager | All |
-| Sudoers configs | Passwordless wg-quick/awg-quick | All |
+| FFmpeg | Media transcoder for video minting | All |
+| cmake | Native build fallback for node-datachannel | All |
+| Sudoers configs | Passwordless wg-quick/awg-quick | All (launcher uses consolidated `/etc/sudoers.d/elastos`) |
 | Particle auth .env | Wallet integration | All |
 | Go compiler | Build AmneziaWG (if not present) | All |
+
+### macOS First-Run UX (v1.2.9+)
+
+Fresh-Mac users on macOS experience exactly **one Apple system dialog + one password prompt** the first time they install PC2 via the launcher:
+
+1. **Xcode Command Line Tools dialog** (Apple's native dialog, no password, ~5 min wait for CLT download/install) — only fires if CLT is not already present.
+2. **Single GUI password prompt** for `elevatedSetup()` which installs Homebrew (if missing), pre-chowns the brew prefix + `/usr/local/bin` to the user, and writes the consolidated `/etc/sudoers.d/elastos` file granting NOPASSWD for `wg-quick`/`awg-quick` at all possible brew paths.
+
+After these two interactions, every subsequent `brew install X`, `git clone`, `make`, `cp`, and runtime `wg-quick up` / `awg-quick up` runs without any further user interaction. Returning users (Homebrew already installed, sudoers already configured) see zero prompts.
+| FFmpeg | Video transcode at mint time (dashPackager) | All |
+| cmake | Fallback build dep for node-datachannel | All |
 
 ### Architecture Notes
 
