@@ -75,11 +75,13 @@ export function assertStaleLockPath(lockPath: string): void {
 
 export function failureScreen(facts: FailureFacts): FailureScreen {
   const kind = classify(facts);
-  const copy = COPY[kind];
+  const copy = kind === 'other'
+    ? { title: 'ElastOS needs attention', message: plainError(facts.error) }
+    : COPY[kind];
   return {
     kind,
     title: copy.title,
-    message: kind === 'other' ? plainError(facts.error) : copy.message,
+    message: copy.message,
     retryLabel: 'Try again',
     fixLabel: kind === 'other' ? null : 'Fix it',
   };
