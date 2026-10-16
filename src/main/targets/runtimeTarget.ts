@@ -17,6 +17,7 @@ import { uninstallRuntime } from './runtimeUninstall';
 import {
   applyRuntimeUpdate,
   checkRuntimeUpdate,
+  HeadVerify,
   rollbackRuntime,
   runRuntimeCommand,
   runtimeHeadStore,
@@ -77,7 +78,7 @@ export function createRuntimeTarget(): LaunchTarget {
       await supervisor.start();
     },
     install: (onProgress) => runtimeInstall.installRuntimeOnThisComputer(onProgress),
-    update: (onProgress) => applyRuntimeUpdate(runRuntimeCommand, runtimeHeadStore(), onProgress),
+    update: (onProgress) => applyRuntimeUpdate(runRuntimeCommand, runtimeHeadStore(), headVerify(), onProgress),
     uninstall: () => runtimeUninstall(() => supervisor?.stop() ?? Promise.resolve()),
     getVersion: () => readRuntimeVersion(),
     checkForUpdate: () => runtimeCheckForUpdate(),
@@ -102,7 +103,22 @@ async function runtimeCheckForUpdate(): Promise<UpdateCheck> {
 export async function rollbackRuntimeUpdate(
   onProgress: (message: string) => void = () => {},
 ): Promise<void> {
-  await rollbackRuntime(runRuntimeCommand, runtimeHeadStore(), onProgress);
+  await rollbackRuntime(runRuntimeCommand, runtimeHeadStore(), headVerify(), onProgress);
+}
+
+function headVerify(): HeadVerify {
+  const pin = loadActiveRuntimePin();
+  return {
+    maintainerDid: pin.maintainerDid,
+    publisherGateway: pin.publisherGateway,
+    fetchText: async (url: string) => {
+      const response = await fetch(url);
+      if (!response.ok) {
+        throw new Error('Could not verify the ElastOS release head.');
+      }
+      return response.text();
+    },
+  };
 }
 
 function readRuntimeVersion(): string {
