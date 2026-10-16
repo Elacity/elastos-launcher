@@ -35,10 +35,10 @@ log.transports.console.level = 'debug';
 
 function createWindow(): void {
   mainWindow = new BrowserWindow({
-    width: 480,
-    height: 580,
-    minWidth: 400,
-    minHeight: 500,
+    width: 500,
+    height: 860,
+    minWidth: 420,
+    minHeight: 560,
     resizable: true,
     webPreferences: {
       preload: path.join(__dirname, '../preload/index.js'),
@@ -115,18 +115,18 @@ function updateTrayMenu(): void {
     { label: `Status: ${statusLabels[currentStatus]}`, enabled: false },
     { type: 'separator' },
     {
-      label: 'Start PC2',
+      label: launch.target.id === 'runtime' ? 'Start' : 'Start PC2',
       enabled: currentStatus === 'stopped' || currentStatus === 'error',
       click: () => { void launch.start(); }
     },
     {
-      label: 'Stop PC2',
+      label: launch.target.id === 'runtime' ? 'Stop' : 'Stop PC2',
       enabled: currentStatus === 'running',
       click: () => { void launch.stop(); }
     },
     { type: 'separator' },
     {
-      label: 'Open in Browser',
+      label: launch.target.id === 'runtime' ? 'Open my computer' : 'Open in Browser',
       enabled: currentStatus === 'running',
       click: () => launch.openInBrowser()
     },
@@ -204,10 +204,31 @@ ipcMain.handle('pc2:getEnvironment', () => ({
 ipcMain.handle('pc2:getLanURL', () => pc2Manager.getLanURL());
 ipcMain.handle('pc2:getQRCode', () => pc2Manager.generateQRCode());
 
+ipcMain.handle('pc2:getLaunchInfo', () => launch.getLaunchInfo());
+ipcMain.handle('pc2:setLaunchTarget', async (_, id: string) => {
+  const next = launch.setLaunchTarget(id);
+  const status = await launch.getStatus();
+  mainWindow?.webContents.send('pc2:status', status);
+  updateTrayMenu();
+  return next;
+});
+ipcMain.handle('pc2:getPreflight', () => launch.getPreflight());
+ipcMain.handle('pc2:getDiagnostics', () => launch.getDiagnostics());
+ipcMain.handle('pc2:setOpenAtLogin', (_, enabled: boolean) => {
+  launch.setOpenAtLogin(enabled);
+  return launch.getOpenAtLogin();
+});
+ipcMain.handle('pc2:rollback', async (event) => {
+  return launch.rollback((msg) => {
+    event.sender.send('pc2:updateProgress', msg);
+  });
+});
+
 // App lifecycle
 app.whenReady().then(() => {
   createWindow();
   createTray();
+  if (launch.getOpenAtLogin()) launch.setOpenAtLogin(true);
 });
 
 app.on('window-all-closed', () => {
