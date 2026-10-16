@@ -172,6 +172,7 @@ ipcMain.handle('pc2:install', async (event) => {
 });
 
 ipcMain.handle('pc2:uninstall', () => launch.uninstall());
+ipcMain.handle('pc2:resetRuntime', () => launch.resetRuntime());
 
 // Version and updates
 ipcMain.handle('pc2:getVersion', () => launch.getVersion());
