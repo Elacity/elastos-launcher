@@ -3,6 +3,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { findRuntimeBinary } from './runtimeProbe';
+import { verifyReleaseHead } from './releaseHead';
 import { UpdateCheck } from './types';
 
 export const UPDATE_CURRENT_LINE = 'Installed release is up to date.';
@@ -55,6 +56,30 @@ export function parseHeadCid(stdout: string): string | null {
   return null;
 }
 
+export interface HeadVerify {
+  maintainerDid: string;
+  publisherGateway: string;
+  fetchText: (url: string) => Promise<string>;
+}
+
+export function isStoredHeadCid(value: string): boolean {
+  return /^Qm[1-9A-HJ-NP-Za-km-z]{20,}$/.test(value);
+}
+
+/** The stored value is the CID of a release head this process verified. */
+export async function verifiedHeadForRollback(candidate: string, verify: HeadVerify): Promise<string> {
+  if (!isStoredHeadCid(candidate)) {
+    throw new Error('Refusing to store a head CID this launcher did not verify.');
+  }
+  const url = `${verify.publisherGateway.replace(/\/$/, '')}/ipfs/${candidate}`;
+  const raw = await verify.fetchText(url);
+  const verified = verifyReleaseHead(raw, verify.maintainerDid);
+  if (verified.headCid !== candidate) {
+    throw new Error('Refusing to store a head CID this launcher did not verify.');
+  }
+  return verified.headCid;
+}
+
 export async function checkRuntimeUpdate(run: RuntimeCommand): Promise<ParsedUpdateCheck> {
   const result = await run(['update', '--check']);
   if (result.code !== 0) {
@@ -66,6 +91,7 @@ export async function checkRuntimeUpdate(run: RuntimeCommand): Promise<ParsedUpd
 export async function applyRuntimeUpdate(
   run: RuntimeCommand,
   store: HeadCidStore,
+  verify: HeadVerify,
   onProgress: (message: string) => void = () => {},
 ): Promise<void> {
   onProgress('Checking the installed ElastOS release.');
@@ -73,8 +99,11 @@ export async function applyRuntimeUpdate(
   if (shown.code !== 0) {
     throw new Error(shown.stderr.trim() || 'Could not read the installed ElastOS release.');
   }
-  const cid = parseHeadCid(shown.stdout);
-  if (cid) store.set(cid);
+  const candidate = parseHeadCid(shown.stdout);
+  if (!candidate) {
+    throw new Error('Refusing to store a head CID this launcher did not verify.');
+  }
+  store.set(await verifiedHeadForRollback(candidate, verify));
   onProgress('Installing the ElastOS update (about 2 minutes).');
   const updated = await run(['update', '--yes']);
   if (updated.stdout.includes(UPDATE_CANCELLED_LINE)) {
@@ -88,12 +117,14 @@ export async function applyRuntimeUpdate(
 export async function rollbackRuntime(
   run: RuntimeCommand,
   store: HeadCidStore,
+  verify: HeadVerify,
   onProgress: (message: string) => void = () => {},
 ): Promise<void> {
   const cid = store.get();
   if (!cid) throw new Error('There is no previous ElastOS release to go back to.');
+  const verified = await verifiedHeadForRollback(cid, verify);
   onProgress('Restoring the previous ElastOS release.');
-  const result = await run(['update', '--rollback-to', cid, '--yes']);
+  const result = await run(['update', '--rollback-to', verified, '--yes']);
   if (result.stdout.includes(UPDATE_CANCELLED_LINE)) {
     throw new Error('The restore did not run.');
   }
