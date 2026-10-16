@@ -31,6 +31,7 @@ test('reset removes the runtime program, data, and unfinished install', async ()
     '/home/tester/.local/share/elastos',
     '/home/tester/.elastos-launcher/install-stage.json',
     '/home/tester/.elastos-launcher/resume-install.json',
+    '/home/tester/.elastos-launcher/resume-install.json.lock',
   ]);
   assert.deepEqual(removed, calls.slice(1));
 });
@@ -62,6 +63,7 @@ test('a dotted account name is still a launcher path', async () => {
   assert.equal(launcherOwnedDirectories('/home/tester/xdg/elastos', '/home/tester', 'linux', { XDG_DATA_HOME: 'xdg' }), false);
   assert.equal(launcherOwnedDirectories('/home/t2/.local/share/elastos', '/home/t', 'linux', {}), false);
   assert.equal(launcherOwnedDirectories('/home/tester/.elastos-launcher/resume-install.json', '/home/tester', 'linux', {}), true);
+  assert.equal(launcherOwnedDirectories('/home/tester/.elastos-launcher/resume-install.json.lock', '/home/tester', 'linux', {}), true);
   assert.equal(launcherOwnedDirectories('/var/lib/elastos', '/home/tester', 'linux', { XDG_DATA_HOME: '/var/lib' }), false);
   assert.equal(launcherOwnedDirectories('/home/tester/.local/share/elastos', '/home/tester', 'linux', { XDG_DATA_HOME: '/var/lib' }), true);
 
@@ -81,6 +83,7 @@ test('a dotted account name is still a launcher path', async () => {
     '/home/jane.doe/.local/share/elastos',
     '/home/jane.doe/.elastos-launcher/install-stage.json',
     '/home/jane.doe/.elastos-launcher/resume-install.json',
+    '/home/jane.doe/.elastos-launcher/resume-install.json.lock',
   ]);
 });
 
@@ -255,7 +258,7 @@ test('an XDG data directory is owned only with the ElastOS lock or marker', () =
     const data = path.join(home, 'Documents', 'elastos');
     fs.mkdirSync(data, { recursive: true });
     const env = { XDG_DATA_HOME: path.join(home, 'Documents') };
-    assert.equal(launcherOwnedDirectories(data, home, 'linux', env), false);
+    assert.equal(launcherOwnedDirectories(data, home, 'linux', env), true);
     const lock = path.join(data, 'host-process.lock');
     fs.symlinkSync(path.join(root, 'missing'), lock);
     assert.equal(launcherOwnedDirectories(data, home, 'linux', env), false);
@@ -348,10 +351,156 @@ test('a replacement between look and delete is not removed', () => {
     sweepRemovalHoldings(root);
     assert.equal(fs.existsSync(path.join(root, leaked[0])), false);
 
-    const linked = path.join(root, '.elastos-removing-1-aaaaaaaaaaaaaaaa-elastos');
+    const linked = path.join(root, '.elastos-removing-2147483646-aaaaaaaaaaaaaaaa-elastos');
     fs.symlinkSync(outside, linked);
     assert.throws(() => sweepRemovalHoldings(root), /could not finish removing/);
     assert.equal(fs.readFileSync(path.join(outside, 'secret'), 'utf8'), 'SECRET');
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('sweep removes only a dead holding this launcher wrote', () => {
+  const { spawn } = require('node:child_process');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'elastos-sweep-'));
+  const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+  try {
+    const live = path.join(root, `.elastos-removing-${child.pid}-aaaaaaaaaaaaaaaa-elastos`);
+    fs.mkdirSync(live);
+    fs.writeFileSync(path.join(root, 'sibling.txt'), 'keep');
+    fs.writeFileSync(path.join(root, '.elastos-removing-notes'), 'keep');
+    fs.mkdirSync(path.join(root, '.elastos-removing-2147483646-bbbbbbbbbbbbbbbb-notes.txt'));
+    const dead = path.join(root, '.elastos-removing-2147483646-bbbbbbbbbbbbbbbb-elastos');
+    fs.mkdirSync(dead);
+    sweepRemovalHoldings(root);
+    assert.equal(fs.existsSync(live), true);
+    assert.equal(fs.existsSync(dead), false);
+    assert.equal(fs.readFileSync(path.join(root, 'sibling.txt'), 'utf8'), 'keep');
+    assert.equal(fs.readFileSync(path.join(root, '.elastos-removing-notes'), 'utf8'), 'keep');
+    assert.equal(fs.existsSync(path.join(root, '.elastos-removing-2147483646-bbbbbbbbbbbbbbbb-notes.txt')), true);
+  } finally {
+    child.kill();
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('a custom data directory with unknown files is refused by name', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'elastos-xdg-foreign-'));
+  try {
+    const home = path.join(root, 'home');
+    const data = path.join(home, 'custom', 'elastos');
+    fs.mkdirSync(data, { recursive: true });
+    fs.writeFileSync(path.join(data, 'sources.json'), '{}\n');
+    const env = { XDG_DATA_HOME: path.join(home, 'custom') };
+    assert.equal(launcherOwnedDirectories(data, home, 'linux', env), true);
+    fs.writeFileSync(path.join(data, 'notes.txt'), 'keep');
+    assert.equal(launcherOwnedDirectories(data, home, 'linux', env), false);
+    const removed = [];
+    await assert.rejects(() => resetRuntime({
+      binary: path.join(home, '.local', 'bin', 'elastos'),
+      dataDir: data,
+      stageFile: path.join(home, '.elastos-launcher', 'install-stage.json'),
+      homeDir: home,
+      platform: 'linux',
+      env,
+      stop: async () => {},
+      remove: (target) => { removed.push(target); },
+    }), new RegExp(`will not reset ${data.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} because it contains files`));
+    assert.deepEqual(removed, []);
+    assert.equal(fs.readFileSync(path.join(data, 'notes.txt'), 'utf8'), 'keep');
+
+    fs.rmSync(path.join(data, 'notes.txt'));
+    fs.rmSync(path.join(data, 'sources.json'));
+    await resetRuntime({
+      binary: path.join(home, '.local', 'bin', 'elastos'),
+      dataDir: data,
+      stageFile: path.join(home, '.elastos-launcher', 'install-stage.json'),
+      homeDir: home,
+      platform: 'linux',
+      env,
+      stop: async () => {},
+      remove: (target) => { removed.push(target); },
+    });
+    assert.equal(removed.includes(data), true);
+
+    await assert.rejects(() => resetRuntime({
+      binary: path.join(home, '.local', 'bin', 'elastos'),
+      dataDir: '/var/lib/elastos',
+      stageFile: path.join(home, '.elastos-launcher', 'install-stage.json'),
+      homeDir: home,
+      platform: 'linux',
+      env: { XDG_DATA_HOME: '/var/lib' },
+      stop: async () => {},
+      remove: () => { throw new Error('should not remove'); },
+    }), /not the ElastOS data directory/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('reset removes the resume lock and still deletes when a later sweep fails', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'elastos-reset-lock-'));
+  try {
+    const home = path.join(root, 'home');
+    const bin = path.join(home, '.local', 'bin');
+    fs.mkdirSync(bin, { recursive: true });
+    fs.mkdirSync(path.join(home, '.elastos-launcher'), { recursive: true });
+    const lock = path.join(home, '.elastos-launcher', 'resume-install.json.lock');
+    fs.writeFileSync(lock, '{}\n');
+    const outside = path.join(root, 'outside');
+    fs.mkdirSync(outside);
+    fs.writeFileSync(path.join(outside, 'secret'), 'SECRET');
+    fs.symlinkSync(outside, path.join(bin, '.elastos-removing-2147483646-aaaaaaaaaaaaaaaa-elastos'));
+    const removed = [];
+    await assert.rejects(() => resetRuntime({
+      binary: path.join(bin, 'elastos'),
+      dataDir: path.join(home, '.local', 'share', 'elastos'),
+      stageFile: path.join(home, '.elastos-launcher', 'install-stage.json'),
+      homeDir: home,
+      platform: 'linux',
+      env: {},
+      stop: async () => {},
+      remove: (target) => {
+        removed.push(target);
+        if (target === lock) fs.rmSync(target, { force: true });
+      },
+    }), /could not finish removing/);
+    assert.equal(removed.includes(path.join(bin, 'elastos')), true);
+    assert.equal(removed.includes(path.join(home, '.local', 'share', 'elastos')), true);
+    assert.equal(removed.includes(lock), true);
+    assert.equal(fs.existsSync(lock), false);
+    assert.equal(fs.readFileSync(path.join(outside, 'secret'), 'utf8'), 'SECRET');
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('Windows removal does not open a directory and does not use O_NOFOLLOW', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'elastos-win-rm-'));
+  try {
+    const opened = [];
+    const open = (file, flags) => {
+      opened.push(flags);
+      return fs.openSync(file, flags);
+    };
+    const dir = path.join(root, 'elastos');
+    fs.mkdirSync(dir);
+    fs.writeFileSync(path.join(dir, 'components.json'), '{}\n');
+    removeVerifiedTarget(dir, { platform: 'win32', open });
+    assert.equal(fs.existsSync(dir), false);
+    assert.deepEqual(opened, []);
+
+    const file = path.join(root, 'install-stage.json');
+    fs.writeFileSync(file, '{}\n');
+    removeVerifiedTarget(file, { platform: 'win32', open });
+    assert.equal(fs.existsSync(file), false);
+    assert.ok(opened.length > 0);
+    for (const flags of opened) {
+      assert.equal(flags, fs.constants.O_RDONLY);
+      if (typeof fs.constants.O_NOFOLLOW === 'number') {
+        assert.equal(flags & fs.constants.O_NOFOLLOW, 0);
+      }
+    }
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

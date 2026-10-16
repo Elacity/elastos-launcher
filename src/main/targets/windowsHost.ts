@@ -1,9 +1,10 @@
 import { spawn } from 'child_process';
+import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { sha256Hex } from './releaseHead';
-import { runtimeResumeInstallPath } from './runtimePaths';
+import { runtimeResumeInstallLockPath, runtimeResumeInstallPath } from './runtimePaths';
 
 export type WindowsKind = 'not-windows' | 'enable-wsl' | 'setup-distro' | 'ready';
 
@@ -338,50 +339,84 @@ export function assertPinnedRootfs(bytes: Buffer): void {
 }
 
 function resumeLockPath(homeDir: string): string {
-  return `${runtimeResumeInstallPath(homeDir)}.lock`;
+  return runtimeResumeInstallLockPath(homeDir);
 }
 
-function claimResumeInstall(homeDir: string): boolean {
-  const lock = resumeLockPath(homeDir);
-  const payload = JSON.stringify({ pid: process.pid });
-  const write = () => {
-    const fd = fs.openSync(lock, fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_WRONLY, 0o600);
-    try {
-      fs.writeFileSync(fd, payload);
-    } finally {
-      fs.closeSync(fd);
-    }
-  };
+/** A lock older than this is stale even if its pid is still in the process table. */
+export const RESUME_LOCK_STALE_MS = 10 * 60 * 1000;
+
+function pidIsAlive(pid: number): boolean {
   try {
-    write();
+    process.kill(pid, 0);
     return true;
   } catch (err) {
     const code = err && typeof err === 'object' && 'code' in err ? String((err as { code?: string }).code) : '';
-    if (code !== 'EEXIST') return false;
+    return code === 'EPERM';
   }
+}
+
+function resumeLockIsStale(lock: string): boolean {
+  let text = '';
+  let mtime = 0;
   try {
-    const existing = JSON.parse(fs.readFileSync(lock, 'utf8')) as { pid?: unknown };
-    if (existing.pid === process.pid) return false;
-    if (typeof existing.pid === 'number' && existing.pid > 0) {
-      try {
-        process.kill(existing.pid, 0);
-        return false;
-      } catch {
-        // The previous ElastOS is gone. This open can continue Install.
-      }
-    } else {
+    const stat = fs.statSync(lock);
+    mtime = stat.mtimeMs;
+    text = fs.readFileSync(lock, 'utf8');
+  } catch {
+    return false;
+  }
+  let parsed: { pid?: unknown; uptime?: unknown } | null = null;
+  try {
+    parsed = JSON.parse(text) as { pid?: unknown; uptime?: unknown };
+  } catch {
+    return true;
+  }
+  if (!parsed || typeof parsed.pid !== 'number' || parsed.pid <= 0) return true;
+  if (parsed.pid === process.pid) return false;
+  if (typeof parsed.uptime === 'number' && os.uptime() + 1 < parsed.uptime) return true;
+  if (Number.isFinite(mtime) && Date.now() - mtime > RESUME_LOCK_STALE_MS) return true;
+  return !pidIsAlive(parsed.pid);
+}
+
+function tryCreateResumeLock(lock: string, payload: string): boolean {
+  const tmp = `${lock}.${process.pid}.${crypto.randomBytes(4).toString('hex')}.tmp`;
+  try {
+    fs.writeFileSync(tmp, payload, { mode: 0o600 });
+    try {
+      fs.linkSync(tmp, lock);
+      return true;
+    } catch {
       return false;
     }
   } catch {
     return false;
+  } finally {
+    try {
+      fs.rmSync(tmp, { force: true });
+    } catch {
+      // The lock file, when the link succeeded, is the copy that matters.
+    }
   }
+}
+
+/** One process claims the resume. An empty, crashed, or rebooted lock can be taken. */
+export function claimResumeInstall(homeDir: string): boolean {
+  const lock = resumeLockPath(homeDir);
+  const payload = JSON.stringify({ pid: process.pid, uptime: os.uptime() });
+  if (tryCreateResumeLock(lock, payload)) return true;
+  if (!resumeLockIsStale(lock)) return false;
+  const junk = `${lock}.stale-${process.pid}-${crypto.randomBytes(4).toString('hex')}`;
   try {
-    fs.rmSync(lock, { force: true });
-    write();
-    return true;
+    fs.renameSync(lock, junk);
   } catch {
     return false;
   }
+  try {
+    fs.rmSync(junk, { force: true });
+  } catch {
+    // The name is no longer the lock. The next create can proceed.
+  }
+  return tryCreateResumeLock(lock, payload);
 }
 
 /**

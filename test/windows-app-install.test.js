@@ -7,6 +7,7 @@ const { installRuntime, pinnedInstallerLaunch } = require('../dist/main/targets/
 const { runtimeBinaryPath, runtimeJoin } = require('../dist/main/targets/runtimePaths');
 const { runtimeInstallBlock } = require('../dist/main/targets/runtimeSupport');
 const {
+  adoptDistroGatewayProcess,
   assertDistroPath,
   distroGatewayArgs,
   distroInstallerArgs,
@@ -15,10 +16,12 @@ const {
   DISTRO_SETUP_FAILED,
   ensureElastosDistro,
   factsAreElastos,
+  readDistroLockPid,
   signalDistroGateway,
   wslCommandPrefix,
   wslSpawnEnv,
 } = require('../dist/main/targets/windowsRuntime');
+const { createGatewaySupervisor } = require('../dist/main/targets/runtimeGateway');
 const { importDistroArgs } = require('../dist/main/targets/windowsHost');
 
 const HEAD = 'QmXuy56RTFzXaifTuyCbMb6Ky1p5wuM9iP8eFbMghHxWij';
@@ -145,10 +148,78 @@ test('the distro gateway identity uses the lock pid socket and a positive wsl pi
   assert.deepEqual(stopped, ['TERM']);
   assert.deepEqual(killed, [[42, 'SIGTERM']]);
 
+  const skipped = [];
+  signalDistroGateway(0, 'SIGTERM', () => { skipped.push('kill'); }, () => { skipped.push('lock'); });
+  assert.deepEqual(skipped, ['lock']);
+
   const script = fs.readFileSync(path.join(__dirname, '../scripts/windows-app-install.js'), 'utf8');
   assert.match(script, /installRuntimeOnThisComputer/);
   assert.match(script, /createRuntimeTarget/);
   assert.match(script, /\/healthz is OK/);
   assert.match(script, /Opening Home in the Windows browser/);
   assert.equal(/windows-elastos-distro/.test(script), false);
+});
+
+test('an adopted distro gateway uses the lock pid and does not report a live pid stopped', async () => {
+  assert.equal(readDistroLockPid(() => ({ code: 0, stdout: '77\n' })), 77);
+  assert.equal(readDistroLockPid(() => ({ code: 0, stdout: '0\n' })), null);
+  assert.equal(readDistroLockPid(() => ({ code: 1, stdout: '' })), null);
+
+  const signals = [];
+  const adopted = adoptDistroGatewayProcess({
+    readPid: () => 77,
+    alive: () => true,
+    signal: (pid, signal) => { signals.push([pid, signal]); },
+  });
+  assert.equal(adopted.pid, 77);
+  assert.equal(adopted.hasExited(), false);
+  adopted.signal('SIGTERM');
+  assert.deepEqual(signals, [[77, 'SIGTERM']]);
+  assert.equal(adoptDistroGatewayProcess({
+    readPid: () => null,
+    alive: () => true,
+    signal: () => { throw new Error('signaled'); },
+  }), null);
+  assert.equal(adoptDistroGatewayProcess({
+    readPid: () => 0,
+    alive: () => true,
+    signal: () => { throw new Error('signaled'); },
+  }), null);
+  const dead = adoptDistroGatewayProcess({
+    readPid: () => 77,
+    alive: () => false,
+    signal: () => {},
+  });
+  assert.equal(dead.hasExited(), true);
+
+  let clock = 0;
+  let health = { status: 200, body: 'OK' };
+  const sup = createGatewaySupervisor({
+    binary: '/root/.local/bin/elastos',
+    spawn() { throw new Error('must not spawn'); },
+    fetchHealth: async () => health,
+    sleep: async () => { clock += 1000; },
+    now: () => clock,
+    openUrl: () => {},
+    log: () => {},
+    graceMs: 3000,
+    pollMs: 1000,
+    confirmForeign: async () => true,
+    adoptInstalled: () => adoptDistroGatewayProcess({
+      readPid: () => 77,
+      alive: () => true,
+      signal: (pid, signal) => {
+        signals.push([pid, signal]);
+        health = null;
+      },
+    }),
+  });
+  await assert.rejects(() => sup.stop({ adopt: true }), /still running/);
+  assert.equal(sup.phase(), 'error');
+  assert.equal(signals.some(([pid]) => pid === 0), false);
+  assert.equal(signals.every(([pid]) => pid === 77), true);
+
+  const source = fs.readFileSync(path.join(__dirname, '../src/main/targets/windowsRuntime.ts'), 'utf8');
+  assert.equal(source.includes('signalDistroGateway(0'), false);
+  assert.equal(source.includes('hasExited() { return true; }'), false);
 });

@@ -1,4 +1,5 @@
 const assert = require('node:assert/strict');
+const { spawn } = require('node:child_process');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -17,8 +18,10 @@ const {
   ensureElastosRootfs,
   hostPrompt,
   importDistroArgs,
+  claimResumeInstall,
   finishResumeInstall,
   prepareWindowsImportDir,
+  RESUME_LOCK_STALE_MS,
   markInstallResumeAfterReboot,
   planAfterWindowsRestart,
   resumeInstallPlanOnThisComputer,
@@ -307,6 +310,85 @@ test('the next open continues Install only after Linux support is on', async () 
     assert.match(app, /finishResumeInstall/);
     assert.match(firstRun, /Install continues/);
   } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('a stale resume lock can be claimed again and a live one cannot', async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'elastos-resume-lock-'));
+  const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+  try {
+    markInstallResumeAfterReboot(home);
+    const lock = path.join(home, '.elastos-launcher', 'resume-install.json.lock');
+    fs.writeFileSync(lock, '');
+    assert.equal(await resumeInstallPlanOnThisComputer({
+      homeDir: home,
+      platform: 'win32',
+      wslInstalled: true,
+      installed: async () => false,
+    }), 'install');
+    finishResumeInstall(home, false);
+    assert.equal(fs.existsSync(lock), false);
+
+    assert.equal(claimResumeInstall(home), true);
+    assert.equal(claimResumeInstall(home), false);
+    finishResumeInstall(home, false);
+
+    fs.writeFileSync(lock, JSON.stringify({ pid: child.pid, uptime: os.uptime() }));
+    assert.equal(await resumeInstallPlanOnThisComputer({
+      homeDir: home,
+      platform: 'win32',
+      wslInstalled: true,
+      installed: async () => false,
+    }), 'none');
+    const staleAt = new Date(Date.now() - RESUME_LOCK_STALE_MS - 5000);
+    fs.utimesSync(lock, staleAt, staleAt);
+    assert.equal(await resumeInstallPlanOnThisComputer({
+      homeDir: home,
+      platform: 'win32',
+      wslInstalled: true,
+      installed: async () => false,
+    }), 'install');
+    finishResumeInstall(home, false);
+
+    fs.writeFileSync(lock, JSON.stringify({ pid: child.pid, uptime: os.uptime() + 10000 }));
+    assert.equal(claimResumeInstall(home), true);
+
+    const helper = path.join(home, 'claim.js');
+    const modulePath = path.join(__dirname, '../dist/main/targets/windowsHost.js');
+    fs.writeFileSync(helper, `const { claimResumeInstall } = require(${JSON.stringify(modulePath)});\nprocess.stdout.write(claimResumeInstall(process.argv[2]) ? 'yes' : 'no');\nsetInterval(() => {}, 1000);\n`);
+    const other = fs.mkdtempSync(path.join(os.tmpdir(), 'elastos-resume-race-'));
+    fs.mkdirSync(path.join(other, '.elastos-launcher'), { recursive: true });
+    const claim = () => new Promise((resolve, reject) => {
+      const proc = spawn(process.execPath, [helper, other], { stdio: ['ignore', 'pipe', 'pipe'] });
+      let out = '';
+      let err = '';
+      const timer = setTimeout(() => {
+        proc.kill();
+        reject(new Error(err || 'claim timed out'));
+      }, 5000);
+      proc.stdout.on('data', (chunk) => {
+        out += chunk;
+        if (out === 'yes' || out === 'no') {
+          clearTimeout(timer);
+          resolve({ proc, out });
+        }
+      });
+      proc.stderr.on('data', (chunk) => { err += chunk; });
+      proc.on('exit', (code) => {
+        clearTimeout(timer);
+        reject(new Error(err || `claim exited ${code}`));
+      });
+    });
+    const pair = await Promise.all([claim(), claim()]);
+    try {
+      assert.deepEqual(pair.map((item) => item.out).sort(), ['no', 'yes']);
+    } finally {
+      for (const item of pair) item.proc.kill();
+      fs.rmSync(other, { recursive: true, force: true });
+    }
+  } finally {
+    child.kill();
     fs.rmSync(home, { recursive: true, force: true });
   }
 });

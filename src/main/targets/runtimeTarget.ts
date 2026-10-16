@@ -43,13 +43,13 @@ export function createRuntimeTarget(): LaunchTarget {
     return findRuntimeBinary(os.homedir(), process.env.PATH ?? '');
   }
 
-  async function stopGateway(): Promise<void> {
+  async function stopGateway(adopt: boolean): Promise<void> {
     if (!supervisor) {
       supervisor = process.platform === 'win32'
         ? createDistroGatewaySupervisor()
         : createDefaultGatewaySupervisor(binary() ?? runtimeBinaryPath(os.homedir()));
     }
-    await supervisor.stop();
+    await supervisor.stop({ adopt });
   }
 
   return {
@@ -87,12 +87,13 @@ export function createRuntimeTarget(): LaunchTarget {
       if (!supervisor) supervisor = createDefaultGatewaySupervisor(file);
       await supervisor.start();
     },
-    stop: () => stopGateway(),
+    stop: () => stopGateway(false),
+    stopForRemoval: () => stopGateway(true),
     forceStop: () => {
       supervisor?.forceKill();
     },
     restart: async () => {
-      await stopGateway();
+      await stopGateway(false);
       if (process.platform === 'win32') {
         if (!distroIsInstalled()) throw new Error('ElastOS is not installed yet. Click Install.');
         if (!supervisor) supervisor = createDistroGatewaySupervisor();
@@ -106,7 +107,7 @@ export function createRuntimeTarget(): LaunchTarget {
     },
     install: (onProgress) => runtimeInstall.installRuntimeOnThisComputer(onProgress),
     update: (onProgress) => applyRuntimeUpdate(runRuntimeCommand, runtimeHeadStore(), headVerify(), onProgress),
-    uninstall: () => runtimeUninstall(() => stopGateway()),
+    uninstall: () => runtimeUninstall(() => stopGateway(true)),
     getVersion: () => (process.platform === 'win32' ? readDistroVersion() : readRuntimeVersion()),
     checkForUpdate: () => runtimeCheckForUpdate(),
     openInBrowser: () => openRuntimeHome(),

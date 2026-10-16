@@ -4,10 +4,12 @@ import * as os from 'os';
 import * as path from 'path';
 import { isForeignGatewayError } from './runtimeGateway';
 import {
+  foreignRuntimeDataMessage,
   launcherOwnedDirectories,
   runtimeBinaryPath,
   runtimeDataDir,
   runtimeInstallStagePath,
+  runtimeResumeInstallLockPath,
   runtimeResumeInstallPath,
 } from './runtimePaths';
 
@@ -80,6 +82,8 @@ export function assertSafeRuntimeRemoval(
   env: NodeJS.ProcessEnv = process.env,
 ): void {
   if (path.basename(dataDir) !== 'elastos' || !launcherOwnedDirectories(dataDir, homeDir, platform, env)) {
+    const named = foreignRuntimeDataMessage(dataDir, homeDir, platform, env);
+    if (named) throw new Error(named);
     throw new Error('Refusing to remove a directory that is not the ElastOS data directory.');
   }
   if (path.basename(binary) !== 'elastos' || !launcherOwnedDirectories(binary, homeDir, platform, env)) {
@@ -143,23 +147,34 @@ function restoreHoldingName(
   throw new Error(`Refusing to remove a path that changed. The folder is still at ${holding}.`);
 }
 
+interface RemoveTargetDeps {
+  lstat?: (file: string) => RemovalStat;
+  rename?: (from: string, to: string) => void;
+  remove?: (file: string) => void;
+  open?: (file: string, flags: number) => number;
+  close?: (fd: number) => void;
+  realpath?: (file: string) => string;
+  platform?: string;
+  beforeRename?: () => void;
+  afterHoldingCheck?: () => void;
+}
+
 /**
  * Open the real file with O_NOFOLLOW, rename it aside, and delete that holding
  * name only when a second O_NOFOLLOW open is still the same inode. A name that
  * was swapped for a symlink is not deleted. Rename-back does not replace a
  * path that reappeared. A failed delete names the holding path so the next
  * Reset can remove that same inode.
+ *
+ * Windows has no O_NOFOLLOW and cannot open a directory this way. There the
+ * real path and the file index must still match, a directory is not opened,
+ * and a file is opened read-only. The last delete is still the holding path.
  */
-export function removeVerifiedTarget(
-  target: string,
-  deps: {
-    lstat?: (file: string) => RemovalStat;
-    rename?: (from: string, to: string) => void;
-    remove?: (file: string) => void;
-    beforeRename?: () => void;
-    afterHoldingCheck?: () => void;
-  } = {},
-): void {
+export function removeVerifiedTarget(target: string, deps: RemoveTargetDeps = {}): void {
+  if ((deps.platform ?? process.platform) === 'win32') {
+    removeVerifiedWindows(target, deps);
+    return;
+  }
   const lstat = deps.lstat ?? fs.lstatSync;
   const rename = deps.rename ?? fs.renameSync;
   const remove = deps.remove ?? ((file: string) => fs.rmSync(file, { recursive: true, force: true }));
@@ -246,10 +261,149 @@ export function removeVerifiedTarget(
   }
 }
 
-const HOLDING_PREFIX = '.elastos-removing-';
+function removeVerifiedWindows(target: string, deps: RemoveTargetDeps): void {
+  const lstat = deps.lstat ?? fs.lstatSync;
+  const realpath = deps.realpath ?? ((file: string) => fs.realpathSync(file));
+  const open = deps.open ?? ((file: string, flags: number) => fs.openSync(file, flags));
+  const close = deps.close ?? fs.closeSync;
+  const rename = deps.rename ?? fs.renameSync;
+  const remove = deps.remove ?? ((file: string) => fs.rmSync(file, { recursive: true, force: true }));
+  let first: RemovalStat;
+  try {
+    first = lstat(target);
+  } catch (err) {
+    if (statErrorCode(err) === 'ENOENT') return;
+    throw new Error('Refusing to remove a path that could not be inspected.');
+  }
+  if (first.isSymbolicLink()) {
+    throw new Error('Refusing to remove a path that follows a symlink.');
+  }
+  const directory = Boolean(first.isDirectory?.());
+  let resolved: string;
+  try {
+    resolved = realpath(target);
+  } catch {
+    throw new Error('Refusing to remove a path that could not be inspected.');
+  }
+  let resolvedStat: RemovalStat;
+  try {
+    resolvedStat = lstat(resolved);
+  } catch {
+    throw new Error('Refusing to remove a path that could not be inspected.');
+  }
+  if (resolvedStat.isSymbolicLink() || !sameInode(resolvedStat, first)) {
+    throw new Error('Refusing to remove a path that changed.');
+  }
+  const flags = fs.constants.O_RDONLY;
+  let fd: number | null = null;
+  let holdingFd: number | null = null;
+  try {
+    if (!directory) {
+      try {
+        fd = open(resolved, flags);
+      } catch (err) {
+        if (statErrorCode(err) === 'ENOENT') return;
+        throw new Error('Refusing to remove a path that could not be inspected.');
+      }
+      const opened = fs.fstatSync(fd);
+      if (!sameInode(opened, first)) {
+        throw new Error('Refusing to remove a path that changed.');
+      }
+    }
+    deps.beforeRename?.();
+    const holding = path.join(
+      path.dirname(target),
+      `.elastos-removing-${process.pid}-${crypto.randomBytes(8).toString('hex')}-${path.basename(target)}`,
+    );
+    try {
+      rename(target, holding);
+    } catch (err) {
+      if (statErrorCode(err) === 'ENOENT') return;
+      throw new Error('Refusing to remove a path that could not be inspected.');
+    }
+    deps.afterHoldingCheck?.();
+    let named: RemovalStat;
+    try {
+      named = lstat(holding);
+    } catch {
+      throw new Error(`Refusing to remove a path that could not be inspected. The folder is still at ${holding}.`);
+    }
+    if (named.isSymbolicLink() || !sameInode(named, first)) {
+      restoreHoldingName(holding, target, lstat, rename);
+    }
+    let holdingResolved: string;
+    try {
+      holdingResolved = realpath(holding);
+    } catch {
+      throw new Error(`Refusing to remove a path that could not be inspected. The folder is still at ${holding}.`);
+    }
+    let holdingStat: RemovalStat;
+    try {
+      holdingStat = lstat(holdingResolved);
+    } catch {
+      throw new Error(`Refusing to remove a path that could not be inspected. The folder is still at ${holding}.`);
+    }
+    if (holdingStat.isSymbolicLink() || !sameInode(holdingStat, named)) {
+      restoreHoldingName(holding, target, lstat, rename);
+    }
+    if (!directory) {
+      try {
+        holdingFd = open(holding, flags);
+      } catch (err) {
+        if (statErrorCode(err) === 'ELOOP') {
+          throw new Error(`Refusing to remove a path that follows a symlink. The folder is still at ${holding}.`);
+        }
+        throw new Error(`Refusing to remove a path that could not be inspected. The folder is still at ${holding}.`);
+      }
+      const reopened = fs.fstatSync(holdingFd);
+      const still = fd == null ? reopened : fs.fstatSync(fd);
+      if (!sameInode(reopened, still) || !sameInode(still, first)) {
+        restoreHoldingName(holding, target, lstat, rename);
+      }
+    }
+    try {
+      remove(holding);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      throw new Error(`ElastOS could not finish removing ${holding}. ${message}`);
+    }
+  } finally {
+    if (holdingFd != null) close(holdingFd);
+    if (fd != null) close(fd);
+  }
+}
 
-/** Delete leftover holding names in an owned parent, each one bound to its open inode. */
-export function sweepRemovalHoldings(parent: string): void {
+const OWNED_HOLDING_SUFFIX =
+  /^(?:elastos|install-stage\.json|resume-install\.json|resume-install\.json\.lock|ElastOS-support\.txt|host-process\.lock|components\.json)$/;
+
+function holdingPidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return statErrorCode(err) === 'EPERM';
+  }
+}
+
+/** A holding this process wrote for a known runtime name, whose other owner is gone. */
+export function removalHoldingOwned(
+  name: string,
+  pidAlive: (pid: number) => boolean = holdingPidAlive,
+): boolean {
+  if (name.includes('\0') || name.includes('/') || name.includes('\\')) return false;
+  const match = /^\.elastos-removing-(\d+)-[0-9a-f]{16}-(.+)$/.exec(name);
+  if (!match || !OWNED_HOLDING_SUFFIX.test(match[2])) return false;
+  const pid = Number(match[1]);
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  if (pid === process.pid) return true;
+  return !pidAlive(pid);
+}
+
+/** Delete leftover holdings this launcher owns. A live other process is left alone. */
+export function sweepRemovalHoldings(
+  parent: string,
+  options: { pidAlive?: (pid: number) => boolean } = {},
+): void {
   let names: string[] = [];
   try {
     names = fs.readdirSync(parent);
@@ -258,7 +412,7 @@ export function sweepRemovalHoldings(parent: string): void {
   }
   const leftovers: string[] = [];
   for (const name of names) {
-    if (!name.startsWith(HOLDING_PREFIX) || name.includes('\0') || name.includes('/') || name.includes('\\')) continue;
+    if (!removalHoldingOwned(name, options.pidAlive)) continue;
     const full = path.join(parent, name);
     try {
       removeVerifiedTarget(full);
@@ -317,7 +471,11 @@ export async function resetRuntime(deps: {
     throw new Error('Refusing to remove a file that is not the ElastOS install stage.');
   }
   const resumeFile = runtimeResumeInstallPath(owned.homeDir);
+  const resumeLock = runtimeResumeInstallLockPath(owned.homeDir);
   if (path.basename(resumeFile) !== 'resume-install.json' || !launcherOwnedDirectories(resumeFile, owned.homeDir, owned.platform, owned.env)) {
+    throw new Error('Refusing to remove a file that is not the ElastOS install resume.');
+  }
+  if (path.basename(resumeLock) !== 'resume-install.json.lock' || !launcherOwnedDirectories(resumeLock, owned.homeDir, owned.platform, owned.env)) {
     throw new Error('Refusing to remove a file that is not the ElastOS install resume.');
   }
   try {
@@ -333,6 +491,17 @@ export async function resetRuntime(deps: {
   assertNoSymlinkAncestors(deps.dataDir, lstat);
   assertNoSymlinkAncestors(deps.stageFile, lstat);
   assertNoSymlinkAncestors(resumeFile, lstat);
+  assertNoSymlinkAncestors(resumeLock, lstat);
+  assertStableRemovalTarget(deps.binary, lstat);
+  assertStableRemovalTarget(deps.dataDir, lstat);
+  assertStableRemovalTarget(deps.stageFile, lstat);
+  assertStableRemovalTarget(resumeFile, lstat);
+  assertStableRemovalTarget(resumeLock, lstat);
+  deps.remove(deps.binary);
+  deps.remove(deps.dataDir);
+  deps.remove(deps.stageFile);
+  deps.remove(resumeFile);
+  deps.remove(resumeLock);
   for (const parent of new Set([
     path.dirname(deps.binary),
     path.dirname(deps.dataDir),
@@ -341,14 +510,6 @@ export async function resetRuntime(deps: {
   ])) {
     sweepRemovalHoldings(parent);
   }
-  assertStableRemovalTarget(deps.binary, lstat);
-  assertStableRemovalTarget(deps.dataDir, lstat);
-  assertStableRemovalTarget(deps.stageFile, lstat);
-  assertStableRemovalTarget(resumeFile, lstat);
-  deps.remove(deps.binary);
-  deps.remove(deps.dataDir);
-  deps.remove(deps.stageFile);
-  deps.remove(resumeFile);
 }
 
 export async function resetRuntimeOnThisComputer(stop: () => Promise<void>): Promise<void> {

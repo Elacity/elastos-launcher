@@ -243,7 +243,7 @@ export function createLaunchController(options: LaunchControllerOptions = {}): L
     install: (onProgress) => runRuntime(() => active.install(onProgress)),
     update: (onProgress) => runRuntime(() => active.update(onProgress)),
     uninstall: () => runRuntime(() => active.uninstall()),
-    resetRuntime: () => runRuntime(() => resetRuntimeOnThisComputer(() => active.stop())),
+    resetRuntime: () => runRuntime(() => resetRuntimeOnThisComputer(() => active.stopForRemoval())),
     rollback: (onProgress) => runRuntime(() => rollbackRuntimeUpdate(onProgress)),
     getVersion: () => runRuntimeSync(() => active.getVersion()),
     checkForUpdate: () => runRuntime(() => active.checkForUpdate()),

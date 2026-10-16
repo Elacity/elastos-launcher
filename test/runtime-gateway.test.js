@@ -420,6 +420,7 @@ test('stop adopts an installed gateway this window did not start', async () => {
       adopted.exit(0);
     }
   };
+  let adoptedCalls = 0;
   const sup = createGatewaySupervisor({
     binary: '/home/tester/.local/bin/elastos',
     spawn() { throw new Error('must not spawn'); },
@@ -431,9 +432,16 @@ test('stop adopts an installed gateway this window did not start', async () => {
     graceMs: 3000,
     pollMs: 1000,
     confirmForeign: async () => true,
-    adoptInstalled: () => adopted,
+    adoptInstalled: () => {
+      adoptedCalls += 1;
+      return adopted;
+    },
   });
-  await sup.stop();
+  await assert.rejects(() => sup.stop(), (err) => err instanceof ForeignGatewayError);
+  assert.equal(adoptedCalls, 0);
+  assert.deepEqual(signals, []);
+  await sup.stop({ adopt: true });
+  assert.equal(adoptedCalls, 1);
   assert.deepEqual(signals, ['SIGTERM']);
   assert.equal(sup.phase(), 'stopped');
 
@@ -452,8 +460,38 @@ test('stop adopts an installed gateway this window did not start', async () => {
       return adopted;
     },
   });
-  await assert.rejects(() => foreign.stop(), (err) => err instanceof ForeignGatewayError);
+  await assert.rejects(() => foreign.stop({ adopt: true }), (err) => err instanceof ForeignGatewayError);
   assert.deepEqual(refused, []);
+  foreign.forceKill();
+  assert.deepEqual(signals, ['SIGTERM']);
+
+  const alive = [];
+  let aliveClock = 0;
+  let aliveHealth = { status: 200, body: 'OK' };
+  const still = fakeProcess(88);
+  still.hasExited = () => false;
+  still.signal = (sig) => {
+    alive.push(sig);
+    aliveHealth = null;
+  };
+  const hanging = createGatewaySupervisor({
+    binary: '/home/tester/.local/bin/elastos',
+    spawn() { throw new Error('must not spawn'); },
+    fetchHealth: async () => aliveHealth,
+    sleep: async () => { aliveClock += 1000; },
+    now: () => aliveClock,
+    openUrl: () => {},
+    log: () => {},
+    graceMs: 3000,
+    pollMs: 1000,
+    confirmForeign: async () => true,
+    adoptInstalled: () => still,
+  });
+  await assert.rejects(() => hanging.stop({ adopt: true }), /still running/);
+  assert.equal(hanging.phase(), 'error');
+  assert.deepEqual(alive, ['SIGTERM', 'SIGKILL']);
+  hanging.forceKill();
+  assert.deepEqual(alive, ['SIGTERM', 'SIGKILL', 'SIGKILL']);
 });
 
 test('logs omit attach secrets', async () => {
