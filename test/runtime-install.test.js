@@ -26,9 +26,9 @@ const {
 
 const HOME = '/home/tester';
 const COMPONENTS = `${HOME}/.local/share/elastos/components.json`;
-const VERSION = '0.8.0-alpha.20';
-const CID = 'QmUmMZD3yNs4C7JvtichoZ727gN2ntXNnCDF1QTHkNKhXt';
-const RELEASE_CID = 'QmTAEJ8DAprsv5PbWcudofQwXrzL7ZjSgmhRmU8nqmwirf';
+const VERSION = '0.8.0-alpha.21';
+const CID = 'QmXuy56RTFzXaifTuyCbMb6Ky1p5wuM9iP8eFbMghHxWij';
+const RELEASE_CID = 'QmYPKgK1iPySu7A4QwwXNN7gjwA28Khr4X7XLoNzK2k1M1';
 const DID = 'did:key:z6MkgwHd2BCWe1jHMXPiR6H1q1RFPcv1YzhMbK5G1kBarbfe';
 const FIXTURE_DID = 'did:key:z6MkvDqGT54cXesYGvABpF1UapVNwjCqRcafi4Px6Thv5T3Z';
 const FIXTURE_VERSION = '0.7.1';

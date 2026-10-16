@@ -13,6 +13,9 @@ const {
   defaultUserDistro,
   legacyPc2DescribeRuns,
   parseWslDistroList,
+  isPc2ServiceFile,
+  pkexecPromptMessage,
+  pkexecShouldTrySudo,
   privilegedRemovalScript,
   removeDiscoveredLegacyPc2,
   removeLegacyPc2,
@@ -399,6 +402,41 @@ test('the privileged prompt and the WSL removal stay on known PC2 paths', () => 
   execFileSync('bash', ['-n', '-c', wslArgs[5]]);
   assert.throws(() => wslRemovalArgs('ElastOS', '/home/user/.pc2'), /Refusing to remove ElastOS/);
   assert.throws(() => wslRemovalArgs('Ubuntu', '/home/user/.local/share/elastos'), /not part of the old PC2 install/);
+  assert.throws(() => wslRemovalArgs('Ubuntu', '/home/../.pc2'), /not part of the old PC2 install/);
+  assert.throws(() => wslRemovalArgs('Ubuntu', '/home/./.pc2'), /not part of the old PC2 install/);
+  const dottedAccount = wslRemovalArgs('Ubuntu', '/home/jane.doe/.pc2');
+  assert.equal(dottedAccount[1], 'Ubuntu');
+  assert.equal(dottedAccount[dottedAccount.length - 1], '/home/jane.doe/.pc2');
+});
+
+test('a shared PM2 unit is not removed as PC2', () => {
+  const home = '/home/tester';
+  const box = world(home);
+  box.dir(home);
+  box.dir('/etc/systemd/system');
+  const shared = '/etc/systemd/system/pm2-root.service';
+  const owned = '/etc/systemd/system/pc2.service';
+  box.file(shared, '[Service]\nExecStart=/usr/bin/pm2 resurrect\n# mentions pc2-node\n');
+  box.file(owned, '[Service]\nExecStart=/home/tester/.pc2/pc2-node\n');
+  const found = discoverLegacyPc2(box.probe()).map((entry) => entry.path);
+  assert.equal(found.includes(shared), false);
+  assert.equal(found.includes(owned), true);
+  assert.equal(isPc2ServiceFile('pm2-root.service', 'pc2-node .pc2'), false);
+  assert.equal(isPc2ServiceFile('pc2.service', null), true);
+  assert.throws(() => privilegedRemovalScript([shared], () => 'pc2'), /not part of the old PC2 install/);
+});
+
+test('pkexec exits 126 and 127 do not continue as sudo', () => {
+  assert.equal(pkexecShouldTrySudo(126, ''), false);
+  assert.equal(pkexecShouldTrySudo(127, 'ENOENT'), false);
+  assert.equal(pkexecShouldTrySudo(1, ''), false);
+  assert.equal(pkexecShouldTrySudo(null, 'ENOENT'), true);
+  for (const status of [126, 127]) {
+    const message = pkexecPromptMessage(status);
+    assert.match(message, /administrator prompt could not be shown/);
+    assert.match(message, new RegExp(`pkexec exited ${status}`));
+    assert.match(message, /PC2 system files are still there/);
+  }
 });
 
 test('PC2 process selection ignores the ElastOS runtime', () => {

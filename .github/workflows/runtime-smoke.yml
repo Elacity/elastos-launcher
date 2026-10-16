@@ -49,7 +49,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Roll 0.8.0-alpha.20 back to 0.8.0-alpha.19 and forward again
+      - name: Roll 0.8.0-alpha.21 back to 0.8.0-alpha.20 and forward again
         run: bash scripts/runtime-rollback.sh
 
   electron-e2e:

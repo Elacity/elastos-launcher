@@ -21,7 +21,7 @@ const {
 } = require('../dist/main/targets/windowsRuntime');
 const { importDistroArgs } = require('../dist/main/targets/windowsHost');
 
-const HEAD = 'QmUmMZD3yNs4C7JvtichoZ727gN2ntXNnCDF1QTHkNKhXt';
+const HEAD = 'QmXuy56RTFzXaifTuyCbMb6Ky1p5wuM9iP8eFbMghHxWij';
 const DID = 'did:key:z6MkgwHd2BCWe1jHMXPiR6H1q1RFPcv1YzhMbK5G1kBarbfe';
 
 test('distro paths stay POSIX and the installer uses ELASTOS_HEAD_CID', () => {

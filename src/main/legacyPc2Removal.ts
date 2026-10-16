@@ -23,7 +23,6 @@ export const PC2_SUDOERS_FILES = [
 const PC2_DISTRO_NAMES = new Set(['pc2', 'pc2-wsl']);
 
 const PC2_SERVICE_NAME = /^(pc2|com\.elacity\.pc2|com\.pc2)[^/]*\.(plist|service|desktop)$/i;
-const PM2_SERVICE_NAME = /^pm2[.-][^/]+\.(plist|service)$/i;
 
 export type LegacyScope = 'user' | 'system' | 'wsl' | 'distro';
 
@@ -158,10 +157,22 @@ export function sudoersIsPc2(file: string, body: string): boolean {
   return false;
 }
 
-export function isPc2ServiceFile(basename: string, body: string | null): boolean {
-  if (PC2_SERVICE_NAME.test(basename)) return true;
-  if (PM2_SERVICE_NAME.test(basename) && body != null && /pc2-node|\.pc2\b|\bpc2\b/.test(body)) return true;
-  return false;
+/** A shared PM2 unit is not a PC2 file, even when its text mentions pc2. */
+export function isPc2ServiceFile(basename: string, _body: string | null = null): boolean {
+  return PC2_SERVICE_NAME.test(basename);
+}
+
+/**
+ * pkexec 126 means no authentication agent. 127 means the prompt or command
+ * could not run. Neither case should continue as `sudo`.
+ */
+export function pkexecShouldTrySudo(status: number | null, code: string): boolean {
+  if (status === 126 || status === 127) return false;
+  return code === 'ENOENT';
+}
+
+export function pkexecPromptMessage(status: number): string {
+  return `The administrator prompt could not be shown (pkexec exited ${status}). The PC2 system files are still there.`;
 }
 
 export function parseWslDistroList(text: string): Array<{ name: string; isDefault: boolean }> {
@@ -349,15 +360,7 @@ export function discoverLegacyPc2(probe: LegacyProbe): LegacyItem[] {
     for (const name of names) {
       const file = path.join(dir.dir, name);
       if (isRuntimePath(file, probe.home, probe.platform, probe.env)) continue;
-      let body: string | null = null;
-      if (PM2_SERVICE_NAME.test(name)) {
-        try {
-          body = probe.readFile(file).slice(0, 256 * 1024);
-        } catch {
-          body = null;
-        }
-      }
-      if (!isPc2ServiceFile(name, body)) continue;
+      if (!isPc2ServiceFile(name)) continue;
       let bytes: number | null = 0;
       try {
         const st = probe.lstat(file);
@@ -418,8 +421,12 @@ function refusal(sentence: string): LegacyRemovalResult {
   };
 }
 
+function wslSegmentsOk(file: string): boolean {
+  return file.split('/').every((part, index) => (part === '' && index === 0) || (part !== '.' && part !== '..' && part !== ''));
+}
+
 function wslHomeOk(home: string): boolean {
-  return /^\/(?:home\/[A-Za-z0-9._-]+|root)$/.test(home);
+  return wslSegmentsOk(home) && /^\/(?:home\/[A-Za-z0-9._-]+|root)$/.test(home);
 }
 
 function allowUserPath(file: string, probe: LegacyProbe): boolean {
@@ -447,16 +454,7 @@ function allowItem(entry: LegacyItem, probe: LegacyProbe): boolean {
   if (allowUserPath(entry.path, probe)) return entry.scope === 'user';
   const parent = serviceParent(entry.path, probe.home);
   if (!parent || parent.scope !== entry.scope) return false;
-  const base = path.basename(entry.path);
-  let body: string | null = null;
-  if (PM2_SERVICE_NAME.test(base)) {
-    try {
-      body = probe.readFile(entry.path).slice(0, 256 * 1024);
-    } catch {
-      return false;
-    }
-  }
-  return isPc2ServiceFile(base, body);
+  return isPc2ServiceFile(path.basename(entry.path));
 }
 
 function isInside(child: string, parent: string): boolean {
@@ -1194,8 +1192,7 @@ export function privilegedRemovalScript(
   for (const file of files) {
     if (isProvenSudoers(file, readFile)) continue;
     const base = path.basename(file);
-    const body = PM2_SERVICE_NAME.test(base) ? readFile(file) : null;
-    if (!SYSTEM_SERVICE_DIRS.includes(path.dirname(file)) || !isPc2ServiceFile(base, body)) {
+    if (!SYSTEM_SERVICE_DIRS.includes(path.dirname(file)) || !isPc2ServiceFile(base)) {
       throw new Error('Refusing to remove a path that is not part of the old PC2 install.');
     }
   }
@@ -1220,7 +1217,9 @@ function runOnePrivilegedRm(files: string[]): void {
     try {
       execFileSync('pkexec', ['sh', '-c', script], { stdio: 'inherit', timeout: 120000 });
     } catch (err) {
-      if (errorCode(err) !== 'ENOENT') throw err;
+      const status = errorStatus(err);
+      if (status === 126 || status === 127) throw new Error(pkexecPromptMessage(status));
+      if (!pkexecShouldTrySudo(status, errorCode(err))) throw err;
       execFileSync('sudo', ['--', 'sh', '-c', script], { stdio: 'inherit', timeout: 120000 });
     }
     return;
@@ -1378,7 +1377,14 @@ export async function removeLegacyPc2OnThisComputer(options: { backup: boolean; 
 }
 
 function isSafeWslPath(file: string): boolean {
-  return /^\/(?:home\/[A-Za-z0-9._-]+|root)\/(?:\.pc2|\.elastos\/node)$/.test(file);
+  return wslSegmentsOk(file) && /^\/(?:home\/[A-Za-z0-9._-]+|root)\/(?:\.pc2|\.elastos\/node)$/.test(file);
+}
+
+function errorStatus(err: unknown): number | null {
+  if (err && typeof err === 'object' && 'status' in err && typeof (err as { status?: unknown }).status === 'number') {
+    return (err as { status: number }).status;
+  }
+  return null;
 }
 
 async function stopLegacyPc2OnThisComputer(): Promise<void> {
