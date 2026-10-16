@@ -67,10 +67,58 @@ test('descriptors keep the PC2 and runtime health contracts apart', () => {
   assert.equal(targetSupportsHost(PC2_TARGET, 'darwin', 'x64'), true);
 });
 
-test('PC2 target delegates to the existing manager without starting it', async () => {
+test('PC2 target methods are the pc2Manager functions', async () => {
+  const pc2 = require('../dist/main/pc2Manager');
   const target = createLaunchTarget('pc2');
-  assert.equal(typeof target.getVersion(), 'string');
+  assert.equal(target.isInstalled, pc2.isInstalled);
+  assert.equal(target.getStatus, pc2.getStatus);
+  assert.equal(target.start, pc2.startPC2);
+  assert.equal(target.stop, pc2.stopPC2);
+  assert.equal(target.restart, pc2.restartPC2);
+  assert.equal(target.install, pc2.installPC2);
+  assert.equal(target.update, pc2.updatePC2);
+  assert.equal(target.uninstall, pc2.uninstallPC2);
+  assert.equal(target.getVersion, pc2.getPC2Version);
+  assert.equal(target.checkForUpdate, pc2.checkForUpdate);
+  assert.equal(target.openInBrowser, pc2.openInBrowser);
+  assert.equal(target.getLogs, pc2.getLogs);
   assert.equal(typeof await target.isInstalled(), 'boolean');
+});
+
+test('forcing runtime logs the stable error and does not install PC2', async () => {
+  const pc2 = require('../dist/main/pc2Manager');
+  const { createLaunchController } = require('../dist/main/launchController');
+  let installs = 0;
+  const original = pc2.installPC2;
+  pc2.installPC2 = async () => {
+    installs += 1;
+  };
+  try {
+    const logs = [];
+    const controller = createLaunchController({
+      env: { ELASTOS_LAUNCH_TARGET: 'runtime' },
+      store: { get: () => undefined, set() {}, delete() {} },
+    });
+    controller.onLog((line) => logs.push(line));
+    await assert.rejects(() => controller.install(() => {}), /cannot install yet/);
+    assert.equal(installs, 0);
+    assert.match(logs.join('\n'), /cannot install yet/);
+    assert.match(await controller.getLogs(), /cannot install yet/);
+    assert.equal(controller.target.id, 'runtime');
+
+    const stored = createLaunchController({
+      env: {},
+      store: { get: () => 'runtime', set() {}, delete() {} },
+    });
+    assert.equal(stored.target.id, 'runtime');
+    const envWins = createLaunchController({
+      env: { ELASTOS_LAUNCH_TARGET: 'pc2' },
+      store: { get: () => 'runtime', set() {}, delete() {} },
+    });
+    assert.equal(envWins.target.start, pc2.startPC2);
+  } finally {
+    pc2.installPC2 = original;
+  }
 });
 
 test('launch target precedence is explicit, then env, then store, then PC2', () => {

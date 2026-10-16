@@ -305,9 +305,13 @@ No phone-home telemetry. `electron-log` writes local logs. The log panel is the 
 
 LAN QR codes stay PC2-only. The runtime gateway in this plan binds loopback. `--public` starts a tunnel and is out of scope for the first runtime target.
 
-### What this PR does not wire
+### Wiring
 
-`src/main/index.ts`, the preload, and the renderer are untouched. Unset `ELASTOS_LAUNCH_TARGET` cannot select the runtime, because nothing reads it. The new `.github/workflows/test.yml` runs `npm test` on pull requests (compile + `node --test`). The tag-based release workflow is unchanged.
+`src/main/launchController.ts` is what `src/main/index.ts` uses for start, stop, restart, install, update, uninstall, status, version, logs, and the tray. The preload keeps the `pc2:*` channel names; those handlers now call the controller. The renderer is unchanged.
+
+With no explicit id, no `ELASTOS_LAUNCH_TARGET`, and no stored preference, the controller's PC2 methods are the `pc2Manager` functions. `ELASTOS_LAUNCH_TARGET=runtime` (or a stored `runtime`) logs `cannot … yet` and does not call `installPC2`. The PC2 location dropdown still calls `pc2Manager.setEnvironment`.
+
+`.github/workflows/test.yml` runs `npm test` on pull requests. The tag-based release workflow is unchanged.
 
 ## 5. Ticket plan
 
