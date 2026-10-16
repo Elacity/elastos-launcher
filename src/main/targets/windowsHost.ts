@@ -148,6 +148,7 @@ export async function runHostAction(
     throw new Error(WINDOWS_REBOOT_MESSAGE);
   }
   if (code !== 0) {
+    if (text.trim()) console.error(text.trim());
     throw new Error(kind === 'enable-wsl'
       ? 'Windows did not turn on Linux support. Click Enable to try again.'
       : 'ElastOS could not add its Linux environment. Click Set up to try again.');
@@ -201,6 +202,7 @@ export async function applyWindowsFix(facts: WindowsFacts, deps: {
   spawnHidden: HiddenSpawn;
   installDir?: string;
   ensureRootfs?: () => Promise<string>;
+  prepareImportDir?: (dir: string) => void;
   onReboot?: () => void;
 }): Promise<void> {
   const prompt = hostPrompt(facts);
@@ -211,7 +213,18 @@ export async function applyWindowsFix(facts: WindowsFacts, deps: {
   }
   if (prompt.kind === 'setup-distro') {
     const rootfs = await deps.ensureRootfs?.();
-    await runHostAction('setup-distro', { ...deps, rootfs });
+    const installDir = deps.installDir ?? 'C:\\ElastOS\\distro';
+    // wsl --import fails immediately when this directory is missing.
+    (deps.prepareImportDir ?? prepareWindowsImportDir)(installDir);
+    await runHostAction('setup-distro', { ...deps, installDir, rootfs });
+  }
+}
+
+/** Create the empty folder wsl --import writes the ElastOS distro into. */
+export function prepareWindowsImportDir(dir: string): void {
+  fs.mkdirSync(dir, { recursive: true });
+  if (fs.readdirSync(dir).length > 0) {
+    throw new Error('ElastOS could not add its Linux environment. Click Set up to try again.');
   }
 }
 
@@ -271,6 +284,7 @@ export async function fixWindowsOnThisComputer(): Promise<void> {
     spawnHidden,
     onReboot: () => markInstallResumeAfterReboot(os.homedir()),
     installDir: 'C:\\ElastOS\\distro',
+    prepareImportDir: prepareWindowsImportDir,
     ensureRootfs: () => ensureElastosRootfs({
       dest: path.join(os.homedir(), '.elastos-launcher', 'ubuntu-noble-wsl.rootfs.tar.gz'),
       exists: (file) => {

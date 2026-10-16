@@ -18,6 +18,7 @@ const {
   hostPrompt,
   importDistroArgs,
   finishResumeInstall,
+  prepareWindowsImportDir,
   markInstallResumeAfterReboot,
   planAfterWindowsRestart,
   resumeInstallPlanOnThisComputer,
@@ -132,18 +133,31 @@ test('a missing ElastOS distro is one Set up action, and a ready host does not a
   assert.equal(setup.actionLabel, 'Set up');
   assertPromptHasNoCommands(setup);
   const seen = [];
+  const prepared = [];
   await applyWindowsFix(
     { platform: 'win32', arch: 'x64', wslInstalled: true, distroReady: false },
     {
       installDir: 'C:\\ElastOS\\distro',
       ensureRootfs: async () => 'C:\\ElastOS\\rootfs.tar.gz',
+      prepareImportDir: (dir) => prepared.push(dir),
       spawnHidden: async (file, args, options) => {
         seen.push({ file, args: [...args], hide: options.windowsHide });
         return 0;
       },
     },
   );
+  assert.deepEqual(prepared, ['C:\\ElastOS\\distro']);
   assert.deepEqual(seen[0].args, importDistroArgs('C:\\ElastOS\\distro', 'C:\\ElastOS\\rootfs.tar.gz'));
+  const importDir = fs.mkdtempSync(path.join(os.tmpdir(), 'elastos-import-'));
+  const empty = path.join(importDir, 'distro');
+  try {
+    prepareWindowsImportDir(empty);
+    assert.equal(fs.statSync(empty).isDirectory(), true);
+    fs.writeFileSync(path.join(empty, 'keep'), 'x');
+    assert.throws(() => prepareWindowsImportDir(empty), /Click Set up/);
+  } finally {
+    fs.rmSync(importDir, { recursive: true, force: true });
+  }
   assert.equal(seen[0].hide, true);
   assert.equal(seen[0].args.includes('Ubuntu'), false);
 
