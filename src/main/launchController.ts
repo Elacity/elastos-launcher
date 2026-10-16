@@ -2,7 +2,7 @@ import * as pc2 from './pc2Manager';
 import { applyOpenAtLogin, readOpenAtLogin } from './targets/openAtLogin';
 import { buildDiagnostics, collectPreflight, PreflightReport, saveCollectedSupportBundle } from './targets/preflight';
 import { HEALTH_URL, isHealthOk } from './targets/runtimeGateway';
-import { collectFailureFacts, failureScreen, FailureScreen, fixCollectedFailure } from './targets/runtimeRecovery';
+import { collectFailureFacts, failureScreen, FailureScreen, fixCollectedFailure, windowsFixResult } from './targets/runtimeRecovery';
 import { createLaunchTargetStore, LaunchTargetPreferenceStore, resolveLaunchTargetId } from './targets/preferences';
 import { createLaunchTarget } from './targets';
 import { parseLaunchTargetId } from './targets/registry';
@@ -269,8 +269,14 @@ export function createLaunchController(options: LaunchControllerOptions = {}): L
       const preflight = active.id === 'runtime' ? await collectPreflight() : { ok: true, checks: [] };
       const facts = collectFailureFacts(lastError, preflight.checks);
       if (failureScreen(facts).kind === 'windows') {
-        await fixWindowsOnThisComputer();
-        return 'ready';
+        return windowsFixResult(() => fixWindowsOnThisComputer(), async () => {
+          try {
+            const response = await fetch(HEALTH_URL, { signal: AbortSignal.timeout(800) });
+            return { status: response.status, body: await response.text() };
+          } catch {
+            return null;
+          }
+        });
       }
       return fixCollectedFailure(facts);
     },

@@ -1,7 +1,7 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { HEALTH_URL } from './runtimeGateway';
+import { HEALTH_URL, isHealthOk } from './runtimeGateway';
 import { installRuntimeOnThisComputer } from './runtimeInstall';
 import { runtimeBinaryPath, runtimeComponentsPath, runtimeDataDir, runtimeHostLockPath } from './runtimePaths';
 import { loadActiveRuntimePin } from './runtimePin';
@@ -39,6 +39,7 @@ export interface RecoveryDeps {
   resumeSetup: () => Promise<void>;
   removeLock: (lockPath: string) => void;
   enableWindows?: () => Promise<void>;
+  healthOk?: () => Promise<boolean>;
 }
 
 const GENERIC = 'Something went wrong. Try again. If it keeps happening, copy diagnostics.';
@@ -137,9 +138,9 @@ export function failureScreen(facts: FailureFacts): FailureScreen {
 export async function applyFix(facts: FailureFacts, deps: RecoveryDeps): Promise<'ready' | 'still-blocked'> {
   const kind = classify(facts);
   if (kind === 'windows') {
-    if (!deps.enableWindows) return 'still-blocked';
+    if (!deps.enableWindows || !deps.healthOk) return 'still-blocked';
     await deps.enableWindows();
-    return 'ready';
+    return (await deps.healthOk()) ? 'ready' : 'still-blocked';
   }
   if (kind === 'offline') {
     return (await deps.recheckOnline()) ? 'ready' : 'still-blocked';
@@ -197,6 +198,14 @@ export function collectFailureFacts(error: string, checks: FailureCheck[]): Fail
     lockPath: lockText == null ? null : lockPath,
     pidAlive,
   };
+}
+
+export async function windowsFixResult(
+  enable: () => Promise<void>,
+  health: () => Promise<{ status: number; body: string } | null>,
+): Promise<'ready' | 'still-blocked'> {
+  await enable();
+  return isHealthOk(await health()) ? 'ready' : 'still-blocked';
 }
 
 export async function fixCollectedFailure(facts: FailureFacts): Promise<'ready' | 'still-blocked'> {
