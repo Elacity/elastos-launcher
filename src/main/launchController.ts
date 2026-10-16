@@ -3,6 +3,7 @@ import { buildDiagnostics, collectPreflight, PreflightReport, saveCollectedSuppo
 import { confirmInstalledGateway, HEALTH_URL, isHealthOk } from './targets/runtimeGateway';
 import { collectFailureFacts, failureScreen, FailureScreen, fixCollectedFailure, windowsFixResult } from './targets/runtimeRecovery';
 import { resolveLaunchTargetId } from './targets/preferences';
+import { LAUNCH_TARGET_ENV } from './targets/registry';
 import { createLaunchTarget } from './targets';
 import { setRuntimeLogSink } from './targets/runtimeGateway';
 import { loadActiveRuntimePin } from './targets/runtimePin';
@@ -45,7 +46,34 @@ export interface LaunchController {
   fixFailure(): Promise<'ready' | 'still-blocked'>;
   setOpenAtLogin(enabled: boolean): void;
   getOpenAtLogin(): boolean;
-  shutdown(): void;
+  shutdown(): Promise<void>;
+}
+
+export interface QuitGate {
+  started: boolean;
+  ready: boolean;
+}
+
+/**
+ * The first before-quit waits for the gateway this window started.
+ * A second before-quit, after that stop has finished, is the real quit.
+ */
+export async function finishQuitAfterGatewayStop(
+  gate: QuitGate,
+  event: { preventDefault(): void },
+  shutdown: () => Promise<void>,
+  quit: () => void,
+): Promise<void> {
+  if (gate.ready) return;
+  event.preventDefault();
+  if (gate.started) return;
+  gate.started = true;
+  try {
+    await shutdown();
+  } finally {
+    gate.ready = true;
+    quit();
+  }
 }
 
 export interface LaunchInfo {
@@ -63,8 +91,15 @@ function messageOf(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
-/** IPC-facing supervisor for the ElastOS runtime. */
+/** IPC-facing supervisor for the ElastOS runtime. A leftover `pc2` target opens the runtime. */
 export function createDefaultLaunchController(env: NodeJS.ProcessEnv = process.env): LaunchController {
+  const raw = env[LAUNCH_TARGET_ENV];
+  if (typeof raw === 'string' && raw.trim().toLowerCase() === 'pc2') {
+    console.error('ELASTOS_LAUNCH_TARGET=pc2 is retired. Opening the ElastOS runtime.');
+    const cleaned: NodeJS.ProcessEnv = { ...env };
+    delete cleaned[LAUNCH_TARGET_ENV];
+    return createLaunchController({ env: cleaned });
+  }
   return createLaunchController({ env });
 }
 
@@ -244,8 +279,13 @@ export function createLaunchController(options: LaunchControllerOptions = {}): L
     getOpenAtLogin() {
       return readOpenAtLogin();
     },
-    shutdown() {
-      void active.stop().catch(() => {});
+    async shutdown() {
+      try {
+        await active.stop();
+      } catch (err) {
+        if (messageOf(err).includes('did not start it')) return;
+        throw err;
+      }
     },
   };
 }

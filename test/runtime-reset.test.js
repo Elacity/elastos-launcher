@@ -1,6 +1,5 @@
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
-const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
 
@@ -35,9 +34,16 @@ test('a dotted account name is still a launcher path', async () => {
   assert.equal(launcherOwnedDirectories('/home/jane.doe/.local/share/elastos'), true);
   assert.equal(launcherOwnedDirectories('/Users/jane.doe/Library/Application Support/elastos'), true);
   assert.equal(launcherOwnedDirectories('C:/Users/jane.doe/Desktop/ElastOS-support.txt'), true);
+  assert.equal(launcherOwnedDirectories('/home/jane.doe/.local/share/elastos/host-process.lock'), true);
+  assert.equal(launcherOwnedDirectories('/home/jane.doe/.elastos-launcher/install-stage.json'), true);
+  assert.equal(launcherOwnedDirectories('/home/jane.doe/ElastOS-support.txt'), true);
   assert.equal(launcherOwnedDirectories('/home/jane.doe/.pc2/note'), false);
   assert.equal(launcherOwnedDirectories('/home/tester/.other/elastos'), false);
   assert.equal(launcherOwnedDirectories('C:/Users/tester/.other/elastos'), false);
+  assert.equal(launcherOwnedDirectories('/usr/local/bin/elastos'), false);
+  assert.equal(launcherOwnedDirectories('/home/u/Documents/elastos'), false);
+  assert.equal(launcherOwnedDirectories('/home/tester/../tester/.local/bin/elastos'), false);
+  assert.equal(launcherOwnedDirectories('/home/tester/.LOCAL/bin/elastos'), false);
 
   const removed = [];
   await resetRuntime({
@@ -94,26 +100,36 @@ test('reset refuses a foreign directory, a live foreign host, and a misnamed sta
 });
 
 test('reset refuses a symlink and a dotted foreign directory', async () => {
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'elastos-reset-'));
-  const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'elastos-outside-'));
-  const data = path.join(root, 'elastos');
-  fs.mkdirSync(data);
-  const link = path.join(root, 'link');
-  fs.symlinkSync(outside, link);
+  const binary = '/home/tester/.local/bin/elastos';
+  const data = '/home/tester/.local/share/elastos';
+  const stage = '/home/tester/.elastos-launcher/install-stage.json';
   const removed = [];
   await assert.rejects(() => resetRuntime({
-    binary: path.join(link, 'elastos'),
+    binary,
     dataDir: data,
-    stageFile: path.join(root, 'install-stage.json'),
+    stageFile: stage,
     stop: async () => {},
     remove: (target) => { removed.push(target); },
+    lstat: (file) => ({
+      isSymbolicLink: () => file === '/home/tester/.local',
+      dev: 1,
+      ino: 1,
+    }),
   }), /symlink/);
   assert.deepEqual(removed, []);
 
   await assert.rejects(() => resetRuntime({
-    binary: path.join(root, 'elastos'),
+    binary: '/usr/local/bin/elastos',
+    dataDir: '/home/u/Documents/elastos',
+    stageFile: stage,
+    stop: async () => { throw new Error('stop should not run'); },
+    remove: (target) => { removed.push(target); },
+  }), /not the ElastOS data directory/);
+
+  await assert.rejects(() => resetRuntime({
+    binary,
     dataDir: 'C:/Users/tester/.other/elastos',
-    stageFile: path.join(root, 'install-stage.json'),
+    stageFile: stage,
     stop: async () => { throw new Error('stop should not run'); },
     remove: (target) => { removed.push(target); },
   }), /not the ElastOS data directory/);
@@ -121,9 +137,9 @@ test('reset refuses a symlink and a dotted foreign directory', async () => {
 
   const inspected = [];
   await assert.rejects(() => resetRuntime({
-    binary: path.join(root, 'elastos'),
+    binary,
     dataDir: data,
-    stageFile: path.join(root, 'install-stage.json'),
+    stageFile: stage,
     stop: async () => {},
     remove: (target) => { removed.push(target); },
     lstat: (file) => {
