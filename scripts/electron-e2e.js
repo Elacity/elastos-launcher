@@ -47,11 +47,17 @@ async function main() {
 
   try {
     const page = await electronApp.firstWindow();
-    await page.waitForFunction(() => {
-      const button = document.getElementById('open-btn');
-      const label = document.getElementById('open-label');
-      return Boolean(button && label && !button.disabled && label.textContent === 'Install');
-    }, null, { timeout: 60000 });
+    const readyDeadline = Date.now() + 60000;
+    while (Date.now() < readyDeadline) {
+      const label = (await page.locator('#open-label').innerText({ timeout: 5000 })).trim();
+      const disabled = await page.locator('#open-btn').isDisabled();
+      if (label === 'Install' && !disabled) break;
+      await page.waitForTimeout(250);
+    }
+    const readyLabel = (await page.locator('#open-label').innerText()).trim();
+    if (readyLabel !== 'Install') {
+      throw new Error(`Install button did not become ready (button is ${readyLabel})`);
+    }
     await page.click('#open-btn');
     console.log('Clicked Install');
 
@@ -96,12 +102,17 @@ async function main() {
     console.log(logs);
     throw new Error(`Install did not reach Open my computer (button is ${label})`);
   } finally {
+    const exiting = electronApp.evaluate(({ app }) => {
+      app.exit(0);
+    }).catch(() => {});
+    await Promise.race([
+      exiting,
+      new Promise((resolve) => { setTimeout(resolve, 3000); }),
+    ]);
     try {
-      await electronApp.evaluate(({ app }) => {
-        app.exit(0);
-      });
+      electronApp.process().kill('SIGKILL');
     } catch {
-      await electronApp.close().catch(() => {});
+      // The window already closed.
     }
   }
 }
