@@ -1,8 +1,9 @@
 name: Runtime smoke
 
-# Non-blocking. A red run does not fail the pull request.
-# Installs the active pin (canary until stable is published) or falls back
-# to the hosted installer, then checks gateway /healthz and /home/.
+# Linux x64 and macOS arm64 are required. A red run fails the pull request.
+# Those two jobs install the active pin (canary until stable is published)
+# or fall back to the hosted installer, then check gateway /healthz and /home/.
+# The Windows job is still a skip until the dedicated ElastOS distro lands.
 on:
   pull_request:
   workflow_dispatch:
@@ -10,7 +11,6 @@ on:
 jobs:
   smoke:
     name: smoke (${{ matrix.platform }})
-    continue-on-error: true
     timeout-minutes: 45
     strategy:
       fail-fast: false
