@@ -24,6 +24,11 @@ import {
   toUpdateCheck,
 } from './runtimeUpdate';
 import { loadActiveRuntimePin } from './runtimePin';
+import {
+  createDistroGatewaySupervisor,
+  distroIsInstalled,
+  readDistroVersion,
+} from './windowsRuntime';
 import { LaunchTarget, UpdateCheck } from './types';
 
 /**
@@ -48,12 +53,23 @@ export function createRuntimeTarget(): LaunchTarget {
           return phase;
         }
       }
+      if (process.platform === 'win32') {
+        if (!distroIsInstalled()) return 'not-installed';
+        if (isHealthOk(await readHealth())) return 'running';
+        return 'stopped';
+      }
       if (runtimeInstallBlock(process.platform, process.arch)) return 'not-installed';
       if (!(await runtimeIsInstalled())) return 'not-installed';
       if (isHealthOk(await readHealth())) return 'running';
       return 'stopped';
     },
     start: async () => {
+      if (process.platform === 'win32') {
+        if (!distroIsInstalled()) throw new Error('ElastOS is not installed yet. Click Install.');
+        if (!supervisor) supervisor = createDistroGatewaySupervisor();
+        await supervisor.start();
+        return;
+      }
       const block = runtimeInstallBlock(process.platform, process.arch);
       if (block) throw new Error(block);
       const file = binary();
@@ -71,6 +87,13 @@ export function createRuntimeTarget(): LaunchTarget {
       }
     },
     restart: async () => {
+      if (process.platform === 'win32') {
+        if (supervisor) await supervisor.stop();
+        if (!distroIsInstalled()) throw new Error('ElastOS is not installed yet. Click Install.');
+        if (!supervisor) supervisor = createDistroGatewaySupervisor();
+        await supervisor.start();
+        return;
+      }
       if (supervisor) await supervisor.stop();
       const file = binary();
       if (!file) throw new Error('ElastOS is not installed yet. Click Install.');
@@ -80,7 +103,7 @@ export function createRuntimeTarget(): LaunchTarget {
     install: (onProgress) => runtimeInstall.installRuntimeOnThisComputer(onProgress),
     update: (onProgress) => applyRuntimeUpdate(runRuntimeCommand, runtimeHeadStore(), headVerify(), onProgress),
     uninstall: () => runtimeUninstall(() => supervisor?.stop() ?? Promise.resolve()),
-    getVersion: () => readRuntimeVersion(),
+    getVersion: () => (process.platform === 'win32' ? readDistroVersion() : readRuntimeVersion()),
     checkForUpdate: () => runtimeCheckForUpdate(),
     openInBrowser: () => openRuntimeHome(),
     getLogs: async (lines) => supervisor?.getLogs(lines) ?? '',
@@ -159,6 +182,7 @@ async function runtimeUninstall(stop: () => Promise<void>): Promise<void> {
 }
 
 async function runtimeIsInstalled(): Promise<boolean> {
+  if (process.platform === 'win32') return distroIsInstalled();
   if (runtimeInstallBlock(process.platform, process.arch)) return false;
   const homeDir = os.homedir();
   const probe = await probeRuntimeInstallation({

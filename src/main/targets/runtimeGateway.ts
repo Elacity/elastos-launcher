@@ -362,6 +362,10 @@ export function setRuntimeLogSink(sink: (line: string) => void): void {
   logSink = sink;
 }
 
+export function emitRuntimeLog(line: string): void {
+  logSink(line);
+}
+
 export function createDefaultGatewaySupervisor(binary: string): GatewaySupervisor {
   return createGatewaySupervisor({
     binary,
@@ -383,6 +387,12 @@ export function createDefaultGatewaySupervisor(binary: string): GatewaySuperviso
 }
 
 export function confirmInstalledGateway(): Promise<boolean> {
+  if (process.platform === 'win32') {
+    const windows = require('./windowsRuntime') as {
+      confirmDistroGateway: () => Promise<boolean>;
+    };
+    return windows.confirmDistroGateway();
+  }
   const lockPath = runtimeHostLockPath(runtimeDataDir(process.platform, os.homedir(), process.env));
   let text: string | null = null;
   try {

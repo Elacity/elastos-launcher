@@ -9,6 +9,7 @@ import {
   runtimeComponentsPath,
   runtimeDataDir,
   runtimeInstallStagePath,
+  runtimeJoin,
   runtimeSourcesPath,
 } from './runtimePaths';
 import { probeRuntimeInstallation, RuntimeProbe, RuntimeProbeRequest } from './runtimeProbe';
@@ -268,9 +269,9 @@ async function runInstallerStep(
   if (!sha256Equals(sha256Hex(script), deps.pin.installerSha256)) {
     throw new PinMismatchError('installerSha256');
   }
-  const dir = path.join(deps.homeDir, '.elastos-launcher');
+  const dir = runtimeJoin(deps.homeDir, '.elastos-launcher');
   deps.mkdirp(dir);
-  const scriptPath = path.join(dir, 'install.sh');
+  const scriptPath = runtimeJoin(dir, 'install.sh');
   deps.writeFile(scriptPath, script);
   const written = deps.readFile(scriptPath);
   if (!sha256Equals(sha256Hex(written), deps.pin.installerSha256)) {
@@ -376,5 +377,12 @@ async function fetchText(url: string): Promise<string> {
 export async function installRuntimeOnThisComputer(
   onProgress: (message: string) => void = () => {},
 ): Promise<void> {
+  if (process.platform === 'win32') {
+    const windows = require('./windowsRuntime') as {
+      installRuntimeInsideDistro: (onProgress: (message: string) => void) => Promise<void>;
+    };
+    await windows.installRuntimeInsideDistro(onProgress);
+    return;
+  }
   await installRuntime(defaultRuntimeInstallDeps(), onProgress);
 }

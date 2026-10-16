@@ -43,17 +43,16 @@ export function evaluatePreflight(input: PreflightInput): PreflightReport {
       distroReady: input.distroReady ?? false,
     });
     const message = `${prompt.title}. ${prompt.body}`;
+    const ready = prompt.kind === 'ready';
     checks.push({
       id: 'windows',
-      level: prompt.kind === 'ready' ? 'pass' : 'block',
+      level: ready ? 'pass' : 'block',
       message,
     });
     checks.push({
       id: 'platform',
-      level: 'block',
-      message: prompt.kind === 'ready'
-        ? 'Windows is ready. This button cannot finish the install inside Linux yet. You do not type any commands.'
-        : message,
+      level: ready ? 'pass' : 'block',
+      message: ready ? 'This computer can run ElastOS.' : message,
     });
   } else {
     const platform = runtimeInstallBlock(input.platform, input.arch);

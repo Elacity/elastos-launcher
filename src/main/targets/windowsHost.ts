@@ -62,7 +62,7 @@ export function hostPrompt(facts: WindowsFacts): HostPrompt {
   return {
     kind: 'ready',
     title: 'Windows is ready',
-    body: 'Linux support is on. This button cannot finish the install inside that environment yet. You do not type any commands.',
+    body: 'Linux support is on. Click Install. ElastOS sets itself up in its own Linux environment and opens in the browser. You do not type any commands.',
     actionLabel: null,
   };
 }
@@ -216,14 +216,14 @@ export async function fixWindowsOnThisComputer(): Promise<void> {
       exists: (file) => {
         try { return fs.statSync(file).isFile(); } catch { return false; }
       },
-      download: downloadToFile,
+      download: downloadPinnedRootfs,
       read: (file) => fs.readFileSync(file),
       accept: assertPinnedRootfs,
     }),
   });
 }
 
-async function downloadToFile(url: string, dest: string): Promise<void> {
+export async function downloadPinnedRootfs(url: string, dest: string): Promise<void> {
   if (url !== ELASTOS_ROOTFS_URL) {
     throw new Error('Refusing to download a Linux environment that is not the pinned file.');
   }

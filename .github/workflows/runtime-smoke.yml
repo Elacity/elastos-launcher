@@ -95,3 +95,28 @@ jobs:
           else
             npm run e2e
           fi
+
+  windows-app:
+    name: app install (windows-wsl)
+    timeout-minutes: 60
+    runs-on: windows-2025
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - name: Install dependencies
+        env:
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1'
+        run: npm ci
+
+      - name: Compile
+        run: npx tsc
+
+      - name: Install inside the ElastOS distro and require /healthz
+        run: node scripts/windows-app-install.js
