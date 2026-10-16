@@ -151,23 +151,24 @@ async function main() {
     }
     console.log(`Clicked ${clicked}`);
 
-    const deadline = Date.now() + 20 * 60 * 1000;
+    // Windows has no ElastOS distro yet, so Install stops on "Click Set up".
+    // Fix it imports that distro and leaves the gateway down, so the button
+    // returns to Install and the click has to run the real install.
+    const budgetMs = process.platform === 'win32' ? 45 * 60 * 1000 : 20 * 60 * 1000;
+    const deadline = Date.now() + budgetMs;
     let lastPrinted = 0;
     let label = '';
+    let windowsFix = 'pending';
     while (Date.now() < deadline) {
       label = (await page.locator('#open-label').innerText()).trim();
       const logs = await page.locator('#logs-content').innerText();
       const errorVisible = await page.locator('#error-box').evaluate((node) => !node.classList.contains('hidden'));
       const errorText = (await page.locator('#error-text').innerText()).trim();
+      const openDisabled = await page.locator('#open-btn').isDisabled();
       if (Date.now() - lastPrinted > 30000) {
         const tail = logs.split('\n').filter(Boolean).slice(-3).join(' | ');
         console.log(`button=${label} log=${tail || '(empty)'}`);
         lastPrinted = Date.now();
-      }
-      if (errorVisible && errorText) {
-        console.log('----- install log -----');
-        console.log(logs);
-        throw new Error(errorText);
       }
       if (label === 'Open my computer') {
         console.log('----- install log -----');
@@ -179,6 +180,41 @@ async function main() {
         }
         console.log('Install reached Open my computer');
         return;
+      }
+      if (errorVisible && errorText && /Set up ElastOS on Windows|Windows needs Linux support|Windows needs one step/.test(errorText)) {
+        const fixHidden = await page.locator('#fix-btn').evaluate((node) => node.classList.contains('hidden'));
+        const fixDisabled = await page.locator('#fix-btn').isDisabled();
+        if (windowsFix === 'pending' && !fixHidden && !fixDisabled) {
+          await page.click('#fix-btn');
+          windowsFix = 'running';
+          console.log('Clicked Fix it to add the ElastOS Linux environment');
+        } else if (windowsFix === 'running' && !fixHidden && !fixDisabled) {
+          console.log('----- install log -----');
+          console.log(logs);
+          throw new Error(errorText);
+        }
+        await page.waitForTimeout(1000);
+        continue;
+      }
+      const fixHidden = errorVisible
+        ? await page.locator('#fix-btn').evaluate((node) => node.classList.contains('hidden'))
+        : true;
+      const fixDisabled = await page.locator('#fix-btn').isDisabled();
+      if (windowsFix === 'running' && label === 'Install' && !openDisabled && fixHidden && !fixDisabled) {
+        await page.click('#open-btn');
+        windowsFix = 'installing';
+        console.log('Clicked Install after Windows setup');
+        await page.waitForTimeout(1000);
+        continue;
+      }
+      if ((windowsFix === 'running' || windowsFix === 'installing') && (label === 'Working…' || openDisabled)) {
+        await page.waitForTimeout(1000);
+        continue;
+      }
+      if (errorVisible && errorText) {
+        console.log('----- install log -----');
+        console.log(logs);
+        throw new Error(errorText);
       }
       if (label === 'Try again') {
         console.log('----- install log -----');
@@ -207,10 +243,11 @@ async function main() {
   }
 }
 
+const capMs = process.platform === 'win32' ? 50 * 60 * 1000 : 22 * 60 * 1000;
 setTimeout(() => {
-  console.error('e2e did not finish within 22 minutes');
+  console.error(`e2e did not finish within ${capMs / 60000} minutes`);
   process.exit(1);
-}, 22 * 60 * 1000);
+}, capMs);
 
 main().then(() => {
   process.exit(0);

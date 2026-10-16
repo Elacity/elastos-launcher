@@ -98,6 +98,8 @@ test('the electron e2e clicks Install and waits for Open my computer', () => {
   assert.match(script, /--disable-gpu-sandbox/);
   assert.match(script, /APPDATA/);
   assert.match(script, /LOCALAPPDATA/);
+  assert.match(script, /#fix-btn/);
+  assert.match(script, /Set up ElastOS on Windows/);
 });
 
 test('the flattened smoke pin keeps the installer hash', () => {
