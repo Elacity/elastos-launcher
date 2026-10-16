@@ -5,6 +5,7 @@ const path = require('node:path');
 const test = require('node:test');
 
 const { resetRuntime } = require('../dist/main/targets/runtimeUninstall');
+const { launcherOwnedDirectories } = require('../dist/main/targets/runtimePaths');
 const flow = require('../src/renderer/flow.js');
 
 test('reset removes the runtime program, data, and unfinished install', async () => {
@@ -27,6 +28,30 @@ test('reset removes the runtime program, data, and unfinished install', async ()
     '/home/tester/.elastos-launcher/install-stage.json',
   ]);
   assert.deepEqual(removed, calls.slice(1));
+});
+
+test('a dotted account name is still a launcher path', async () => {
+  assert.equal(launcherOwnedDirectories('/Users/jane.doe/.local/bin/elastos'), true);
+  assert.equal(launcherOwnedDirectories('/home/jane.doe/.local/share/elastos'), true);
+  assert.equal(launcherOwnedDirectories('/Users/jane.doe/Library/Application Support/elastos'), true);
+  assert.equal(launcherOwnedDirectories('C:/Users/jane.doe/Desktop/ElastOS-support.txt'), true);
+  assert.equal(launcherOwnedDirectories('/home/jane.doe/.pc2/note'), false);
+  assert.equal(launcherOwnedDirectories('/home/tester/.other/elastos'), false);
+  assert.equal(launcherOwnedDirectories('C:/Users/tester/.other/elastos'), false);
+
+  const removed = [];
+  await resetRuntime({
+    binary: '/home/jane.doe/.local/bin/elastos',
+    dataDir: '/home/jane.doe/.local/share/elastos',
+    stageFile: '/home/jane.doe/.elastos-launcher/install-stage.json',
+    stop: async () => {},
+    remove: (target) => { removed.push(target); },
+  });
+  assert.deepEqual(removed, [
+    '/home/jane.doe/.local/bin/elastos',
+    '/home/jane.doe/.local/share/elastos',
+    '/home/jane.doe/.elastos-launcher/install-stage.json',
+  ]);
 });
 
 test('reset refuses a foreign directory, a live foreign host, and a misnamed stage file', async () => {

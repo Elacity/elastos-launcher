@@ -186,9 +186,10 @@ ipcMain.handle('elastos:getLaunchInfo', () => launch.getLaunchInfo());
 ipcMain.handle('elastos:getPreflight', () => launch.getPreflight());
 ipcMain.handle('elastos:getDiagnostics', () => launch.getDiagnostics());
 ipcMain.handle('elastos:saveSupportBundle', () => launch.saveSupportBundle());
-ipcMain.handle('elastos:describeLegacyPc2', () => ({ items: describeLegacyPc2OnThisComputer() }));
-ipcMain.handle('elastos:removeLegacyPc2', async (_event, backup: unknown) => {
-  const result = await removeLegacyPc2OnThisComputer({ backup: backup === true });
+ipcMain.handle('elastos:describeLegacyPc2', async () => ({ items: await describeLegacyPc2OnThisComputer() }));
+ipcMain.handle('elastos:removeLegacyPc2', async (_event, backup: unknown, paths: unknown) => {
+  const confirmed = Array.isArray(paths) ? paths.filter((entry): entry is string => typeof entry === 'string') : [];
+  const result = await removeLegacyPc2OnThisComputer({ backup: backup === true, paths: confirmed });
   if (result.ok) return result;
   let bundle = '';
   try {

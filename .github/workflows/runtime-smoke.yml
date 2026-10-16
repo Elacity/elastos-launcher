@@ -96,6 +96,16 @@ jobs:
             npm run e2e
           fi
 
+      - name: Offer Remove PC2 for a seeded v1.4.0 home
+        env:
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1'
+        run: |
+          if [ "$(uname -s)" = "Linux" ]; then
+            xvfb-run -a --server-args="-screen 0 1280x1024x24" node scripts/legacy-upgrade-e2e.js
+          else
+            node scripts/legacy-upgrade-e2e.js
+          fi
+
   windows-app:
     name: app install (windows-wsl)
     timeout-minutes: 60

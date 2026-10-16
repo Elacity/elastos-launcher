@@ -39,6 +39,8 @@ const confirmBackup = document.getElementById('confirm-backup');
 let currentStatus = 'stopped';
 let confirmMode = 'uninstall';
 let legacyItems = [];
+let legacyConfirmPaths = [];
+let pc2Busy = false;
 let targetId = 'runtime';
 let openUrl = 'http://127.0.0.1:8090/home/';
 let busy = false;
@@ -290,14 +292,15 @@ uninstallBtn.addEventListener('click', async () => {
 });
 
 removePc2Btn.addEventListener('click', () => {
-  if (!legacyItems.length) return;
+  if (!legacyItems.length || pc2Busy) return;
+  legacyConfirmPaths = legacyItems.map((entry) => String(entry.path));
   const copy = flow.legacyPc2Copy(legacyItems);
   confirmMode = 'pc2';
   confirmTitle.textContent = copy.title;
   confirmBody.textContent = copy.body;
   confirmPath.textContent = copy.list;
   confirmDelete.textContent = copy.confirm;
-  const canBackup = legacyItems.some((entry) => String(entry.path).endsWith('/.pc2') || String(entry.path).endsWith('\\.pc2'));
+  const canBackup = legacyItems.some((entry) => entry.scope === 'distro' || String(entry.path).endsWith('/.pc2') || String(entry.path).endsWith('\\.pc2'));
   confirmBackupRow.classList.toggle('hidden', !canBackup);
   confirmBackup.checked = false;
   confirmModal.classList.remove('hidden');
@@ -308,15 +311,20 @@ confirmCancel.addEventListener('click', () => confirmModal.classList.add('hidden
 confirmDelete.addEventListener('click', async () => {
   confirmModal.classList.add('hidden');
   if (confirmMode === 'pc2') {
+    if (pc2Busy) return;
     const backup = confirmBackup.checked;
+    const paths = legacyConfirmPaths.slice();
     hidePc2Backup();
+    pc2Busy = true;
     statusText.textContent = 'Removing PC2...';
     try {
-      const result = await window.elastos.removeLegacyPc2(backup);
+      const result = await window.elastos.removeLegacyPc2(backup, paths);
       addLog(result && result.message ? result.message : 'PC2 removed');
       clearError();
     } catch (err) {
       showError(err && err.message ? err.message : 'PC2 could not be removed.');
+    } finally {
+      pc2Busy = false;
     }
     await refreshLegacyPc2();
     updateStatus(currentStatus);

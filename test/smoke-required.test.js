@@ -19,6 +19,7 @@ test('the runtime smoke workflow has no continue-on-error', () => {
   assert.match(workflow, /pwsh -File scripts\/windows-elastos-distro\.ps1/);
   assert.match(workflow, /bash scripts\/runtime-rollback\.sh/);
   assert.match(workflow, /npm run e2e/);
+  assert.match(workflow, /scripts\/legacy-upgrade-e2e\.js/);
   assert.match(workflow, /xvfb-run/);
   assert.match(workflow, /macos-14/);
   assert.match(workflow, /node scripts\/windows-app-install\.js/);

@@ -73,6 +73,11 @@ test('save support bundle writes only ElastOS-support.txt outside the data dirs'
   assert.equal(written.get(file).includes('sekrit'), false);
   assert.match(written.get(file), /launcher: 1\.4\.0/);
 
+  const dotted = [];
+  const dottedDesktop = 'C:/Users/jane.doe/Desktop/ElastOS-support.txt';
+  saveSupportBundle(dottedDesktop, 'launcher: 1.4.0\n', (target) => { dotted.push(target); });
+  assert.deepEqual(dotted, [dottedDesktop]);
+
   assert.throws(
     () => saveSupportBundle(path.join(home, '.local/share/elastos/ElastOS-support.txt'), 'x', () => {}),
     /ElastOS data directory/,

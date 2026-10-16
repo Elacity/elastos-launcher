@@ -6,17 +6,23 @@ const test = require('node:test');
 const { execFileSync } = require('node:child_process');
 
 const {
+  clearLegacyPc2DescribeCache,
+  describeLegacyPc2OnThisComputer,
   discoverLegacyPc2,
   isPc2DistroName,
   defaultUserDistro,
+  legacyPc2DescribeRuns,
   parseWslDistroList,
   privilegedRemovalScript,
   removeDiscoveredLegacyPc2,
   removeLegacyPc2,
   selectPc2Pids,
+  sudoersIsPc2,
   withSupportBundle,
   wslRemovalArgs,
+  zipCentralDirectoryFooter,
   zipDirectories,
+  zipStoredSizeFields,
 } = require('../dist/main/legacyPc2Removal');
 const { runtimeBinaryPath, runtimeDataDir, runtimeInstallStagePath } = require('../dist/main/targets/runtimePaths');
 const flow = require('../src/renderer/flow.js');
@@ -93,6 +99,12 @@ function world(home) {
     },
   };
 }
+
+const AMNEZIA_SUDOERS = [
+  'tester ALL=(ALL) NOPASSWD:SETENV: /usr/local/bin/awg-quick',
+  'tester ALL=(ALL) NOPASSWD: /usr/bin/killall amneziawg-go',
+  'tester ALL=(ALL) NOPASSWD: /bin/rm -rf /var/run/amneziawg/',
+].join('\n');
 
 function tracker(extra = {}) {
   const calls = [];
@@ -224,7 +236,7 @@ test('refuses a symlink root and a symlink that escapes the PC2 folder', async (
       fs.rmSync(file, { recursive: true, force: true });
     },
   });
-  const rootResult = await removeLegacyPc2(diskProbe(home), act);
+  const rootResult = await removeLegacyPc2(diskProbe(home), act, [linked]);
   assert.equal(rootResult.ok, false);
   assert.match(rootResult.message, /symlink/);
   assert.equal(fs.readFileSync(path.join(outside, 'secret'), 'utf8'), 'keep-me');
@@ -234,7 +246,7 @@ test('refuses a symlink root and a symlink that escapes the PC2 folder', async (
   fs.mkdirSync(linked);
   fs.writeFileSync(path.join(linked, 'note.txt'), 'mine');
   fs.symlinkSync(outside, path.join(linked, 'escape'));
-  const nested = await removeLegacyPc2(diskProbe(home), act);
+  const nested = await removeLegacyPc2(diskProbe(home), act, [linked]);
   assert.equal(nested.ok, false);
   assert.match(nested.message, /symlink/);
   assert.equal(fs.readFileSync(path.join(outside, 'secret'), 'utf8'), 'keep-me');
@@ -246,11 +258,11 @@ test('removal is idempotent and a partial failure is reported', async () => {
   const home = '/home/tester';
   const box = world(home);
   const pc2 = path.join(home, '.pc2');
-  const sudoers = '/etc/sudoers.d/elastos';
+  const sudoers = '/etc/sudoers.d/amneziawg';
   box.dir(home);
   box.dir(pc2);
   box.file(path.join(pc2, 'note.txt'), 'hello');
-  box.file(sudoers, 'rule');
+  box.file(sudoers, AMNEZIA_SUDOERS);
 
   const act = tracker({
     remove: (file) => {
@@ -262,23 +274,24 @@ test('removal is idempotent and a partial failure is reported', async () => {
       throw new Error('administrator permission was denied');
     },
   });
-  const first = await removeLegacyPc2(box.probe(), act);
+  const confirmed = [pc2, sudoers];
+  const first = await removeLegacyPc2(box.probe(), act, confirmed);
   assert.equal(first.ok, false);
   assert.notEqual(first.message, 'PC2 removed');
   assert.match(first.message, /could not be fully removed/i);
-  assert.match(first.message, /Still there: \/etc\/sudoers\.d\/elastos/);
+  assert.match(first.message, /Still there: \/etc\/sudoers\.d\/amneziawg/);
   assert.match(first.message, /administrator permission was denied/);
   assert.deepEqual(first.removed, [pc2]);
   assert.equal(first.failed[0].path, sudoers);
   assert.deepEqual(act.calls.map((call) => call[0]), ['stop', 'remove', 'privileged']);
   assert.deepEqual(act.calls[2][1], [sudoers]);
 
-  const second = await removeLegacyPc2(box.probe(), act);
+  const second = await removeLegacyPc2(box.probe(), act, confirmed);
   assert.equal(second.ok, false);
   assert.match(second.message, /Still there/);
 
   box.nodes.delete(sudoers);
-  const gone = await removeLegacyPc2(box.probe(), act);
+  const gone = await removeLegacyPc2(box.probe(), act, confirmed);
   assert.equal(gone.ok, true);
   assert.equal(gone.message, 'PC2 removed');
   assert.deepEqual(gone.removed, []);
@@ -313,7 +326,8 @@ test('lists only a real PC2 node tree and backs up the PC2 folder before deletin
   box.dir(pc2);
   box.file(path.join(pc2, 'note.txt'), 'hello');
   const act = tracker({ backup: true });
-  const result = await removeLegacyPc2(box.probe(), act);
+  const probe = box.probe();
+  const result = await removeLegacyPc2(probe, act, discoverLegacyPc2(probe).map((entry) => entry.path));
   assert.equal(result.ok, true);
   assert.equal(result.message, 'PC2 removed');
   assert.equal(act.calls[0][0], 'zip');
@@ -324,7 +338,7 @@ test('lists only a real PC2 node tree and backs up the PC2 folder before deletin
 
   const copy = flow.legacyPc2Copy([
     { label: 'PC2 folder', path: pc2, bytes: 5 },
-    { label: 'PC2 sudoers rule', path: '/etc/sudoers.d/elastos', bytes: null },
+    { label: 'PC2 sudoers rule', path: '/etc/sudoers.d/amneziawg', bytes: null },
   ]);
   assert.equal(copy.title, 'Remove PC2?');
   assert.equal(copy.backup, 'Back up my PC2 data first');
@@ -344,17 +358,42 @@ test('backup zip stores PC2 files and does not follow a symlink outside them', (
   fs.symlinkSync(outside, path.join(pc2, 'escape'));
   const dest = path.join(root, 'Downloads', 'PC2-backup-test.zip');
   zipDirectories([pc2], dest);
+  assert.equal(fs.statSync(dest).mode & 0o777, 0o600);
+  execFileSync('python3', ['-m', 'zipfile', '-t', dest], { encoding: 'utf8' });
   const listing = execFileSync('python3', ['-m', 'zipfile', '-l', dest], { encoding: 'utf8' });
   assert.match(listing, /\.pc2\/note\.txt/);
+  assert.equal(listing.includes('escape'), false);
   assert.equal(listing.includes('SECRET-OUTSIDE'), false);
+  const extracted = path.join(root, 'out');
+  fs.mkdirSync(extracted);
+  execFileSync('python3', ['-m', 'zipfile', '-e', dest, extracted]);
+  assert.equal(fs.readFileSync(path.join(extracted, '.pc2', 'note.txt'), 'utf8'), 'hello');
   assert.equal(fs.readFileSync(outside, 'utf8'), 'SECRET-OUTSIDE');
+
+  const footer = zipCentralDirectoryFooter(70000, 100, 0x100000000);
+  assert.equal(footer.readUInt32LE(0), 0x06064b50);
+  assert.equal(footer.readUInt32LE(footer.length - 22), 0x06054b50);
+  const small = zipCentralDirectoryFooter(1, 10, 20);
+  assert.equal(small.readUInt32LE(0), 0x06054b50);
+  assert.equal(small.readUInt16LE(8), 1);
+  const huge = zipStoredSizeFields(0x100000000);
+  assert.equal(huge.version, 45);
+  assert.equal(huge.sizeField, 0xffffffff);
+  assert.equal(huge.extra.readUInt16LE(0), 0x0001);
 });
 
 test('the privileged prompt and the WSL removal stay on known PC2 paths', () => {
-  const script = privilegedRemovalScript(['/etc/sudoers.d/elastos', '/usr/local/bin/sing-box']);
-  assert.match(script, /rm -f -- '\/etc\/sudoers\.d\/elastos'/);
-  assert.match(script, /rm -f -- '\/usr\/local\/bin\/sing-box'/);
+  const script = privilegedRemovalScript(['/etc/sudoers.d/amneziawg'], () => AMNEZIA_SUDOERS);
+  assert.match(script, /rm -f -- '\/etc\/sudoers\.d\/amneziawg'/);
+  assert.throws(() => privilegedRemovalScript(['/etc/sudoers.d/elastos']), /not part of the old PC2 install/);
+  assert.throws(() => privilegedRemovalScript(['/usr/local/bin/sing-box']), /not part of the old PC2 install/);
+  assert.throws(() => privilegedRemovalScript(['/etc/sudoers.d/../passwd']), /not part of the old PC2 install/);
   assert.throws(() => privilegedRemovalScript(['/etc/passwd']), /not part of the old PC2 install/);
+  const injected = "/Library/LaunchDaemons/pc2'$(id).plist";
+  const quoted = privilegedRemovalScript([injected]);
+  assert.match(quoted, /pc2'\\''\$\(id\)\.plist'/);
+  assert.equal(quoted.includes("$(id)"), true);
+  execFileSync('bash', ['-n', '-c', quoted]);
   const wslArgs = wslRemovalArgs('Ubuntu', '/home/user/.pc2');
   assert.deepEqual(wslArgs.slice(0, 3), ['-d', 'Ubuntu', '--']);
   execFileSync('bash', ['-n', '-c', wslArgs[5]]);
@@ -380,7 +419,8 @@ test('Remove PC2 stays hidden until a legacy install is reported', () => {
   assert.match(html, /id="confirm-backup"/);
   assert.match(html, /Back up my PC2 data first/);
   assert.match(app, /describeLegacyPc2/);
-  assert.match(app, /removeLegacyPc2/);
+  assert.match(app, /removeLegacyPc2\(backup, paths\)/);
+  assert.match(app, /legacyConfirmPaths/);
   assert.match(app, /legacyItems\.length === 0/);
   assert.match(app, /confirmMode === 'pc2'/);
   assert.equal(main.includes('./targets'), false);
@@ -388,5 +428,164 @@ test('Remove PC2 stays hidden until a legacy install is reported', () => {
   assert.match(main, /elastos:removeLegacyPc2/);
   assert.match(main, /withSupportBundle/);
   assert.match(preload, /describeLegacyPc2/);
+  assert.match(preload, /elastos:removeLegacyPc2/);
   assert.equal(flow.primaryAction({ targetId: 'runtime', status: 'not-installed', busy: false }).label, 'Install');
+});
+
+test('sudoers and VPN programs are not PC2 just because of their names', async () => {
+  assert.equal(sudoersIsPc2('/etc/sudoers.d/elastos', AMNEZIA_SUDOERS), false);
+  assert.equal(sudoersIsPc2('/etc/sudoers.d/wireguard', 'tester ALL=(ALL) NOPASSWD: /usr/bin/apt'), false);
+  assert.equal(sudoersIsPc2('/etc/sudoers.d/wireguard', 'tester ALL=(ALL) NOPASSWD: /usr/bin/wg-quick'), true);
+  assert.equal(sudoersIsPc2('/etc/sudoers.d/amneziawg', AMNEZIA_SUDOERS), true);
+
+  const home = '/home/tester';
+  const box = world(home);
+  box.dir(home);
+  box.file('/etc/sudoers.d/wireguard', 'tester ALL=(ALL) NOPASSWD: /usr/bin/apt');
+  box.file('/etc/sudoers.d/elastos', 'tester ALL=(ALL) NOPASSWD: /usr/bin/wg-quick');
+  box.file('/usr/local/bin/sing-box', 'not-pc2');
+  assert.deepEqual(discoverLegacyPc2(box.probe()), []);
+
+  box.file('/etc/sudoers.d/amneziawg', AMNEZIA_SUDOERS);
+  assert.deepEqual(discoverLegacyPc2(box.probe()).map((entry) => entry.path), []);
+
+  const pc2 = path.join(home, '.pc2');
+  box.dir(pc2);
+  const found = discoverLegacyPc2(box.probe()).map((entry) => entry.path);
+  assert.deepEqual(found, [pc2, '/etc/sudoers.d/amneziawg']);
+  assert.equal(found.includes('/usr/local/bin/sing-box'), false);
+  assert.equal(found.includes('/etc/sudoers.d/wireguard'), false);
+  assert.equal(found.includes('/etc/sudoers.d/elastos'), false);
+});
+
+test('a WSL PC2 folder is not deleted when the requested backup cannot be taken', async () => {
+  const home = '/home/tester';
+  const box = world(home);
+  box.dir(home);
+  const probe = box.probe();
+  probe.wsl = [{ distro: 'Ubuntu', home: '/home/u', pc2Bytes: 12, nodeBytes: null }];
+  const items = discoverLegacyPc2(probe);
+  assert.deepEqual(items.map((entry) => entry.path), ['/home/u/.pc2']);
+  const act = tracker({ backup: true });
+  const refused = await removeLegacyPc2(probe, act, items.map((entry) => entry.path));
+  assert.equal(refused.ok, false);
+  assert.equal(refused.backupPath, undefined);
+  assert.match(refused.message, /backup/i);
+  assert.equal(act.calls.some((call) => call[0] === 'wsl' || call[0] === 'remove'), false);
+
+  const saved = tracker({
+    backup: true,
+    backupWslPath(distro, file, dest) {
+      this.calls.push(['backup-wsl', distro, file, dest]);
+    },
+  });
+  const removed = await removeLegacyPc2(probe, saved, ['/home/u/.pc2']);
+  assert.equal(removed.ok, true);
+  assert.match(removed.backupPath, /PC2-wsl-Ubuntu-backup-/);
+  assert.deepEqual(saved.calls[0].slice(0, 3), ['backup-wsl', 'Ubuntu', '/home/u/.pc2']);
+  assert.equal(saved.calls.some((call) => call[0] === 'wsl'), true);
+});
+
+test('a WSL distro is unregistered only after a PC2 marker, and a backup is required when asked', async () => {
+  assert.equal(isPc2DistroName('pc2 '), false);
+  assert.equal(isPc2DistroName('Pc2'), true);
+  const home = '/home/tester';
+  const box = world(home);
+  box.dir(home);
+  const probe = box.probe();
+  probe.distroList = '  NAME\n* PC2    Running\n  pc2    Stopped\n';
+  probe.provenDistros = [];
+  assert.equal(discoverLegacyPc2(probe).some((entry) => entry.scope === 'distro'), false);
+  const unnamed = tracker();
+  const refused = await removeLegacyPc2(probe, unnamed, ['PC2', 'pc2 ']);
+  assert.equal(refused.ok, false);
+  assert.equal(unnamed.calls.some((call) => call[0] === 'unregister'), false);
+
+  probe.provenDistros = ['PC2'];
+  assert.deepEqual(discoverLegacyPc2(probe).map((entry) => entry.path), ['PC2']);
+  const noExport = tracker({ backup: true });
+  const missing = await removeLegacyPc2(probe, noExport, ['PC2']);
+  assert.equal(missing.ok, false);
+  assert.match(missing.message, /backup/i);
+  assert.equal(noExport.calls.some((call) => call[0] === 'unregister'), false);
+
+  const exported = tracker({
+    backup: true,
+    async exportDistro(name, dest) {
+      this.calls.push(['export', name, dest]);
+    },
+  });
+  const removed = await removeLegacyPc2(probe, exported, ['PC2']);
+  assert.equal(removed.ok, true);
+  assert.match(removed.backupPath, /PC2-distro-PC2-backup-/);
+  const kinds = exported.calls.map((call) => call[0]);
+  assert.ok(kinds.indexOf('export') < kinds.indexOf('unregister'));
+  assert.equal(exported.calls.find((call) => call[0] === 'unregister')[1], 'PC2');
+});
+
+test('removal deletes the confirmed paths and refuses a path that is no longer PC2', async () => {
+  const home = '/home/tester';
+  const box = world(home);
+  const pc2 = path.join(home, '.pc2');
+  const serviceDir = path.join(home, '.config', 'systemd', 'user');
+  const service = path.join(serviceDir, 'pc2.service');
+  box.dir(home);
+  box.dir(path.join(home, '.config'));
+  box.dir(path.join(home, '.config', 'systemd'));
+  box.dir(serviceDir);
+  box.dir(pc2);
+  box.file(service, '[Service]\nExecStart=/usr/bin/pc2\n');
+  const probe = box.probe();
+  const before = discoverLegacyPc2(probe).map((entry) => entry.path);
+  assert.deepEqual(before.sort(), [pc2, service].sort());
+  const extra = path.join(serviceDir, 'pc2-extra.service');
+  box.file(extra, '[Service]\nExecStart=/usr/bin/pc2\n');
+  const act = tracker();
+  const result = await removeLegacyPc2(probe, act, before);
+  assert.equal(result.ok, true);
+  const removed = act.calls.filter((call) => call[0] === 'remove').map((call) => call[1]);
+  assert.deepEqual(removed.sort(), [pc2, service].sort());
+  assert.equal(removed.includes(extra), false);
+
+  box.dir(pc2);
+  box.file('/etc/passwd', 'root:x:0:0:root:/root:/bin/bash');
+  const blocked = tracker();
+  const refusal = await removeLegacyPc2(box.probe(), blocked, [pc2, '/etc/passwd']);
+  assert.equal(refusal.ok, false);
+  assert.match(refusal.message, /not part of the old PC2 install/);
+  assert.deepEqual(blocked.calls, []);
+
+  const empty = tracker();
+  const nothing = await removeLegacyPc2(box.probe(), empty, []);
+  assert.equal(nothing.ok, true);
+  assert.deepEqual(nothing.removed, []);
+  assert.deepEqual(empty.calls, []);
+});
+
+test('describing PC2 does not block the main thread and is cached', async () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'pc2-describe-'));
+  process.env.ELASTOS_PC2_PROBE_DELAY_MS = '500';
+  clearLegacyPc2DescribeCache();
+  try {
+    let ticked = false;
+    setTimeout(() => { ticked = true; }, 20);
+    let settled = false;
+    const pending = describeLegacyPc2OnThisComputer(home).then((items) => {
+      settled = true;
+      return items;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    assert.equal(ticked, true);
+    assert.equal(settled, false);
+    assert.deepEqual(await pending, []);
+  } finally {
+    delete process.env.ELASTOS_PC2_PROBE_DELAY_MS;
+    clearLegacyPc2DescribeCache();
+  }
+
+  const runs = legacyPc2DescribeRuns();
+  assert.deepEqual(await describeLegacyPc2OnThisComputer(home), []);
+  assert.deepEqual(await describeLegacyPc2OnThisComputer(home), []);
+  assert.equal(legacyPc2DescribeRuns(), runs + 1);
+  clearLegacyPc2DescribeCache();
 });
