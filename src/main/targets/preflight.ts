@@ -5,6 +5,7 @@ import * as path from 'path';
 import { HEALTH_URL } from './runtimeGateway';
 import { launcherOwnedDirectories } from './runtimePaths';
 import { loadActiveRuntimePin } from './runtimePin';
+import { BASH_MESSAGE, detectLinuxLibc, MUSL_MESSAGE, resolveBash } from './hostTools';
 import { runtimeInstallBlock, wslKvmMessage, detectWsl } from './runtimeSupport';
 import { detectWindows, hostPrompt, listDistros, lookupCommand } from './windowsHost';
 
@@ -32,6 +33,8 @@ export interface PreflightInput {
   kvm: boolean;
   wslInstalled?: boolean;
   distroReady?: boolean;
+  libc?: 'glibc' | 'musl' | 'unknown';
+  bashPresent?: boolean;
 }
 
 export function evaluatePreflight(input: PreflightInput): PreflightReport {
@@ -81,6 +84,13 @@ export function evaluatePreflight(input: PreflightInput): PreflightReport {
   checks.push(input.offline
     ? { id: 'network', level: 'block', message: 'You appear to be offline. Connect to the internet and try again.' }
     : { id: 'network', level: 'pass', message: 'The network is reachable.' });
+
+  if (input.platform === 'linux' && input.libc === 'musl') {
+    checks.push({ id: 'libc', level: 'block', message: MUSL_MESSAGE });
+  }
+  if ((input.platform === 'linux' || input.platform === 'darwin') && input.bashPresent === false) {
+    checks.push({ id: 'bash', level: 'block', message: BASH_MESSAGE });
+  }
 
   const kvm = wslKvmMessage(input.wsl, input.kvm);
   if (kvm) checks.push({ id: 'kvm', level: 'warn', message: kvm });
@@ -298,5 +308,7 @@ export async function collectPreflight(
     kvm: fs.existsSync('/dev/kvm'),
     wslInstalled,
     distroReady,
+    libc: platform === 'linux' ? detectLinuxLibc(platform) : 'unknown',
+    bashPresent: platform === 'win32' ? true : resolveBash() !== null,
   });
 }

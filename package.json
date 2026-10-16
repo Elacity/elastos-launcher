@@ -73,6 +73,10 @@
       {
         "from": "resources/runtime-pin.json",
         "to": "runtime-pin.json"
+      },
+      {
+        "from": "resources/host-python.json",
+        "to": "host-python.json"
       }
     ],
     "nsis": {

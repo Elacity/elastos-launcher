@@ -13,6 +13,7 @@ import {
   runtimeSourcesPath,
 } from './runtimePaths';
 import { probeRuntimeInstallation, RuntimeProbe, RuntimeProbeRequest } from './runtimeProbe';
+import { prepareInstallerEnvironment } from './hostTools';
 import { runtimeInstallBlock } from './runtimeSupport';
 
 export interface ReleaseHead {
@@ -325,8 +326,24 @@ export function defaultRuntimeInstallDeps(pin: ActiveRuntimePin = loadActiveRunt
     env: process.env,
     pin,
     fetchText: fetchText,
-    runInstaller: (scriptPath, args, env) => exec('bash', [scriptPath, ...args], 15 * 60 * 1000, env),
-    runSetup: (binary) => exec(binary, ['setup'], 15 * 60 * 1000, installerChildEnv(process.env)),
+    runInstaller: async (scriptPath, args, env) => {
+      const prepared = await prepareInstallerEnvironment({
+        homeDir,
+        platform: process.platform,
+        arch: process.arch,
+        env,
+      });
+      return exec(prepared.bash, [scriptPath, ...args], 15 * 60 * 1000, prepared.env);
+    },
+    runSetup: async (binary) => {
+      const prepared = await prepareInstallerEnvironment({
+        homeDir,
+        platform: process.platform,
+        arch: process.arch,
+        env: installerChildEnv(process.env),
+      });
+      return exec(binary, ['setup'], 15 * 60 * 1000, prepared.env);
+    },
     writeFile: (file, contents) => fs.writeFileSync(file, contents),
     readFile: (file) => fs.readFileSync(file, 'utf8'),
     exists: (file) => {
