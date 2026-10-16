@@ -103,8 +103,11 @@ export function defaultLaunchTargetForPin(pin: ActiveRuntimePin): LaunchTargetId
   return pin.publishable ? 'runtime' : 'pc2';
 }
 
-export function runtimePinCandidates(env: NodeJS.ProcessEnv = process.env): string[] {
-  const fromEnv = env.ELASTOS_RUNTIME_PIN?.trim();
+export function runtimePinCandidates(
+  env: NodeJS.ProcessEnv = process.env,
+  mode: PinLoadMode = pinLoadMode(env),
+): string[] {
+  const fromEnv = mode === 'dev' ? env.ELASTOS_RUNTIME_PIN?.trim() : '';
   const packaged = process.resourcesPath
     ? path.join(process.resourcesPath, 'runtime-pin.json')
     : '';
@@ -112,12 +115,66 @@ export function runtimePinCandidates(env: NodeJS.ProcessEnv = process.env): stri
   return [fromEnv, packaged, dev].filter((item): item is string => Boolean(item));
 }
 
-export function loadRuntimePinFile(env: NodeJS.ProcessEnv = process.env): RuntimePinFile {
+export type PinLoadMode = 'dev' | 'production';
+
+/** Unit tests and an unpackaged Electron app may point at another pin file. */
+export function pinLoadMode(env: NodeJS.ProcessEnv = process.env): PinLoadMode {
+  if (env.NODE_TEST_CONTEXT) return 'dev';
+  try {
+    const electron = require('electron') as { app?: { isPackaged?: boolean } };
+    if (electron.app?.isPackaged === false) return 'dev';
+  } catch {
+    // Plain Node is not a dev build of the app.
+  }
+  return 'production';
+}
+
+/**
+ * A production override may select another channel that this package already
+ * publishes. It may not change the maintainer, gateway, installer, or CIDs.
+ */
+export function overrideKeepsTrustRoot(packaged: RuntimePinFile, override: RuntimePinFile): boolean {
+  if (packaged.maintainerDid !== override.maintainerDid) return false;
+  if (packaged.publisherGateway !== override.publisherGateway) return false;
+  if (packaged.fallbackInstallerUrl !== override.fallbackInstallerUrl) return false;
+  if (packaged.installerSha256 !== override.installerSha256) return false;
+  for (const name of ['stable', 'canary'] as const) {
+    const base = packaged.channels[name];
+    const over = override.channels[name];
+    if ((over.version ?? null) !== (base.version ?? null)) return false;
+    if ((over.headCid ?? null) !== (base.headCid ?? null)) return false;
+  }
+  if (override.active !== packaged.active) {
+    const selected = packaged.channels[override.active];
+    if (!selected.version || !selected.headCid) return false;
+  }
+  return true;
+}
+
+export function loadRuntimePinFile(
+  env: NodeJS.ProcessEnv = process.env,
+  mode: PinLoadMode = pinLoadMode(env),
+): RuntimePinFile {
+  const read = (file: string) => parseRuntimePin(JSON.parse(fs.readFileSync(file, 'utf8')));
+  if (mode === 'production') {
+    const packagedPath = runtimePinCandidates(env, 'production').find((file) => fs.existsSync(file));
+    if (!packagedPath) {
+      throw new Error('Runtime pin file not found.');
+    }
+    const packaged = read(packagedPath);
+    const overridePath = env.ELASTOS_RUNTIME_PIN?.trim();
+    if (!overridePath || !fs.existsSync(overridePath)) return packaged;
+    const override = read(overridePath);
+    if (!overrideKeepsTrustRoot(packaged, override)) {
+      throw new Error('ELASTOS_RUNTIME_PIN cannot replace the packaged trust root.');
+    }
+    return override;
+  }
   const tried: string[] = [];
-  for (const candidate of runtimePinCandidates(env)) {
+  for (const candidate of runtimePinCandidates(env, mode)) {
     tried.push(candidate);
     if (!fs.existsSync(candidate)) continue;
-    return parseRuntimePin(JSON.parse(fs.readFileSync(candidate, 'utf8')));
+    return read(candidate);
   }
   throw new Error(`Runtime pin file not found. Looked in ${tried.join(', ')}`);
 }
