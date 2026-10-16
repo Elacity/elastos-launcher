@@ -91,10 +91,9 @@ function harness(overrides = {}) {
     },
     runInstaller: async (script, args, env) => {
       calls.push(['installer', script, [...args], env]);
-      const headFlag = args.indexOf('--head-cid');
       files.set(SOURCES, JSON.stringify({
         default_source: 'default',
-        sources: [{ name: 'default', head_cid: args[headFlag + 1] }],
+        sources: [{ name: 'default', head_cid: env.ELASTOS_HEAD_CID }],
       }));
       return { stdout: '', stderr: '' };
     },
@@ -227,13 +226,13 @@ test('a matching pin installs with --install-only, then setup, and leaves PC2 al
   assert.equal(install[0][1].includes('install-fallback.sh'), false);
   assert.deepEqual(install[0][2], [
     '--install-only',
-    '--head-cid',
-    FIXTURE_HEAD_CID,
     '--maintainer-did',
     FIXTURE_DID,
   ]);
+  assert.equal(install[0][2].includes('--head-cid'), false);
   assert.equal(install[0][2].includes('--allow-unsigned'), false);
-  assert.equal(install[0][3].ELASTOS_HEAD_CID, undefined);
+  assert.equal(install[0][3].ELASTOS_HEAD_CID, FIXTURE_HEAD_CID);
+  assert.notEqual(install[0][3].ELASTOS_HEAD_CID, 'QmEvil');
   assert.equal(install[0][3].ELASTOS_MAINTAINER_DID, undefined);
   assert.equal(install[0][3].ELASTOS_PUBLISHER_GATEWAY, undefined);
   assert.equal(install[0][3].PATH, '/usr/bin');
@@ -403,6 +402,39 @@ test('changing the PC2 directory fails the install', async () => {
     },
   });
   await assert.rejects(() => installRuntime(deps, () => {}), /must not modify the PC2 directory/);
+});
+
+test('the pinned install.sh accepts the Install button invocation and rejects a head flag', () => {
+  const pin = JSON.parse(fs.readFileSync(path.join(__dirname, '../resources/runtime-pin.json'), 'utf8'));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'elastos-installer-parse-'));
+  const script = path.join(dir, 'install.sh');
+  const downloaded = spawnSync('curl', ['-fsSL', '--max-time', '60', pin.fallbackInstallerUrl, '-o', script], { encoding: 'utf8' });
+  assert.equal(downloaded.status, 0, downloaded.stderr);
+  const hash = crypto.createHash('sha256').update(fs.readFileSync(script)).digest('hex');
+  assert.equal(hash, pin.installerSha256);
+  const rejected = spawnSync('bash', [
+    script,
+    '--install-only',
+    '--head-cid',
+    pin.channels.canary.headCid,
+    '--help',
+  ], { encoding: 'utf8' });
+  assert.notEqual(rejected.status, 0);
+  assert.match(`${rejected.stderr}\n${rejected.stdout}`, /Unknown option: --head-cid/);
+  const env = { ...process.env, ELASTOS_HEAD_CID: pin.channels.canary.headCid };
+  delete env.ELASTOS_MAINTAINER_DID;
+  delete env.ELASTOS_PUBLISHER_GATEWAY;
+  const accepted = spawnSync('bash', [
+    script,
+    '--install-only',
+    '--maintainer-did',
+    pin.maintainerDid,
+    '--help',
+  ], { encoding: 'utf8', env });
+  assert.equal(accepted.status, 0, accepted.stderr);
+  assert.equal(/Unknown option/.test(`${accepted.stderr}\n${accepted.stdout}`), false);
+  assert.match(accepted.stdout, /ElastOS Installer/);
+  fs.rmSync(dir, { recursive: true, force: true });
 });
 
 test('WSL without /dev/kvm explains the local Browser', () => {
