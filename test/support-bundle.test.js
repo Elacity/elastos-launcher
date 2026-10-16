@@ -45,6 +45,19 @@ test('the support bundle has versions, health, and platform, and no secrets', ()
   assert.match(text, /bearer \[removed\]/);
   assert.match(text, /password \[removed\]/);
   assert.equal(scrubSupportText('attach_secret=nope').includes('nope'), false);
+
+  const mixed = scrubSupportText(
+    'gateway said hello attach_secret=sekrit token=abc cookie=sid api_key=k authorization=raw '
+    + 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozvgIdlkvz_7r_3n5h1p0s',
+  );
+  assert.match(mixed, /gateway said hello/);
+  assert.equal(mixed.includes('sekrit'), false);
+  assert.equal(mixed.includes('token=abc'), false);
+  assert.equal(mixed.includes('sid'), false);
+  assert.equal(mixed.includes('api_key=k'), false);
+  assert.equal(mixed.includes('raw'), false);
+  assert.equal(mixed.includes('eyJ'), false);
+  assert.match(mixed, /attach_secret=\[removed\]/);
 });
 
 test('save support bundle writes only ElastOS-support.txt outside the data dirs', () => {
