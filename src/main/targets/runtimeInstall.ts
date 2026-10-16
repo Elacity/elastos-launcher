@@ -166,6 +166,7 @@ export async function installRuntime(
     try {
       const raw = await deps.fetchText(releaseHeadUrl(deps.pin));
       publisher = verifyReleaseHead(raw, deps.pin.maintainerDid);
+      onProgress('Release head signature matches the pinned maintainer');
     } catch (err) {
       if (err instanceof ReleaseHeadError || err instanceof PinMismatchError) throw err;
       throw new PinMismatchError('release-head');
@@ -206,6 +207,7 @@ export async function installRuntime(
     if (readInstalledHeadCid(deps) !== deps.pin.headCid) {
       throw new PinMismatchError('headCid');
     }
+    onProgress('Installed head CID matches the pin');
 
     if (!deps.exists(components)) {
       await runSetupStep(deps, onProgress);
@@ -274,16 +276,27 @@ async function runInstallerStep(
   if (!sha256Equals(sha256Hex(written), deps.pin.installerSha256)) {
     throw new PinMismatchError('installerSha256');
   }
+  onProgress('install.sh SHA-256 matches the pin');
   writeStage(deps, 'binary');
   onProgress(INSTALLING);
-  const args = [
-    '--install-only',
-    '--head-cid',
-    deps.pin.headCid,
-    '--maintainer-did',
-    deps.pin.maintainerDid,
-  ];
-  await deps.runInstaller(scriptPath, args, installerChildEnv(deps.env));
+  const launch = pinnedInstallerLaunch(deps.pin, deps.env);
+  await deps.runInstaller(scriptPath, launch.args, launch.env);
+}
+
+/** The pinned install.sh records the head from ELASTOS_HEAD_CID and rejects a head flag. */
+export function pinnedInstallerLaunch(
+  pin: { headCid: string | null; maintainerDid: string },
+  parent: NodeJS.ProcessEnv = {},
+): { args: readonly string[]; env: NodeJS.ProcessEnv } {
+  if (!pin.headCid || !/^Qm[1-9A-HJ-NP-Za-km-z]{20,}$/.test(pin.headCid)) {
+    throw new PinMismatchError('headCid');
+  }
+  const env = installerChildEnv(parent);
+  env.ELASTOS_HEAD_CID = pin.headCid;
+  return {
+    args: ['--install-only', '--maintainer-did', pin.maintainerDid],
+    env,
+  };
 }
 
 async function runSetupStep(
