@@ -43,6 +43,15 @@ export interface BackupMeasure {
 const ZIP_MARGIN_BYTES = 16 * 1024 * 1024;
 
 /**
+ * Bytes a stored zip needs: the file bytes, a local and a central header
+ * per file, each name twice, room for ZIP64 fields, the end records, and a
+ * margin. `nameBytes` is the sum of the UTF-8 entry names.
+ */
+export function backupNeededBytes(files: number, bytes: number, nameBytes: number): number {
+  return bytes + 22 + 56 + 20 + files * (30 + 46 + 48) + 2 * nameBytes + ZIP_MARGIN_BYTES;
+}
+
+/**
  * Size of what a backup would hold. Null when the data directory is missing.
  * A symlinked data directory is refused. Symlinks inside are not followed.
  */
@@ -59,7 +68,7 @@ export function measureRuntimeBackup(dataDir: string): BackupMeasure | null {
   }
   let files = 0;
   let bytes = 0;
-  let overhead = 22 + 56 + 20;
+  let nameBytes = 0;
   const rootName = path.basename(dataDir);
   const stack = [dataDir];
   while (stack.length) {
@@ -73,13 +82,11 @@ export function measureRuntimeBackup(dataDir: string): BackupMeasure | null {
       continue;
     }
     if (!st.isFile()) continue;
-    const nameBytes = Buffer.byteLength(`${rootName}/${relative}`, 'utf8');
     files += 1;
     bytes += st.size;
-    // Local header, central header, the name twice, and room for ZIP64 fields.
-    overhead += 30 + 46 + 2 * nameBytes + 48;
+    nameBytes += Buffer.byteLength(`${rootName}/${relative}`, 'utf8');
   }
-  return { files, bytes, neededBytes: bytes + overhead + ZIP_MARGIN_BYTES };
+  return { files, bytes, neededBytes: backupNeededBytes(files, bytes, nameBytes) };
 }
 
 /** Free bytes for this account at `dir`, or null when it cannot be read. */
@@ -140,12 +147,20 @@ export function describeRuntimeBackup(input: {
   home: string;
   freeBytes?: (dir: string) => number | null;
 }): BackupDescription {
-  const folder = backupFolder(input.home);
-  const measured = measureRuntimeBackup(input.dataDir);
+  return describeMeasuredBackup(measureRuntimeBackup(input.dataDir), input.home, input.freeBytes);
+}
+
+/** The dialog facts for a measured copy. Null `measured` means there is no data folder. */
+export function describeMeasuredBackup(
+  measured: BackupMeasure | null,
+  home: string,
+  freeBytes?: (dir: string) => number | null,
+): BackupDescription {
+  const folder = backupFolder(home);
   if (!measured) {
     return { present: false, bytes: 0, neededBytes: 0, freeBytes: null, enough: true, folder };
   }
-  const free = (input.freeBytes ?? freeBytesAt)(existingParent(folder));
+  const free = (freeBytes ?? freeBytesAt)(existingParent(folder));
   return {
     present: true,
     bytes: measured.bytes,
@@ -217,8 +232,8 @@ export function writeRuntimeBackup(input: {
   if (free == null || free < measured.neededBytes) throw new BackupSpaceError(measured.neededBytes, free);
   const stamp = backupStamp(input.now ?? new Date());
   const zip = input.zip ?? zipDirectories;
-  for (let attempt = 1; attempt <= 50; attempt += 1) {
-    const dest = path.join(folder, `ElastOS-data-${stamp}${attempt === 1 ? '' : `-${attempt}`}.zip`);
+  for (let attempt = 1; attempt <= MAX_BACKUP_ATTEMPTS; attempt += 1) {
+    const dest = path.join(folder, backupFileName(stamp, attempt));
     try {
       zip([input.dataDir], dest, { exclude: backupExcluded, exclusive: true });
       return dest;
@@ -227,7 +242,15 @@ export function writeRuntimeBackup(input: {
       throw err;
     }
   }
-  throw new Error('Too many backups were saved this second. Wait a moment and try again.');
+  throw new Error(TOO_MANY_BACKUPS);
+}
+
+export const MAX_BACKUP_ATTEMPTS = 50;
+export const TOO_MANY_BACKUPS = 'Too many backups were saved this second. Wait a moment and try again.';
+
+/** `ElastOS-data-<stamp>.zip`, then `-2`, `-3`, and so on. */
+export function backupFileName(stamp: string, attempt: number): string {
+  return `ElastOS-data-${stamp}${attempt === 1 ? '' : `-${attempt}`}.zip`;
 }
 
 /**
