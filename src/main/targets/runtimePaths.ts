@@ -107,6 +107,11 @@ function withinHome(candidate: string, homeDir: string, platform: string): boole
  * create. A custom data directory holding any other name is refused by name.
  * A publisher's `release-key.hex` and `releases` are not on this list, so a
  * reset never deletes a release signing key.
+ *
+ * This copies the runtime layout; the runtime publishes no list of its own.
+ * It was read from the runtime source of 0.8.0-alpha.22 (changelog commit
+ * 5f74c7c0) and of develop 9be009b1, which write the same top-level names.
+ * Paths below are in elastos/crates/elastos-server/src unless named.
  */
 const RUNTIME_DATA_NAMES = new Set([
   'AppCapsules', 'ElastOS', 'Local', 'MyWebSite', 'Public', 'Users', 'UsersAI', 'WebSpaces',
@@ -120,7 +125,31 @@ const RUNTIME_DATA_NAMES = new Set([
   'services-model-runs.json', 'services-model-remote-runs.json', 'operator-control.json',
   'backups', 'logs', 'policy', 'shares', 'storage', 'time_counter', 'audit.log', '.audit',
   'crosvm', 'crosvm-empty', 'vz', 'vz-browser', 'rootfs-cache', 'Image', 'Runtime',
+  // Community, which first setup joins (collaboration_release_network.rs:30-36,
+  // collaboration_startup.rs:34, collaboration_core.rs:2732).
+  '.collaboration-network-choice.lock', 'collaboration', 'collaboration-network-v1.json',
+  'collaboration-isolated-v1', 'collaboration-community-membership-v1.json',
+  // The IPFS provider's Kubo node (capsules/ipfs-provider/src/main.rs:558, 953, 2012).
+  'ipfs-repo', 'ipfs-startup.lock', 'ipfs-coords.json',
+  // Child runtimes (runtime_control.rs:527, runtime_control/gateway_children.rs:91)
+  // and `elastos run` provider hosts (provider_host.rs:28).
+  'managed-runtimes', 'gateway-owned-runtimes', 'run',
+  // Gateway and operator records (api/gateway_inspect_actions/store.rs:8,
+  // jev_approval_lens.rs:36, operator_control.rs:43-44).
+  'inspect-actions', 'jev-approval-lens', 'operator-control-audit.jsonl', 'operator-control-requests.jsonl',
+  // Linux Browser TURN credential (setup/browser_config.rs:530) and the chain
+  // provider's node state (capsules/chain-provider/src/lifecycle.rs:125).
+  'runtime-turn', 'chain-provider',
+  // Install and update recovery state, kept until the next run finishes it
+  // (installed_release.rs:21, install_transaction.rs:25-26 beside components.json
+  // and sources.json, install_transaction/support.rs:4).
+  '.elastos.installation-migrate', '.elastos.update-stage', '.elastos.update-rollback', '.elastos.update-support',
 ]);
+
+/** True when `name` is a top-level name the runtime writes in its data directory. */
+export function isRuntimeDataName(name: string): boolean {
+  return RUNTIME_DATA_NAMES.has(name);
+}
 /** What a half-finished install leaves. These alone need no signed record. */
 const RUNTIME_PARTIAL_FILES = new Set(['components.json', 'host-process.lock', 'sources.json']);
 /** install.sh writes the verified release head here before anything else runs. */
@@ -206,7 +235,7 @@ function customXdgContents(dataDir: string, proved: (dir: string) => boolean): C
       continue;
     }
     const plain = entry.isFile() || entry.isDirectory();
-    if (!RUNTIME_DATA_NAMES.has(name) || entry.isSymbolicLink() || !plain) {
+    if (!isRuntimeDataName(name) || entry.isSymbolicLink() || !plain) {
       foreign.push(name);
       continue;
     }

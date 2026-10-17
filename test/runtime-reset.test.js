@@ -338,6 +338,72 @@ test('a real custom XDG install with a signed install record is reset', async ()
   }
 });
 
+/**
+ * What `elastos setup` adds when it joins elastos.community. The first five
+ * names are the ones Windows CI job 117369675723 (run 39023450359) printed
+ * when Reset refused a real alpha.22 install and setup. That message cut the
+ * list at "and 1 more"; `ipfs-startup.lock` is the one runtime name that sorts
+ * after `ipfs-repo` and is written on every Kubo start (ipfs-provider main.rs:953).
+ */
+const SETUP_COMMUNITY_NAMES = [
+  '.collaboration-network-choice.lock', 'collaboration', 'collaboration-network-v1.json',
+  'ipfs-coords.json', 'ipfs-repo', 'ipfs-startup.lock',
+];
+
+function realSetupWithCommunity(data) {
+  realXdgInstall(data);
+  fs.mkdirSync(path.join(data, 'collaboration', 'config'), { recursive: true });
+  fs.writeFileSync(path.join(data, 'collaboration', 'config', 'accepted-profile-head-v1.json'), '{}');
+  fs.mkdirSync(path.join(data, 'ipfs-repo', 'blocks'), { recursive: true });
+  fs.writeFileSync(path.join(data, 'ipfs-repo', 'config'), '{}');
+  for (const file of ['.collaboration-network-choice.lock', 'collaboration-network-v1.json', 'ipfs-coords.json', 'ipfs-startup.lock']) {
+    fs.writeFileSync(path.join(data, file), 'x');
+  }
+}
+
+test('a custom XDG folder after a real install and a setup that joined elastos.community is reset', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'elastos-xdg-setup-'));
+  try {
+    const home = path.join(root, 'home');
+    const data = path.join(home, 'custom', 'elastos');
+    const env = { XDG_DATA_HOME: path.join(home, 'custom') };
+    realSetupWithCommunity(data);
+    for (const name of SETUP_COMMUNITY_NAMES) assert.ok(fs.existsSync(path.join(data, name)), name);
+    assert.equal(foreignRuntimeDataMessage(data, home, 'linux', env), null);
+    assert.equal(launcherOwnedDirectories(data, home, 'linux', env), true);
+    const removed = [];
+    await resetRuntime(resetDeps(home, data, env, removed));
+    assert.equal(removed.includes(data), true);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('a foreign name beside a real setup is still refused by name', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'elastos-xdg-setup-foreign-'));
+  try {
+    const home = path.join(root, 'home');
+    const data = path.join(home, 'custom', 'elastos');
+    const env = { XDG_DATA_HOME: path.join(home, 'custom') };
+    realSetupWithCommunity(data);
+    // A user folder, and names that look like runtime names but are not.
+    fs.mkdirSync(path.join(data, 'holiday-photos'));
+    fs.writeFileSync(path.join(data, 'holiday-photos', 'beach.jpg'), 'keep');
+    fs.mkdirSync(path.join(data, 'ipfs-repo.old'));
+    fs.writeFileSync(path.join(data, 'collaboration-network-v2.json'), 'keep');
+    assert.equal(launcherOwnedDirectories(data, home, 'linux', env), false);
+    const refused = [];
+    await assert.rejects(
+      () => resetRuntime(resetDeps(home, data, env, refused)),
+      new RegExp(`will not reset ${quote(data)} because it contains files that are not part of the runtime: collaboration-network-v2\\.json, holiday-photos, ipfs-repo\\.old\\.`),
+    );
+    assert.deepEqual(refused, []);
+    assert.equal(fs.readFileSync(path.join(data, 'holiday-photos', 'beach.jpg'), 'utf8'), 'keep');
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('a custom XDG reset leaves user files beside a signed install record', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'elastos-xdg-user-'));
   try {
