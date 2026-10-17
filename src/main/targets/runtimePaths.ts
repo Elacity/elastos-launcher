@@ -324,14 +324,26 @@ function customXdgDataDir(
 }
 
 /**
- * True only for an exact default runtime path of this account, or for an XDG
- * data directory under that home that is empty, holds only
- * `components.json`, `host-process.lock`, and `sources.json`, or holds only
- * runtime names and an install record signed by the pinned maintainer.
+ * True only for an exact launcher or runtime path of this account:
+ * - The program, the install stage, the resume marker and its lock, and the
+ *   support file.
+ * - The default data directory (`~/.local/share/elastos`, or
+ *   `~/Library/Application Support/elastos` on macOS) and its host lock.
+ *   This is accepted by its path alone. Its contents are not checked: there
+ *   is no name check and no signed install record check. The launcher
+ *   contract fixes this path for the runtime ("Data directory and lock" in
+ *   the runtime's docs/LAUNCHER_CONTRACT.md). An install from before the
+ *   runtime wrote `installation/` (runtime f13bb9de, 3 October 2026) has no
+ *   record, and Reset is how a person clears an old or broken install. The
+ *   Reset dialog asks first and offers a copy of the data.
+ * - A custom `$XDG_DATA_HOME/elastos` under that home, only when it is empty,
+ *   holds only `components.json`, `host-process.lock`, and `sources.json`, or
+ *   holds only runtime names and an install record signed by the pinned
+ *   maintainer. `$XDG_DATA_HOME` can name any folder, so here a user file is
+ *   refused by name even when the signed record is present.
  * The home defaults to `os.homedir()`. A relative path, a `..` segment,
  * another account, a data directory outside that home, and a bare
- * `<dir>/elastos` are refused. A user file is refused by name even when the
- * signed record is present.
+ * `<dir>/elastos` are refused.
  */
 export function launcherOwnedDirectories(
   file: string,

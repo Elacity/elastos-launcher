@@ -507,6 +507,32 @@ test('a lock, a components manifest, or a forged install record does not prove a
   }
 });
 
+test('the default data folder is reset by its path alone, with no install record and no name check', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'elastos-default-old-'));
+  try {
+    const home = path.join(root, 'home');
+    // An install from before the runtime wrote installation/, plus a name Reset does not know.
+    const data = path.join(home, '.local', 'share', 'elastos');
+    realXdgInstall(data);
+    fs.rmSync(path.join(data, 'installation'), { recursive: true });
+    fs.writeFileSync(path.join(data, 'notes.txt'), 'x');
+    assert.equal(signedInstallRecord(data), false);
+    assert.equal(launcherOwnedDirectories(data, home, 'linux', {}), true);
+    assert.equal(launcherOwnedDirectories(path.join(home, 'Library', 'Application Support', 'elastos'), home, 'darwin', {}), true);
+    const removed = [];
+    await resetRuntime(resetDeps(home, data, {}, removed));
+    assert.ok(removed.includes(data));
+    // The same folder named by $XDG_DATA_HOME is checked by name and by record.
+    const env = { XDG_DATA_HOME: path.join(home, 'custom') };
+    const custom = path.join(home, 'custom', 'elastos');
+    realXdgInstall(custom);
+    fs.rmSync(path.join(custom, 'installation'), { recursive: true });
+    assert.equal(launcherOwnedDirectories(custom, home, 'linux', env), false);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('a source checkout or a publisher key in a custom XDG folder is refused by name', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'elastos-xdg-checkout-'));
   try {
