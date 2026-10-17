@@ -145,6 +145,54 @@ test('the backup is a dated 0600 zip in a 0700 folder under home, and it never o
   }
 });
 
+test('a crashed coords write, other live temp files, and a child runtime\'s live files stay out of the copy', { skip: process.platform === 'win32' }, () => {
+  const { home, data, cleanup } = fixture();
+  try {
+    const secret = 'attach-secret-0123456789abcdef0123456789abcdef';
+    const put = (rel, text = rel) => {
+      const file = path.join(data, ...rel.split('/'));
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(file, text);
+    };
+    // runtime_control.rs:692 writes this name, then renames it to gateway-runtime-coords.json.
+    put(`.gateway-runtime-coords.json.${'a1'.repeat(16)}.tmp`, JSON.stringify({ attach_secret: secret }));
+    put('.components.json.tmp-4242', '{}');
+    put('.model-catalog.json.tmp-7', '{}');
+    put('ipfs-coords.tmp', '{"api":"127.0.0.1:5001"}');
+    put('.tmpAb12Cd/elastos', 'staged binary');
+    // A managed child runtime's own data folder (runtime_control.rs:525-544), Linux and macOS layouts.
+    for (const root of ['managed-runtimes/home/home/.local/share/elastos', 'managed-runtimes/chat/home/Library/Application Support/elastos']) {
+      put(`${root}/host-process.lock`, '{"pid":9}');
+      put(`${root}/runtime-coords.json`, JSON.stringify({ attach_secret: secret }));
+      put(`${root}/.gateway-runtime-coords.json.${'b2'.repeat(16)}.tmp`, JSON.stringify({ attach_secret: secret }));
+      put(`${root}/bin/elastos`, 'x');
+      put(`${root}/identity/device.key`, 'child key');
+    }
+    // Kept: the temporary copy of a file the copy keeps, look-alike names, and the same names deeper in user folders.
+    put(`.community-membership.${'c3'.repeat(16)}.tmp`, 'membership');
+    put('notes.tmp', 'mine');
+    put('.gateway-runtime-coords.json.tmp', 'mine');
+    put('Users/alice/ipfs-coords.tmp', 'mine');
+    put('Users/alice/.tmpAb12Cd', 'mine');
+    put('managed-runtimes/home/notes/runtime-coords.json', 'mine');
+    const zip = writeRuntimeBackup({ dataDir: data, home, freeBytes: PLENTY });
+    assert.deepEqual(zipNames(zip), [...KEPT,
+      `elastos/.community-membership.${'c3'.repeat(16)}.tmp`,
+      'elastos/.gateway-runtime-coords.json.tmp',
+      'elastos/Users/alice/.tmpAb12Cd',
+      'elastos/Users/alice/ipfs-coords.tmp',
+      'elastos/managed-runtimes/chat/home/Library/Application Support/elastos/identity/device.key',
+      'elastos/managed-runtimes/home/home/.local/share/elastos/identity/device.key',
+      'elastos/managed-runtimes/home/notes/runtime-coords.json',
+      'elastos/notes.tmp',
+    ].sort());
+    assert.equal(fs.readFileSync(zip).includes(Buffer.from(secret)), false, 'the attach secret is not in the copy');
+    assert.equal(measureRuntimeBackup(data).files, zipNames(zip).length);
+  } finally {
+    cleanup();
+  }
+});
+
 test('insufficient space refuses before anything is written', () => {
   const { home, data, cleanup } = fixture();
   try {

@@ -150,24 +150,37 @@ const RUNTIME_DATA_NAMES = new Set([
  * Temporary names the runtime writes beside a top-level file, then renames.
  * A crash between the write and the rename leaves one behind. Each pattern is
  * the exact name one writer uses, never a general `*.tmp`.
+ *
+ * These first ones are the temporary copies of files that a Reset copy leaves
+ * out (`RUNTIME_BACKUP_EXCLUDES` in runtimeBackup.ts): live process state, or
+ * files that Install and setup write again. A crashed one is left out of the
+ * copy too. The gateway coords file holds the local attach secret.
  */
-const RUNTIME_DATA_TEMP_NAMES: readonly RegExp[] = [
+export const RUNTIME_LEFT_OUT_TEMP_NAMES: readonly RegExp[] = [
   // setup.rs:4552 sibling_scratch `.<name>.tmp-<pid>`, for components.json
   // (setup.rs:707, 2933) and model-catalog.json (setup.rs:3014).
   /^\.(components|model-catalog)\.json\.tmp-\d+$/,
-  // runtime_control.rs:692, 16 random bytes in hex, for gateway-runtime-coords.json only.
+  // runtime_control.rs:692, 16 random bytes in hex, mode 0600 (:700). Its one
+  // caller writes gateway-runtime-coords.json (runtime_control.rs:659).
   /^\.gateway-runtime-coords\.json\.[0-9a-f]{32}\.tmp$/,
-  // collaboration_release_network.rs:101 and :463.
-  /^\.community-membership\.[0-9a-f]{32}\.tmp$/,
-  /^\.collaboration-network-v1\.json\.release\.tmp$/,
   // with_extension("tmp") on ipfs-coords.json (capsules/ipfs-provider/src/main.rs:2026,
   // capsules/content-block-graph-provider/src/main.rs:473).
   /^ipfs-coords\.tmp$/,
-  // with_extension("json.tmp") (api/gateway_model_service.rs:283, api/gateway_model_remote.rs:171).
-  /^services-model-(remote-)?runs\.json\.tmp$/,
-  // setup.rs:3872 tempfile::tempdir_in(data_dir): tempfile 3 names it `.tmp` and 6 letters or digits.
+  // setup.rs:3872 tempfile::tempdir_in(data_dir), the update staging folder:
+  // tempfile 3 names it `.tmp` and 6 letters or digits.
   /^\.tmp[A-Za-z0-9]{6}$/,
 ];
+
+/** Temporary copies of files a Reset copy keeps: the Community choice and the model run records. */
+const RUNTIME_KEPT_TEMP_NAMES: readonly RegExp[] = [
+  // collaboration_release_network.rs:101 and :463.
+  /^\.community-membership\.[0-9a-f]{32}\.tmp$/,
+  /^\.collaboration-network-v1\.json\.release\.tmp$/,
+  // with_extension("json.tmp") (api/gateway_model_service.rs:283, api/gateway_model_remote.rs:171).
+  /^services-model-(remote-)?runs\.json\.tmp$/,
+];
+
+const RUNTIME_DATA_TEMP_NAMES: readonly RegExp[] = [...RUNTIME_LEFT_OUT_TEMP_NAMES, ...RUNTIME_KEPT_TEMP_NAMES];
 
 /** True when `name` is a top-level name the runtime writes in its data directory. */
 export function isRuntimeDataName(name: string): boolean {

@@ -3,7 +3,7 @@ import * as os from 'os';
 import * as path from 'path';
 import { Worker } from 'worker_threads';
 import { backupStamp, zipDirectories } from '../legacyPc2Removal';
-import { launcherOwnedDirectories, runtimeDataDir } from './runtimePaths';
+import { RUNTIME_LEFT_OUT_TEMP_NAMES, launcherOwnedDirectories, runtimeDataDir } from './runtimePaths';
 
 /**
  * Rebuildable entries a Reset backup leaves out, relative to the data
@@ -18,6 +18,11 @@ import { launcherOwnedDirectories, runtimeDataDir } from './runtimePaths';
  *   (capsules/ipfs-provider), the Community network-choice lock, the
  *   gateway's child-process records (`gateway-owned-runtimes`), and the
  *   `elastos run` ready receipt (`run`).
+ * - A temporary copy of one of these that a crashed write leaves, by the
+ *   exact name its writer uses (`RUNTIME_LEFT_OUT_TEMP_NAMES` in
+ *   runtimePaths.ts), such as `.gateway-runtime-coords.json.<32 hex>.tmp`.
+ * - The same names inside the data directory of a managed child runtime
+ *   (`CHILD_DATA_ROOT`).
  * Everything else is kept, including names this list does not know. The
  * Community history and network choice (`collaboration*`) are the user's.
  * `ipfs-repo` is kept too: it holds the Kubo node key and blocks pinned on
@@ -36,9 +41,20 @@ export const RUNTIME_BACKUP_EXCLUDES: readonly string[] = [
 
 export const BACKUP_FOLDER_NAME = 'ElastOS-backups';
 
+/**
+ * A managed child runtime has its own data directory inside this one. Its
+ * HOME is `managed-runtimes/<kind>/home` (runtime_control.rs:525, 1342), so
+ * its data directory is `.local/share/elastos` there, or
+ * `Library/Application Support/elastos` on macOS (runtime_control.rs:532-544).
+ */
+const CHILD_DATA_ROOT = /^managed-runtimes\/[^/]+\/home\/(?:\.local\/share|Library\/Application Support)\/elastos\//;
+
 /** True for a path, relative to the data directory with `/`, that a backup leaves out. */
 export function backupExcluded(relative: string): boolean {
-  return RUNTIME_BACKUP_EXCLUDES.some((entry) => relative === entry || relative.startsWith(`${entry}/`));
+  const inner = relative.replace(CHILD_DATA_ROOT, '');
+  const top = inner.split('/')[0];
+  return RUNTIME_BACKUP_EXCLUDES.some((entry) => inner === entry || inner.startsWith(`${entry}/`))
+    || RUNTIME_LEFT_OUT_TEMP_NAMES.some((pattern) => pattern.test(top));
 }
 
 export interface BackupMeasure {
