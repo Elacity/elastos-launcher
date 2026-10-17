@@ -598,3 +598,20 @@ test('uninstall removes only the runtime binary and data dir', async () => {
   }), /another window/);
   assert.equal(stopped, true);
 });
+
+test('a local adopted gateway counts as exited only when the pid is gone', () => {
+  const { localPidHasExited } = require('../dist/main/targets/runtimeGateway');
+  const fail = (code) => () => { throw Object.assign(new Error(code), { code }); };
+  assert.equal(localPidHasExited(77, () => {}), false);
+  assert.equal(localPidHasExited(77, fail('ESRCH')), true);
+  // Alive under another account, or a probe that failed for another reason: still running.
+  assert.equal(localPidHasExited(77, fail('EPERM')), false);
+  assert.equal(localPidHasExited(77, fail('EINVAL')), false);
+  assert.equal(localPidHasExited(77, () => { throw new Error('no code'); }), false);
+  const child = require('node:child_process').spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+  try {
+    assert.equal(localPidHasExited(child.pid), false);
+  } finally {
+    child.kill('SIGKILL');
+  }
+});

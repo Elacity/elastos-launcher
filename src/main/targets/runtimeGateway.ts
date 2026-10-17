@@ -472,6 +472,24 @@ export function confirmInstalledGateway(): Promise<boolean> {
   return Promise.resolve(hostLockIsInstalledGateway(text, pid));
 }
 
+/**
+ * Only "no such process" (ESRCH) is an exit. EPERM means the pid is alive under
+ * another account, and any other error is unknown, so both count as running
+ * and Reset keeps waiting instead of deleting under a live gateway.
+ */
+export function localPidHasExited(
+  pid: number,
+  probe: (pid: number, signal: 0) => void = (target, signal) => { process.kill(target, signal); },
+): boolean {
+  try {
+    probe(pid, 0);
+    return false;
+  } catch (err) {
+    const code = err && typeof err === 'object' && 'code' in err ? String((err as { code?: string }).code) : '';
+    return code === 'ESRCH';
+  }
+}
+
 /** The installed gateway from the host lock, so Stop can signal a process this window did not spawn. */
 export function adoptInstalledGatewayProcess(): GatewayProcess | null {
   if (process.platform === 'win32') return null;
@@ -482,12 +500,7 @@ export function adoptInstalledGatewayProcess(): GatewayProcess | null {
     onOutput() {},
     onExit() {},
     hasExited() {
-      try {
-        process.kill(pid, 0);
-        return false;
-      } catch {
-        return true;
-      }
+      return localPidHasExited(pid);
     },
     signal(signal) {
       signalProcessGroup(pid, signal);
