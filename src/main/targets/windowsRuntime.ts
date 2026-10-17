@@ -665,11 +665,12 @@ export async function adoptInstalledDistroGateway(deps: {
   return adopt(seen.pid);
 }
 
-export function distroIsInstalled(): boolean {
+/** Install and status read the program and the components manifest inside the distro. */
+export function distroIsInstalled(
+  exists: (file: string) => boolean = (file) => runWslSync(fileArgs('exists', file), undefined, 8000).code === 0,
+): boolean {
   try {
-    const binary = runWslSync(fileArgs('exists', '/root/.local/bin/elastos'), undefined, 8000);
-    const components = runWslSync(fileArgs('exists', '/root/.local/share/elastos/components.json'), undefined, 8000);
-    return binary.code === 0 && components.code === 0;
+    return exists('/root/.local/bin/elastos') && exists('/root/.local/share/elastos/components.json');
   } catch {
     return false;
   }

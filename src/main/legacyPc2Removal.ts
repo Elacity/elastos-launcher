@@ -779,7 +779,7 @@ export async function removeLegacyPc2(
   return removeDiscoveredLegacyPc2(selected, probe, actions);
 }
 
-function crc32Update(crc: number, buffer: Buffer): number {
+export function crc32Update(crc: number, buffer: Buffer): number {
   let next = crc;
   for (const byte of buffer) {
     next ^= byte;
@@ -790,7 +790,7 @@ function crc32Update(crc: number, buffer: Buffer): number {
   return next >>> 0;
 }
 
-function crc32Finish(crc: number): number {
+export function crc32Finish(crc: number): number {
   return (~crc) >>> 0;
 }
 
@@ -914,7 +914,7 @@ function copyFileRange(file: string, size: number, out: number): void {
   }
 }
 
-function verifyStoredZip(file: string, entries: Array<{ dataOffset: number; size: number; crc: number }>): void {
+export function verifyStoredZip(file: string, entries: Array<{ dataOffset: number; size: number; crc: number }>): void {
   const fd = fs.openSync(file, 'r');
   try {
     const buf = Buffer.alloc(ZIP_CHUNK);
