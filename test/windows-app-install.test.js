@@ -176,6 +176,9 @@ test('the distro gateway identity uses the lock pid socket and a positive wsl pi
   assert.ok(listed > 0);
   assert.ok(listed < script.indexOf('await resetRuntimeInDistroOnThisComputer('));
   assert.match(script, /Names Reset does not know/);
+  // Uninstall runs last, after Install ran again.
+  assert.ok(script.indexOf('await uninstallRuntimeInDistroOnThisComputer(') > script.indexOf('After Reset, Install installed ElastOS again'));
+  assert.match(script, /After Uninstall, the ElastOS Linux environment is gone/);
 });
 
 test('an adopted distro gateway uses the lock pid and does not report a live pid stopped', async () => {

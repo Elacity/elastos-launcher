@@ -13,6 +13,9 @@
  * - `zip`: writes a stored zip of the data folder to stdout, with ZIP64 when
  *   needed, and the entry count to stderr. Each file is read twice and must
  *   not change between the reads.
+ * - `list`: for each folder asked for, each name with its kind, and for a
+ *   regular file its size and, up to 64 KiB, its SHA-256 (Uninstall uses it
+ *   to look for files outside the data folder). Prints JSON.
  * - `remove`: checks that nothing changed since `inspect`, then moves the
  *   data folder aside, deletes the program and the stage file, and then
  *   deletes the moved folder. Prints JSON. Exit 3 means it refused before
@@ -561,9 +564,88 @@ def do_remove():
         raise partial('delete', removed, False, left[0], left)
     print(json.dumps({'removed': removed}))
 
+def open_from_top(p):
+    # Open the folder p one name at a time from /, never through a link.
+    if type(p) is not str or not p.startswith('/') or os.path.normpath(p) != p:
+        raise Refused('bad path')
+    fd = os.open('/', os.O_RDONLY | os.O_DIRECTORY | CLOEXEC)
+    try:
+        for part in [x for x in p.split('/') if x]:
+            nfd = os.open(part, DIR_FLAGS, dir_fd=fd)
+            os.close(fd)
+            fd = nfd
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+def small_sha256(dfd, name, st):
+    # The SHA-256 of a small regular file, read through no link, only when it is still the file seen as st.
+    try:
+        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | CLOEXEC, dir_fd=dfd)
+    except OSError:
+        return None
+    try:
+        if ident(os.fstat(fd)) != ident(st):
+            return None
+        data = b''
+        while len(data) <= HEAD_MAX:
+            chunk = os.read(fd, HEAD_MAX + 1 - len(data))
+            if not chunk:
+                break
+            data += chunk
+        if len(data) != st.st_size:
+            return None
+        return hashlib.sha256(data).hexdigest()
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+
+def details_at(dfd):
+    # [name, kind, size, sha256] for each entry; size and sha256 only for a regular file.
+    out = []
+    for name in sorted(os.listdir(dfd)):
+        try:
+            st = lstat_at(dfd, name)
+        except FileNotFoundError:
+            continue
+        except OSError:
+            out.append([name, 'unknown', None, None])
+            continue
+        k = kind_of(st)
+        if k != 'file':
+            out.append([name, k, None, None])
+            continue
+        digest = small_sha256(dfd, name, st) if st.st_size <= HEAD_MAX else None
+        out.append([name, k, st.st_size, digest])
+    return out
+
+def do_list():
+    # Each folder asked for: its entries, or absent, or unknown (a link or an error on the way).
+    out = {}
+    for p in req['dirs']:
+        try:
+            fd = open_from_top(p)
+        except FileNotFoundError:
+            out[p] = 'absent'
+            continue
+        except OSError:
+            out[p] = 'unknown'
+            continue
+        try:
+            out[p] = details_at(fd)
+        except OSError:
+            out[p] = 'unknown'
+        finally:
+            os.close(fd)
+    print(json.dumps(out))
+
 try:
     if op == 'inspect':
         do_inspect()
+    elif op == 'list':
+        do_list()
     elif op == 'measure':
         do_measure()
     elif op == 'zip':

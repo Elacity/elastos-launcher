@@ -3,7 +3,8 @@
  * Drive the Windows Install button path: install inside the ElastOS distro,
  * start the gateway without a terminal, and require /healthz from Windows.
  * Then Reset with a copy, require the distro to hold no program or data,
- * and require Install to install again.
+ * and require Install to install again. Then Uninstall, answering yes to
+ * the second question, and require the ElastOS distro to be gone.
  */
 const { installRuntimeOnThisComputer } = require('../dist/main/targets/runtimeInstall');
 const { createRuntimeTarget } = require('../dist/main/targets/runtimeTarget');
@@ -11,6 +12,9 @@ const { HOME_URL, getLocalPath, isHealthOk, probeGatewayHealth } = require('../d
 const { readStoredZipEntries } = require('../dist/main/targets/runtimeBackup');
 const { distroResetPaths, resetRuntimeInDistroOnThisComputer } = require('../dist/main/targets/windowsReset');
 const { distroIsInstalled, runWslSync } = require('../dist/main/targets/windowsRuntime');
+const { distroOutsideDirs, uninstallRuntimeInDistroOnThisComputer } = require('../dist/main/targets/windowsUninstall');
+const { listDistros } = require('../dist/main/targets/windowsHost');
+const { parseWslDistroList } = require('../dist/main/legacyPc2Removal');
 const { isRuntimeDataName } = require('../dist/main/targets/runtimePaths');
 const { execFileSync } = require('child_process');
 const fs = require('fs');
@@ -79,6 +83,27 @@ async function main() {
     throw new Error('After Reset, Install did not install ElastOS again');
   }
   console.log('After Reset, Install installed ElastOS again');
+
+  // Uninstall checks every folder outside the data folder. Print them in full first.
+  for (const dir of Object.values(distroOutsideDirs(distroResetPaths()))) {
+    const seen = runWslSync(['ls', '-lA', '--full-time', dir]);
+    console.log(`Entries of ${dir} before Uninstall:\n${seen.stdout.trimEnd() || '(none)'}`);
+  }
+  // The rootfs and its first boot make /root/.ssh and /home/ubuntu (src/main/targets/rootfsManifest.ts).
+  // Print them in full, with the SHA-256 of each small file, so this run proves the manifest.
+  const proof = runWslSync(['bash', '-c',
+    'ls -laR --full-time /root/.ssh /home 2>&1 | head -n 200; '
+    + 'find /root/.bashrc /root/.profile /root/.ssh /home -maxdepth 3 -type f -size -65k -print0 2>/dev/null | head -z -n 50 | xargs -0 -r sha256sum']);
+  console.log(`/root/.ssh and /home before Uninstall, with SHA-256:\n${proof.stdout.trimEnd() || '(none)'}`);
+  const uninstall = await uninstallRuntimeInDistroOnThisComputer(() => target.stopForRemoval(), { backup: false }, async (prompt) => {
+    console.log(`Second question: ${prompt.title} ${prompt.message} ${prompt.detail} -> ${prompt.confirmLabel}`);
+    return true;
+  });
+  if (!uninstall.removedLinux) throw new Error('Uninstall did not remove the ElastOS Linux environment');
+  const rows = parseWslDistroList((await listDistros()).replace(/\0/g, ''));
+  if (rows.some((row) => row.name === 'ElastOS')) throw new Error('After Uninstall, wsl.exe still lists ElastOS');
+  console.log(`After Uninstall, wsl.exe lists: ${rows.map((row) => row.name).join(', ') || 'no distro'}`);
+  console.log('After Uninstall, the ElastOS Linux environment is gone');
 }
 
 main().catch((err) => {

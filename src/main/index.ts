@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, Tray, Menu, nativeImage, shell } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, Tray, Menu, nativeImage, shell } from 'electron';
 import * as path from 'path';
 import log from 'electron-log';
 import { createDefaultLaunchController, finishQuitAfterGatewayStop, TargetStatus } from './launchController';
@@ -177,12 +177,31 @@ ipcMain.handle('elastos:install', async (event) => {
   });
 });
 
-ipcMain.handle('elastos:uninstall', () => launch.uninstall());
+ipcMain.handle('elastos:uninstall', (_event, choice: unknown) => {
+  const backup = choice && typeof choice === 'object' ? (choice as { backup?: unknown }).backup : undefined;
+  // The second question on Windows, asked here in the main process so the
+  // window alone cannot answer it. Cancel is the default button.
+  const confirmRemoval = async (prompt: { title: string; message: string; detail: string; confirmLabel: string; cancelLabel: string }) => {
+    const options = {
+      type: 'warning' as const,
+      title: prompt.title,
+      message: prompt.message,
+      detail: prompt.detail,
+      buttons: [prompt.cancelLabel, prompt.confirmLabel],
+      defaultId: 0,
+      cancelId: 0,
+      noLink: true,
+    };
+    const answer = mainWindow ? await dialog.showMessageBox(mainWindow, options) : await dialog.showMessageBox(options);
+    return answer.response === 1;
+  };
+  return launch.uninstall({ backup }, confirmRemoval);
+});
 ipcMain.handle('elastos:resetRuntime', (_event, choice: unknown) => {
   const backup = choice && typeof choice === 'object' ? (choice as { backup?: unknown }).backup : undefined;
   return launch.resetRuntime({ backup });
 });
-ipcMain.handle('elastos:describeResetBackup', () => launch.describeResetBackup());
+ipcMain.handle('elastos:describeResetBackup', (_event, action: unknown) => launch.describeResetBackup(action === 'uninstall' ? 'uninstall' : 'reset'));
 
 // Version and updates
 ipcMain.handle('elastos:getVersion', () => launch.getVersion());
