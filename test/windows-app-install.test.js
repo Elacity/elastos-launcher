@@ -316,9 +316,29 @@ test('an adopted distro gateway uses the lock pid and does not report a live pid
   const helper = source.match(/const STOP_HELPER = `\n([\s\S]*?)`\.trim\(\)/);
   assert.ok(helper);
   assert.equal(helper[1].includes('host-process.lock'), false);
-  const { spawnSync } = require('node:child_process');
+  const { spawn, spawnSync } = require('node:child_process');
+  const probe = spawnSync('python3', ['-V'], { encoding: 'utf8' });
+  if (probe.error || probe.status !== 0) {
+    assert.fail(`python3 is required to test the distro stop helper (${probe.error ? probe.error.message : probe.stderr || probe.stdout})`);
+  }
   for (const raw of ['1', '0', 'True', 'true', '-1']) {
     const result = spawnSync('python3', ['-c', helper[1], 'TERM', raw], { encoding: 'utf8' });
-    assert.notEqual(result.status, 0, `${raw} status ${result.status}`);
+    assert.equal(result.error, undefined, raw);
+    assert.equal(result.status, 1, `${raw} status ${result.status} ${result.stderr}`);
+    assert.equal(/Traceback/.test(result.stderr || ''), false, result.stderr);
+  }
+  const sleeper = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {
+    detached: true,
+    stdio: 'ignore',
+  });
+  sleeper.unref();
+  try {
+    const killed = spawnSync('python3', ['-c', helper[1], 'TERM', String(sleeper.pid)], { encoding: 'utf8' });
+    assert.equal(killed.error, undefined);
+    assert.equal(killed.status, 0, killed.stderr);
+    await new Promise((resolve) => { setTimeout(resolve, 200); });
+    assert.throws(() => process.kill(sleeper.pid, 0));
+  } finally {
+    try { process.kill(-sleeper.pid, 'SIGKILL'); } catch { /* already gone */ }
   }
 });
