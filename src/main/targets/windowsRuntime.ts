@@ -600,9 +600,10 @@ export function adoptDistroGatewayProcess(deps: {
 }
 
 /**
- * Reset and Uninstall adopt the lock pid. A listener that is not ElastOS is
- * left alone. A failed identity read still adopts that pid, because the
- * person already confirmed and the lock is the installed gateway.
+ * Reset and Uninstall adopt the lock pid only when the distro facts say it
+ * is the ElastOS gateway. A different listener, and a facts read that fails,
+ * are left running. The confirm dialog is not a license to signal an
+ * unidentified pid.
  */
 export async function adoptInstalledDistroGateway(deps: {
   kind?: () => Promise<DistroListenerKind>;
@@ -610,7 +611,13 @@ export async function adoptInstalledDistroGateway(deps: {
 } = {}): Promise<GatewayProcess | null> {
   const kind = deps.kind ?? (() => distroListenerKind());
   const adopt = deps.adopt ?? (() => adoptDistroGatewayProcess());
-  if (await kind() === 'other') return null;
+  let seen: DistroListenerKind;
+  try {
+    seen = await kind();
+  } catch {
+    return null;
+  }
+  if (seen !== 'elastos') return null;
   return adopt();
 }
 

@@ -9,6 +9,7 @@ const { runtimeInstallBlock } = require('../dist/main/targets/runtimeSupport');
 const {
   adoptDistroGatewayProcess,
   adoptInstalledDistroGateway,
+  distroListenerKind,
   assertDistroPath,
   distroGatewayArgs,
   distroInstallerArgs,
@@ -226,12 +227,33 @@ test('an adopted distro gateway uses the lock pid and does not report a live pid
   assert.equal(argv[0].at(-1), '77');
   assert.equal(argv[0][3], 'TERM');
   assert.equal(String(argv[0][2]).includes('host-process.lock'), false);
+  const adoptedCalls = [];
   assert.equal(await adoptInstalledDistroGateway({
     kind: async () => 'other',
-    adopt: () => signaled,
+    adopt: () => {
+      adoptedCalls.push('other');
+      return signaled;
+    },
   }), null);
   assert.equal(await adoptInstalledDistroGateway({
     kind: async () => 'unknown',
+    adopt: () => {
+      adoptedCalls.push('unknown');
+      return signaled;
+    },
+  }), null);
+  assert.equal(await adoptInstalledDistroGateway({
+    kind: async () => { throw new Error('facts timed out'); },
+    adopt: () => {
+      adoptedCalls.push('throw');
+      return signaled;
+    },
+  }), null);
+  assert.equal(await distroListenerKind(async () => { throw new Error('timeout'); }), 'unknown');
+  assert.equal(await distroListenerKind(async () => ({ code: 1, stdout: '', stderr: 'closed' })), 'unknown');
+  assert.deepEqual(adoptedCalls, []);
+  assert.equal(await adoptInstalledDistroGateway({
+    kind: async () => 'elastos',
     adopt: () => signaled,
   }), signaled);
 
