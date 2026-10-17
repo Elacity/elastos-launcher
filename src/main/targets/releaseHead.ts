@@ -309,11 +309,45 @@ export function parseJsonUnique(text: string): unknown {
   return value;
 }
 
+/**
+ * The variables install.sh reads. Each one can replace a trust root or a
+ * source: the maintainer DID, the head CID, the publisher gateway and node,
+ * the Carrier ticket, the IPNS name, and download behavior.
+ */
+export const INSTALLER_ENV_NAMES: readonly string[] = [
+  'ELASTOS_MAINTAINER_DID',
+  'ELASTOS_HEAD_CID',
+  'ELASTOS_PUBLISHER_GATEWAY',
+  'ELASTOS_PUBLISHER_NODE_ID',
+  'ELASTOS_SOURCE_CONNECT_TICKET',
+  'ELASTOS_IPNS_NAME',
+  'ELASTOS_INSTALL_ONLY',
+  'ELASTOS_BINARY_DOWNLOAD_RETRY_COUNT',
+  'ELASTOS_BINARY_DOWNLOAD_RETRY_DELAY',
+  'ELASTOS_BINARY_DOWNLOAD_CONNECT_TIMEOUT',
+  'ELASTOS_BINARY_DOWNLOAD_SPEED_LIMIT',
+  'ELASTOS_BINARY_DOWNLOAD_SPEED_TIME',
+];
+
+/**
+ * The environment for a program the launcher starts: install.sh, `elastos
+ * setup`, `elastos gateway`, and `elastos update`. Every inherited
+ * `ELASTOS_*` variable is dropped. install.sh reads the names above, and the
+ * runtime reads many more (a data directory, a components manifest, a policy
+ * file, VM images). The launcher sets the ones it means, such as
+ * ELASTOS_HEAD_CID from the signed pin, after this. Windows names are not
+ * case sensitive, so the match is not either.
+ */
+export function runtimeChildEnv(parent: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {};
+  for (const [key, value] of Object.entries(parent)) {
+    if (/^ELASTOS_/i.test(key)) continue;
+    env[key] = value;
+  }
+  return env;
+}
+
 /** Drop installer overrides so a parent environment cannot retarget the script. */
 export function installerChildEnv(parent: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
-  const env = { ...parent };
-  delete env.ELASTOS_MAINTAINER_DID;
-  delete env.ELASTOS_PUBLISHER_GATEWAY;
-  delete env.ELASTOS_HEAD_CID;
-  return env;
+  return runtimeChildEnv(parent);
 }

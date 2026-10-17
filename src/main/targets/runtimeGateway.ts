@@ -13,6 +13,7 @@ import {
   LEGACY_GATEWAY_ADDR,
   LOOPBACK_ADDRESSES,
 } from './gatewayAddress';
+import { runtimeChildEnv } from './releaseHead';
 import { runtimeDataDir, runtimeHostLockPath } from './runtimePaths';
 
 export { HEALTH_URL, HOME_URL, LEGACY_GATEWAY_ADDR, LOOPBACK_ADDRESSES };
@@ -549,6 +550,7 @@ export function spawnGatewayProcess(binary: string, args: readonly string[]): Ga
   const child = spawn(binary, [...args], {
     detached: true,
     stdio: ['ignore', 'pipe', 'pipe'],
+    env: runtimeChildEnv(process.env),
   });
   const outputListeners: Array<(chunk: string) => void> = [];
   const exitListeners: Array<(code: number | null) => void> = [];

@@ -332,6 +332,7 @@ export function defaultRuntimeInstallDeps(pin: ActiveRuntimePin = loadActiveRunt
         platform: process.platform,
         arch: process.arch,
         env,
+        hideHostTools: hideHostTools(),
       });
       return exec(prepared.bash, [scriptPath, ...args], 15 * 60 * 1000, prepared.env);
     },
@@ -341,6 +342,7 @@ export function defaultRuntimeInstallDeps(pin: ActiveRuntimePin = loadActiveRunt
         platform: process.platform,
         arch: process.arch,
         env: installerChildEnv(process.env),
+        hideHostTools: hideHostTools(),
       });
       return exec(binary, ['setup'], 15 * 60 * 1000, prepared.env);
     },
@@ -362,6 +364,11 @@ export function defaultRuntimeInstallDeps(pin: ActiveRuntimePin = loadActiveRunt
     },
     mkdirp: (dir) => fs.mkdirSync(dir, { recursive: true }),
   };
+}
+
+/** A test switch for the launcher itself. It is read here, never passed to a child. */
+function hideHostTools(): boolean {
+  return process.env.ELASTOS_HIDE_HOST_TOOLS === '1';
 }
 
 async function fetchText(url: string): Promise<string> {

@@ -4,6 +4,7 @@ import * as os from 'os';
 import * as path from 'path';
 import { PinMismatchError } from './runtimeInstall';
 import { installRuntime, RuntimeInstallDeps } from './runtimeInstall';
+import { INSTALLER_ENV_NAMES, runtimeChildEnv } from './releaseHead';
 import { loadActiveRuntimePin } from './runtimePin';
 import { parseRuntimeVersion } from './runtimeProbe';
 import { WINDOWS_NATIVE_MESSAGE } from './runtimeSupport';
@@ -155,8 +156,9 @@ export function wslCommandPrefix(): readonly string[] {
   return ['-d', DISTRO_NAME, '-u', 'root', '--'];
 }
 
+/** wsl.exe passes names listed in WSLENV into the distro, so no ELASTOS_* name is left to pass. */
 export function wslSpawnEnv(parent: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
-  return { ...parent, WSL_UTF8: '1' };
+  return { ...runtimeChildEnv(parent), WSL_UTF8: '1' };
 }
 
 export function distroInstallerArgs(
@@ -169,10 +171,11 @@ export function distroInstallerArgs(
   if (!/^Qm[1-9A-HJ-NP-Za-km-z]{20,}$/.test(head) || args.includes('--head-cid')) {
     throw new PinMismatchError('headCid');
   }
+  // The distro can hold its own values. Unset every name install.sh reads,
+  // then set the head from the signed pin.
   return [
     'env',
-    '-u', 'ELASTOS_MAINTAINER_DID',
-    '-u', 'ELASTOS_PUBLISHER_GATEWAY',
+    ...INSTALLER_ENV_NAMES.filter((name) => name !== 'ELASTOS_HEAD_CID').flatMap((name) => ['-u', name]),
     `ELASTOS_HEAD_CID=${head}`,
     'bash',
     script,

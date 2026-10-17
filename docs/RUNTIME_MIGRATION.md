@@ -21,6 +21,8 @@ The launcher is an Electron 28 shell. It does not embed the runtime. It download
 
 `ELASTOS_HEAD_CID=<pin> bash install.sh --install-only --maintainer-did <did>`
 
+The launcher drops every inherited `ELASTOS_*` variable before it starts install.sh, `elastos setup`, `elastos gateway`, or `elastos update` (`runtimeChildEnv` in `src/main/targets/releaseHead.ts`). install.sh lets `ELASTOS_MAINTAINER_DID`, `ELASTOS_PUBLISHER_GATEWAY`, `ELASTOS_PUBLISHER_NODE_ID`, `ELASTOS_SOURCE_CONNECT_TICKET`, `ELASTOS_IPNS_NAME`, and others replace its baked values, and the runtime reads many more. `ELASTOS_HEAD_CID` is then set from the signed pin. On Windows, wsl.exe gets no `ELASTOS_*` variable, and the distro command unsets each name install.sh reads (`INSTALLER_ENV_NAMES`) before it sets the head.
+
 Before that command, the app puts its own `curl` and `sha256sum` on `PATH`, and a pinned CPython when this computer cannot run `python3 -c ''`. It does not ask for Xcode Command Line Tools. The click-by-click first run, including the Windows permission prompt and a possible restart, is `docs/FIRST_RUN.md`.
 
 | Piece | File | Role |

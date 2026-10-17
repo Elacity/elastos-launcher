@@ -429,3 +429,70 @@ test('WSL without /dev/kvm explains the local Browser', () => {
   assert.equal(wslKvmMessage(true, true), null);
   assert.equal(wslKvmMessage(false, false), null);
 });
+
+const TRUST_OVERRIDES = {
+  ELASTOS_MAINTAINER_DID: 'did:key:zevil',
+  ELASTOS_HEAD_CID: 'QmEvilEvilEvilEvilEvilEvilEvilEvilEvilEvilEvil',
+  ELASTOS_PUBLISHER_GATEWAY: 'https://evil.example',
+  ELASTOS_PUBLISHER_NODE_ID: 'evil-node',
+  ELASTOS_SOURCE_CONNECT_TICKET: 'evil-ticket',
+  ELASTOS_IPNS_NAME: 'evil-name',
+  ELASTOS_DATA_DIR: '/tmp/evil-data',
+  elastos_components_manifest: '/tmp/evil.json',
+};
+
+async function withEnv(values, run) {
+  const saved = {};
+  for (const key of Object.keys(values)) {
+    saved[key] = process.env[key];
+    process.env[key] = values[key];
+  }
+  try {
+    return await run();
+  } finally {
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+}
+
+test('a real install.sh run gets the pinned head and no inherited ELASTOS_* override', async (t) => {
+  if (process.platform === 'win32') return t.skip('POSIX shell');
+  if (spawnSync('python3', ['-c', ''], { stdio: 'ignore' }).status !== 0) return t.skip('needs python3, or the app downloads one');
+  const { defaultRuntimeInstallDeps, pinnedInstallerLaunch } = require('../dist/main/targets/runtimeInstall');
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'elastos-env-scrub-'));
+  try {
+    const script = path.join(home, 'install.sh');
+    fs.writeFileSync(script, 'env | grep -i "^ELASTOS_" | sort\n');
+    const out = await withEnv({ ...TRUST_OVERRIDES, HOME: home }, async () => {
+      const pin = canaryPin();
+      const deps = defaultRuntimeInstallDeps(pin);
+      const launch = pinnedInstallerLaunch(pin, deps.env);
+      return deps.runInstaller(script, launch.args, launch.env);
+    });
+    assert.equal(out.stdout.trim(), `ELASTOS_HEAD_CID=${FIXTURE_HEAD_CID}`);
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('the gateway process gets no inherited ELASTOS_* variable', async (t) => {
+  if (process.platform === 'win32') return t.skip('POSIX env');
+  const { spawnGatewayProcess } = require('../dist/main/targets/runtimeGateway');
+  const output = await withEnv(TRUST_OVERRIDES, () => new Promise((resolve) => {
+    const proc = spawnGatewayProcess('/usr/bin/env', []);
+    let text = '';
+    proc.onOutput((chunk) => { text += chunk; });
+    proc.onExit(() => resolve(text));
+  }));
+  assert.match(output, /^PATH=/m);
+  assert.equal(/^ELASTOS_/im.test(output), false, output.split('\n').filter((line) => /^ELASTOS_/i.test(line)).join('\n'));
+});
+
+test('runtimeChildEnv drops every ELASTOS_ name, in any case, and keeps the rest', () => {
+  const { INSTALLER_ENV_NAMES, runtimeChildEnv } = require('../dist/main/targets/releaseHead');
+  assert.deepEqual(runtimeChildEnv({ ...TRUST_OVERRIDES, PATH: '/bin', HOME: '/h', XDG_DATA_HOME: '/x' }), { PATH: '/bin', HOME: '/h', XDG_DATA_HOME: '/x' });
+  for (const name of INSTALLER_ENV_NAMES) assert.match(name, /^ELASTOS_/);
+  assert.equal(INSTALLER_ENV_NAMES.length, 12);
+});

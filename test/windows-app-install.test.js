@@ -28,6 +28,7 @@ const {
 } = require('../dist/main/targets/windowsRuntime');
 const { createGatewaySupervisor } = require('../dist/main/targets/runtimeGateway');
 const { importDistroArgs } = require('../dist/main/targets/windowsHost');
+const { INSTALLER_ENV_NAMES } = require('../dist/main/targets/releaseHead');
 
 const HEAD = 'QmXuy56RTFzXaifTuyCbMb6Ky1p5wuM9iP8eFbMghHxWij';
 const DID = 'did:key:z6MkgwHd2BCWe1jHMXPiR6H1q1RFPcv1YzhMbK5G1kBarbfe';
@@ -45,16 +46,23 @@ test('distro paths stay POSIX and the installer uses ELASTOS_HEAD_CID', () => {
     { ELASTOS_HEAD_CID: 'QmEvil', ELASTOS_MAINTAINER_DID: 'did:key:zevil', ELASTOS_PUBLISHER_GATEWAY: 'https://evil.example' },
   );
   const args = distroInstallerArgs('/root/.elastos-launcher/install.sh', launch.args, launch.env);
-  assert.deepEqual(args.slice(0, 6), [
-    'env',
-    '-u',
-    'ELASTOS_MAINTAINER_DID',
-    '-u',
-    'ELASTOS_PUBLISHER_GATEWAY',
-    `ELASTOS_HEAD_CID=${HEAD}`,
-  ]);
+  const bash = args.indexOf('bash');
+  const unset = [];
+  for (let i = 1; i < bash - 1; i += 2) {
+    assert.equal(args[i], '-u');
+    unset.push(args[i + 1]);
+  }
+  assert.equal(args[0], 'env');
+  assert.deepEqual(unset, INSTALLER_ENV_NAMES.filter((name) => name !== 'ELASTOS_HEAD_CID'));
+  for (const name of ['ELASTOS_MAINTAINER_DID', 'ELASTOS_PUBLISHER_GATEWAY', 'ELASTOS_PUBLISHER_NODE_ID', 'ELASTOS_SOURCE_CONNECT_TICKET', 'ELASTOS_IPNS_NAME']) {
+    assert.ok(unset.includes(name), name);
+  }
+  assert.equal(args[bash - 1], `ELASTOS_HEAD_CID=${HEAD}`);
   assert.equal(args.includes('--head-cid'), false);
-  assert.deepEqual(args.slice(6), ['bash', '/root/.elastos-launcher/install.sh', '--install-only', '--maintainer-did', DID]);
+  assert.deepEqual(args.slice(bash), ['bash', '/root/.elastos-launcher/install.sh', '--install-only', '--maintainer-did', DID]);
+  // wsl.exe gets no ELASTOS_* name from Windows, in any case, so WSLENV cannot pass one in.
+  const wslEnv = wslSpawnEnv({ PATH: 'C:\\Windows', ELASTOS_MAINTAINER_DID: 'did:key:zevil', Elastos_Head_Cid: 'QmEvil', WSLENV: 'ELASTOS_MAINTAINER_DID/u' });
+  assert.deepEqual(Object.keys(wslEnv).sort(), ['PATH', 'WSLENV', 'WSL_UTF8']);
   assert.deepEqual([...wslCommandPrefix(), ...args].slice(0, 4), ['-d', 'ElastOS', '-u', 'root']);
   assert.equal(wslSpawnEnv({}).WSL_UTF8, '1');
   assert.deepEqual(distroGatewayArgs().slice(-3), ['gateway', '--addr', 'localhost:8090']);
