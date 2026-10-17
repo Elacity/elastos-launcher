@@ -101,6 +101,41 @@ export function distroHelperArgs(op: DistroHelperOp): string[] {
   return ['-d', DISTRO_NAME, '-u', 'root', '--exec', DISTRO_PYTHON, '-c', DISTRO_RESET_HELPER, op];
 }
 
+/**
+ * A fixed /bin/sh line that says whether `python` starts. It prints one of
+ * two marker words, so a wsl.exe failure (no marker) is not read as
+ * "python3 is missing".
+ */
+export function distroPythonProbe(python: string = DISTRO_PYTHON): string {
+  return `if ${python} -c 'import os' >/dev/null 2>&1; then echo ELASTOS-PYTHON-YES; else echo ELASTOS-PYTHON-NO; fi`;
+}
+
+export function distroPythonProbeArgs(): string[] {
+  return ['-d', DISTRO_NAME, '-u', 'root', '--exec', '/bin/sh', '-c', distroPythonProbe()];
+}
+
+/** True or false from the probe output. Null when the probe did not run (no marker). */
+export function parsePythonProbe(stdout: string): boolean | null {
+  if (/ELASTOS-PYTHON-YES/.test(stdout)) return true;
+  if (/ELASTOS-PYTHON-NO/.test(stdout)) return false;
+  return null;
+}
+
+export async function distroPythonPresent(): Promise<boolean | null> {
+  try {
+    const result = await spawnHelper('wsl.exe', distroPythonProbeArgs(), {}, { env: wslSpawnEnv(), timeoutMs: 60_000 });
+    return parsePythonProbe(result.stdout);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Install adds python3 to the ElastOS Linux environment when it is missing
+ * (ensureElastosDistro in windowsRuntime.ts), so that is the next click.
+ */
+export const DISTRO_PYTHON_MISSING_MESSAGE = 'ElastOS was not reset, because the program python3 is missing from its Linux environment, and Reset needs it. Nothing was deleted. Click Install to add python3 again, then click Reset.';
+
 /** Spawn a helper process with no shell. Exported so tests can run the same helper with a local python3. */
 export function spawnHelper(
   command: string,
@@ -496,6 +531,8 @@ export async function resetRuntimeInDistro(deps: {
   paths?: DistroResetPaths;
   stop: () => Promise<void>;
   distroPresent: () => Promise<boolean | null>;
+  /** Runs before anything else in the Linux environment. False when python3 is missing there. */
+  pythonPresent: () => Promise<boolean | null>;
   inspect: () => Promise<DistroInspection>;
   maintainerDid: string | null;
   /** Runs before Stop. Throws when the copy cannot fit. */
@@ -530,6 +567,11 @@ export async function resetRuntimeInDistro(deps: {
     throw new Error('ElastOS was not reset because it could not check its Linux environment. Nothing was deleted. Try again.');
   }
   if (present) {
+    const python = await deps.pythonPresent();
+    if (python === false) throw new Error(DISTRO_PYTHON_MISSING_MESSAGE);
+    if (python == null) {
+      throw new Error('ElastOS was not reset because it could not check its Linux environment. Nothing was deleted. Try again.');
+    }
     distroRemovalPlan(await deps.inspect(), paths, deps.maintainerDid);
     if (wantsBackup && deps.checkBackupSpace) {
       try {
@@ -617,6 +659,7 @@ export async function resetRuntimeInDistroOnThisComputer(
     paths,
     stop,
     distroPresent: () => elastosDistroPresent(),
+    pythonPresent: () => distroPythonPresent(),
     inspect: () => inspectDistro(run, paths),
     maintainerDid: pinnedMaintainerDid(),
     checkBackupSpace: async () => {

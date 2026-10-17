@@ -8,7 +8,11 @@ const test = require('node:test');
 const { DISTRO_RESET_HELPER } = require('../dist/main/targets/distroResetHelper');
 const {
   describeDistroBackup,
+  DISTRO_PYTHON_MISSING_MESSAGE,
   distroHelperArgs,
+  distroPythonProbe,
+  distroPythonProbeArgs,
+  parsePythonProbe,
   distroRemovalPlan,
   distroResetPaths,
   elastosDistroPresent,
@@ -118,6 +122,7 @@ function resetDeps(fx, calls, extra = {}) {
     paths: fx.paths,
     stop: async () => { calls.push('stop'); },
     distroPresent: async () => true,
+    pythonPresent: async () => { calls.push('python'); return true; },
     inspect: () => inspectDistro(run, fx.paths),
     maintainerDid: DID,
     checkBackupSpace: async () => {
@@ -203,7 +208,7 @@ test('Windows Reset saves a copy, then deletes exactly the runtime paths in the 
     const result = await resetRuntimeInDistro(deps);
 
     assert.deepEqual(calls, [
-      'inspect', 'measure', 'stop', 'measure', 'restrict', 'restrict', 'zip', 'inspect', 'remove',
+      'python', 'inspect', 'measure', 'stop', 'measure', 'restrict', 'restrict', 'zip', 'inspect', 'remove',
       'host:install-stage.json', 'host:resume-install.json', 'host:resume-install.json.lock',
     ]);
     assert.deepEqual(removed.sort(), [fx.paths.binary, fx.paths.dataDir, fx.paths.stageFile].sort());
@@ -318,7 +323,7 @@ test('not enough free space on Windows refuses before the distro gateway is stop
       () => resetRuntimeInDistro(resetDeps(fx, calls, { freeBytes: () => 1024 })),
       /ElastOS was not reset\. There is not enough free space for a copy of your data\. Nothing was deleted\. Free some space, or reset without a copy\./,
     );
-    assert.deepEqual(calls, ['inspect', 'measure']);
+    assert.deepEqual(calls, ['python', 'inspect', 'measure']);
     assertUntouched(fx);
     // The dialog says the same before the person chooses.
     const seen = await describeDistroBackup({ run: localRun([]), home: fx.winHome, paths: fx.paths, distroPresent: async () => true, freeBytes: () => 1024 });
@@ -344,7 +349,7 @@ test('a user file in the distro data folder is refused by name, and nothing is s
         () => resetRuntimeInDistro({ ...resetDeps(fx, calls), backup }),
         /^Error: ElastOS will not reset .*\/root\/\.local\/share\/elastos in its Linux environment, because it contains files that are not part of the runtime: Documents, notes\.txt\. Move those files out, then reset\. Nothing was deleted\. To see them, open \\\\wsl\$\\ElastOS\\.*\\root\\\.local\\share\\elastos in File Explorer\.$/,
       );
-      assert.deepEqual(calls, ['inspect']);
+      assert.deepEqual(calls, ['python', 'inspect']);
     }
     assertUntouched(fx);
     assert.equal(fs.readFileSync(path.join(fx.root, '.local', 'share', 'elastos', 'notes.txt'), 'utf8'), 'keep');
@@ -402,7 +407,7 @@ test('a foreign name beside a real Community setup in the distro is still refuse
       () => resetRuntimeInDistro(resetDeps(fx, calls)),
       /contains files that are not part of the runtime: holiday-photos\. Move those files out, then reset\. Nothing was deleted\./,
     );
-    assert.deepEqual(calls, ['inspect']);
+    assert.deepEqual(calls, ['python', 'inspect']);
     assertUntouched(fx);
     assert.equal(fs.readFileSync(path.join(fx.root, '.local', 'share', 'elastos', 'holiday-photos', 'beach.jpg'), 'utf8'), 'keep');
   } finally {
@@ -418,7 +423,7 @@ test('a forged, missing, foreign-signed, or linked install record in the distro 
     const attempt = async (did = DID) => {
       const calls = [];
       await assert.rejects(() => resetRuntimeInDistro({ ...resetDeps(fx, calls), backup: false, maintainerDid: did }), unproved);
-      assert.deepEqual(calls, ['inspect']);
+      assert.deepEqual(calls, ['python', 'inspect']);
       assertUntouched(fx);
     };
     // Payload edited after signing.
@@ -695,7 +700,7 @@ test('a name in the distro data folder on another drive is refused before Stop, 
       () => resetRuntimeInDistro(resetDeps(fx, calls, { run: patchedRun(calls, fakeDrive(['MyWebSite'])) })),
       /^Error: ElastOS will not reset \/.*\/\.local\/share\/elastos in its Linux environment, because these names in it are on another drive or are mounted from another folder: MyWebSite\. ElastOS deletes only its own files, never files on another drive\. Nothing was deleted\. Unmount them, then click Reset\.$/,
     );
-    assert.deepEqual(calls, ['inspect']);
+    assert.deepEqual(calls, ['python', 'inspect']);
     assertUntouched(fx);
     assert.deepEqual(backupFiles(fx), []);
 
@@ -781,7 +786,7 @@ test('a real bind mount and a real tmpfs inside the distro data folder are never
       () => resetRuntimeInDistro(resetDeps(fx, calls)),
       /because these names in it are on another drive or are mounted from another folder: Users\/alice\/c, Users\/alice\/t\..*Nothing was deleted/,
     );
-    assert.deepEqual(calls, ['inspect']);
+    assert.deepEqual(calls, ['python', 'inspect']);
     assertUntouched(fx);
     assert.equal(precious(), 'on drive C');
     assert.equal(fs.readFileSync(path.join(tmpfsAt, 'in-tmpfs.txt'), 'utf8'), 'tmpfs');
@@ -962,3 +967,31 @@ for (const { step, fn, name } of STEPS) {
     });
   }
 }
+
+test('python3 missing in the distro gives a plain message before anything runs there', POSIX, async () => {
+  // The probe itself: a marker word for yes and for no, and no marker means it did not run.
+  assert.equal(parsePythonProbe((await spawnHelper('/bin/sh', ['-c', distroPythonProbe('python3')], {})).stdout), true);
+  assert.equal(parsePythonProbe((await spawnHelper('/bin/sh', ['-c', distroPythonProbe('/nonexistent/python3')], {})).stdout), false);
+  assert.equal(parsePythonProbe('There is no distribution with the supplied name.'), null);
+  assert.deepEqual(distroPythonProbeArgs().slice(0, 7), ['-d', 'ElastOS', '-u', 'root', '--exec', '/bin/sh', '-c']);
+  assert.equal(/["\\$`]/.test(distroPythonProbe()), false);
+
+  const fx = distroFixture();
+  try {
+    // Without python3 every helper call fails the way wsl.exe fails, so only the probe can say why.
+    const noPython = async () => ({ code: 1, stdout: '', stderr: 'execvpe(/usr/bin/python3) failed: No such file or directory' });
+    const calls = [];
+    const run = localRun(calls, { inspect: noPython, measure: noPython, zip: noPython, remove: noPython });
+    const deps = { ...resetDeps(fx, calls, { run }), pythonPresent: async () => { calls.push('python'); return false; } };
+    await assert.rejects(() => resetRuntimeInDistro(deps), (err) => err.message === DISTRO_PYTHON_MISSING_MESSAGE);
+    assert.deepEqual(calls, ['python']);
+    assert.match(DISTRO_PYTHON_MISSING_MESSAGE, /python3 is missing .* Nothing was deleted\. Click Install to add python3 again, then click Reset\./);
+    assertUntouched(fx);
+
+    const unsure = { ...resetDeps(fx, [], { run }), pythonPresent: async () => null };
+    await assert.rejects(() => resetRuntimeInDistro(unsure), /could not check its Linux environment\. Nothing was deleted\./);
+    assertUntouched(fx);
+  } finally {
+    fx.cleanup();
+  }
+});
