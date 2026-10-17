@@ -493,10 +493,16 @@ test('a reused pid does not hold the resume lock forever', () => {
       uptime: os.uptime(),
       start: '1',
     }));
+    if (process.platform !== 'linux') {
+      // No /proc start time. A fresh live pid stays. Silence past the bound is the escape.
+      assert.equal(claimResumeInstall(home), false);
+      const staleAt = new Date(Date.now() - RESUME_LOCK_STALE_MS - 1000);
+      fs.utimesSync(lock, staleAt, staleAt);
+    }
     assert.equal(claimResumeInstall(home), true);
     const held = JSON.parse(fs.readFileSync(lock, 'utf8'));
     assert.equal(held.pid, process.pid);
-    assert.notEqual(held.start, '1');
+    if (process.platform === 'linux') assert.notEqual(held.start, '1');
   } finally {
     child.kill();
     finishResumeInstall(home, false);
