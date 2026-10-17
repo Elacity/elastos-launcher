@@ -13,6 +13,7 @@ import { runtimeHeadStore } from './targets/runtimeUpdate';
 import { rollbackRuntimeUpdate } from './targets/runtimeTarget';
 import { BackupDescription, describeRuntimeBackupOnThisComputer } from './targets/runtimeBackup';
 import { resetRuntimeOnThisComputer, ResetResult } from './targets/runtimeUninstall';
+import { describeDistroBackupOnThisComputer, resetRuntimeInDistroOnThisComputer } from './targets/windowsReset';
 import { finishResumeInstall as clearResumeInstall, fixWindowsOnThisComputer, resumeInstallPlanOnThisComputer, ResumeInstallPlan } from './targets/windowsHost';
 import { LaunchTarget, LaunchTargetId, TargetStatus, UpdateCheck } from './targets/types';
 
@@ -243,8 +244,13 @@ export function createLaunchController(options: LaunchControllerOptions = {}): L
     install: (onProgress) => runRuntime(() => active.install(onProgress)),
     update: (onProgress) => runRuntime(() => active.update(onProgress)),
     uninstall: () => runRuntime(() => active.uninstall()),
-    resetRuntime: (choice) => runRuntime(() => resetRuntimeOnThisComputer(() => active.stopForRemoval(), choice ?? {})),
-    describeResetBackup: () => describeRuntimeBackupOnThisComputer(),
+    // On Windows the ElastOS data is inside the ElastOS Linux environment, so Reset works there.
+    resetRuntime: (choice) => runRuntime(() => (process.platform === 'win32'
+      ? resetRuntimeInDistroOnThisComputer(() => active.stopForRemoval(), choice ?? {})
+      : resetRuntimeOnThisComputer(() => active.stopForRemoval(), choice ?? {}))),
+    describeResetBackup: () => (process.platform === 'win32'
+      ? describeDistroBackupOnThisComputer()
+      : describeRuntimeBackupOnThisComputer()),
     rollback: (onProgress) => runRuntime(() => rollbackRuntimeUpdate(onProgress)),
     getVersion: () => runRuntimeSync(() => active.getVersion()),
     checkForUpdate: () => runRuntime(() => active.checkForUpdate()),

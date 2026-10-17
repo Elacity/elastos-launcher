@@ -108,7 +108,8 @@ function syncResetButton() {
     confirmDelete.disabled = true;
     return;
   }
-  confirmDelete.disabled = resetOffer.needsChoice && !resetBackupYes.checked && !resetBackupNo.checked;
+  confirmDelete.disabled = Boolean(resetOffer.blocked)
+    || (resetOffer.needsChoice && !resetBackupYes.checked && !resetBackupNo.checked);
 }
 
 function showResetBackup(description) {
@@ -384,7 +385,7 @@ confirmDelete.addEventListener('click', async () => {
   let resetChoice = null;
   if (confirmMode === 'reset') {
     // No answer to the backup offer means no Reset.
-    if (!resetOffer) return;
+    if (!resetOffer || resetOffer.blocked) return;
     if (resetOffer.needsChoice && !resetBackupYes.checked && !resetBackupNo.checked) return;
     resetChoice = { backup: Boolean(resetOffer.canSave && resetBackupYes.checked) };
   }

@@ -171,6 +171,11 @@ test('the distro gateway identity uses the lock pid socket and a positive wsl pi
   assert.match(script, /\/healthz is OK/);
   assert.match(script, /Opening Home in the Windows browser/);
   assert.equal(/windows-elastos-distro/.test(script), false);
+  // The whole data folder listing is printed before Reset looks at it.
+  const listed = script.indexOf("['ls', '-lA', '--full-time', dataDir]");
+  assert.ok(listed > 0);
+  assert.ok(listed < script.indexOf('await resetRuntimeInDistroOnThisComputer('));
+  assert.match(script, /Names Reset does not know/);
 });
 
 test('an adopted distro gateway uses the lock pid and does not report a live pid stopped', async () => {

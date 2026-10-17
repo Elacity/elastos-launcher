@@ -203,7 +203,7 @@ function isRealDirectory(dataDir: string): boolean {
   }
 }
 
-function pinnedMaintainerDid(): string | null {
+export function pinnedMaintainerDid(): string | null {
   try {
     return loadRuntimePinFile().maintainerDid || null;
   } catch {
@@ -251,6 +251,42 @@ type CustomXdgContents =
   | { kind: 'foreign'; names: string[] }
   | { kind: 'unproved' };
 
+/** One top-level entry of a data directory, as lstat saw it. */
+export interface RuntimeDataEntry {
+  name: string;
+  kind: 'file' | 'dir' | 'link' | 'other' | 'unknown';
+}
+
+export type RuntimeDataVerdict =
+  | { kind: 'owned'; byRecord: boolean }
+  | { kind: 'foreign'; names: string[] }
+  | { kind: 'unproved' };
+
+/**
+ * The ownership rule for a data directory's top-level entries. Every name
+ * must be one the runtime writes, as a plain file or folder. Only the
+ * partial-install files, or nothing, need no proof. Anything more needs a
+ * signed install record. A user file is refused by name even with a record.
+ */
+export function classifyRuntimeEntries(
+  entries: readonly RuntimeDataEntry[],
+  proved: () => boolean,
+): RuntimeDataVerdict {
+  const foreign: string[] = [];
+  let partialOnly = true;
+  for (const entry of [...entries].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))) {
+    const plain = entry.kind === 'file' || entry.kind === 'dir';
+    if (!isRuntimeDataName(entry.name) || !plain) {
+      foreign.push(entry.name);
+      continue;
+    }
+    if (!RUNTIME_PARTIAL_FILES.has(entry.name) || entry.kind !== 'file') partialOnly = false;
+  }
+  if (foreign.length) return { kind: 'foreign', names: foreign };
+  if (partialOnly) return { kind: 'owned', byRecord: false };
+  return proved() ? { kind: 'owned', byRecord: true } : { kind: 'unproved' };
+}
+
 /**
  * A custom data directory this launcher may reset. It is a real directory and
  * is empty, holds only the partial-install files, or holds only runtime names
@@ -271,29 +307,22 @@ function customXdgContents(dataDir: string, proved: (dir: string) => boolean): C
   } catch {
     return { kind: 'foreign', names: [] };
   }
-  const foreign: string[] = [];
-  let partialOnly = true;
-  for (const name of names) {
-    let entry: fs.Stats;
+  const entries: RuntimeDataEntry[] = names.map((name) => {
     try {
-      entry = fs.lstatSync(path.join(dataDir, name));
+      const entry = fs.lstatSync(path.join(dataDir, name));
+      if (entry.isSymbolicLink()) return { name, kind: 'link' };
+      if (entry.isDirectory()) return { name, kind: 'dir' };
+      if (entry.isFile()) return { name, kind: 'file' };
+      return { name, kind: 'other' };
     } catch {
-      foreign.push(name);
-      continue;
+      return { name, kind: 'unknown' };
     }
-    const plain = entry.isFile() || entry.isDirectory();
-    if (!isRuntimeDataName(name) || entry.isSymbolicLink() || !plain) {
-      foreign.push(name);
-      continue;
-    }
-    if (!RUNTIME_PARTIAL_FILES.has(name) || !entry.isFile()) partialOnly = false;
-  }
-  if (foreign.length) return { kind: 'foreign', names: foreign };
-  if (partialOnly) return { kind: 'owned' };
-  return proved(dataDir) ? { kind: 'owned' } : { kind: 'unproved' };
+  });
+  const verdict = classifyRuntimeEntries(entries, () => proved(dataDir));
+  return verdict.kind === 'owned' ? { kind: 'owned' } : verdict;
 }
 
-function listNames(names: string[]): string {
+export function listNames(names: string[]): string {
   const shown = names.slice(0, 5).join(', ');
   return names.length > 5 ? `${shown}, and ${names.length - 5} more` : shown;
 }

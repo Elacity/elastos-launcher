@@ -6,7 +6,6 @@ import { PinMismatchError } from './runtimeInstall';
 import { installRuntime, RuntimeInstallDeps } from './runtimeInstall';
 import { INSTALLER_ENV_NAMES, runtimeChildEnv } from './releaseHead';
 import { loadActiveRuntimePin } from './runtimePin';
-import { installRecordTextProves, runtimeJoin } from './runtimePaths';
 import { parseRuntimeVersion } from './runtimeProbe';
 import { WINDOWS_NATIVE_MESSAGE } from './runtimeSupport';
 import {
@@ -377,11 +376,13 @@ function distroInstallDeps(): RuntimeInstallDeps {
       const result = runWslSync(fileArgs('mkdir', dir));
       if (result.code !== 0) throw new Error(DISTRO_SETUP_FAILED);
     },
-    // The record bytes inside the distro, checked here against the pinned DID.
-    installRecordProved: (dataDir) => installRecordTextProves(
-      readDistroFile(runtimeJoin(dataDir, 'installation', 'release-head.json')),
-      pin.maintainerDid,
-    ),
+    // The record as Reset reads it in the distro (the fixed helper, no link
+    // followed), checked against the pinned DID. The helper's data folder is
+    // this same /root/.local/share/elastos.
+    installRecordProved: () => {
+      const reset = require('./windowsReset') as typeof import('./windowsReset');
+      return reset.distroInstallRecordProved(reset.wslHelperRun(), reset.distroResetPaths(), pin.maintainerDid);
+    },
   };
 }
 
@@ -671,11 +672,12 @@ export async function adoptInstalledDistroGateway(deps: {
   return adopt(seen.pid);
 }
 
-export function distroIsInstalled(): boolean {
+/** Install and status read the program and the components manifest inside the distro. */
+export function distroIsInstalled(
+  exists: (file: string) => boolean = (file) => runWslSync(fileArgs('exists', file), undefined, 8000).code === 0,
+): boolean {
   try {
-    const binary = runWslSync(fileArgs('exists', '/root/.local/bin/elastos'), undefined, 8000);
-    const components = runWslSync(fileArgs('exists', '/root/.local/share/elastos/components.json'), undefined, 8000);
-    return binary.code === 0 && components.code === 0;
+    return exists('/root/.local/bin/elastos') && exists('/root/.local/share/elastos/components.json');
   } catch {
     return false;
   }
