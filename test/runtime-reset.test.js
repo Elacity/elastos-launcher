@@ -13,6 +13,7 @@ test('reset removes the runtime program, data, and unfinished install', async ()
   const removed = [];
   const calls = [];
   await resetRuntime({
+    backup: false,
     binary: '/home/tester/.local/bin/elastos',
     dataDir: '/home/tester/.local/share/elastos',
     stageFile: '/home/tester/.elastos-launcher/install-stage.json',
@@ -69,6 +70,7 @@ test('a dotted account name is still a launcher path', async () => {
 
   const removed = [];
   await resetRuntime({
+    backup: false,
     binary: '/home/jane.doe/.local/bin/elastos',
     dataDir: '/home/jane.doe/.local/share/elastos',
     stageFile: '/home/jane.doe/.elastos-launcher/install-stage.json',
@@ -90,6 +92,7 @@ test('a dotted account name is still a launcher path', async () => {
 test('reset refuses a foreign directory, a live foreign host, and a misnamed stage file', async () => {
   const remove = () => { throw new Error('should not remove'); };
   await assert.rejects(() => resetRuntime({
+    backup: false,
     binary: '/home/tester/.local/bin/elastos',
     dataDir: '/home/tester/.other/elastos',
     stageFile: '/home/tester/.elastos-launcher/install-stage.json',
@@ -101,6 +104,7 @@ test('reset refuses a foreign directory, a live foreign host, and a misnamed sta
   }), /not the ElastOS data directory/);
 
   await assert.rejects(() => resetRuntime({
+    backup: false,
     binary: '/home/tester/.local/bin/elastos',
     dataDir: '/home/tester/.local/share/elastos',
     stageFile: '/home/tester/.elastos-launcher/install-stage.json',
@@ -114,6 +118,7 @@ test('reset refuses a foreign directory, a live foreign host, and a misnamed sta
   }), /another window/);
 
   await assert.rejects(() => resetRuntime({
+    backup: false,
     binary: '/home/tester/.local/bin/elastos',
     dataDir: '/home/tester/.local/share/elastos',
     stageFile: '/home/tester/.elastos-launcher/install-stage.json',
@@ -131,6 +136,7 @@ test('reset refuses a foreign directory, a live foreign host, and a misnamed sta
   });
 
   await assert.rejects(() => resetRuntime({
+    backup: false,
     binary: '/home/tester/.local/bin/elastos',
     dataDir: '/home/tester/.local/share/elastos',
     stageFile: '/home/tester/.elastos-launcher/secrets.txt',
@@ -158,6 +164,7 @@ test('reset refuses a symlink and a dotted foreign directory', async () => {
   const stage = '/home/tester/.elastos-launcher/install-stage.json';
   const removed = [];
   await assert.rejects(() => resetRuntime({
+    backup: false,
     binary,
     dataDir: data,
     stageFile: stage,
@@ -175,6 +182,7 @@ test('reset refuses a symlink and a dotted foreign directory', async () => {
   assert.deepEqual(removed, []);
 
   await assert.rejects(() => resetRuntime({
+    backup: false,
     binary: '/usr/local/bin/elastos',
     dataDir: '/home/u/Documents/elastos',
     stageFile: stage,
@@ -186,6 +194,7 @@ test('reset refuses a symlink and a dotted foreign directory', async () => {
   }), /not the ElastOS data directory/);
 
   await assert.rejects(() => resetRuntime({
+    backup: false,
     binary,
     dataDir: 'C:/Users/tester/.other/elastos',
     stageFile: stage,
@@ -199,6 +208,7 @@ test('reset refuses a symlink and a dotted foreign directory', async () => {
 
   const inspected = [];
   await assert.rejects(() => resetRuntime({
+    backup: false,
     binary,
     dataDir: data,
     stageFile: stage,
@@ -235,6 +245,7 @@ test('real home names are owned and a real symlink is not followed', async () =>
     fs.symlinkSync(outside, path.join(spaced, '.local'));
     const removed = [];
     await assert.rejects(() => resetRuntime({
+      backup: false,
       binary: path.join(spaced, '.local', 'bin', 'elastos'),
       dataDir: path.join(spaced, '.local', 'share', 'elastos'),
       stageFile: path.join(spaced, '.elastos-launcher', 'install-stage.json'),
@@ -296,6 +307,7 @@ function resetDeps(home, data, env, removed) {
   fs.mkdirSync(path.dirname(binary), { recursive: true });
   fs.writeFileSync(binary, '');
   return {
+    backup: false,
     binary,
     dataDir: data,
     stageFile: path.join(home, '.elastos-launcher', 'install-stage.json'),
@@ -546,6 +558,7 @@ test('a custom data directory with unknown files is refused by name', async () =
     assert.equal(launcherOwnedDirectories(data, home, 'linux', env), false);
     const removed = [];
     await assert.rejects(() => resetRuntime({
+      backup: false,
       binary: path.join(home, '.local', 'bin', 'elastos'),
       dataDir: data,
       stageFile: path.join(home, '.elastos-launcher', 'install-stage.json'),
@@ -561,6 +574,7 @@ test('a custom data directory with unknown files is refused by name', async () =
     fs.rmSync(path.join(data, 'notes.txt'));
     fs.rmSync(path.join(data, 'sources.json'));
     await resetRuntime({
+      backup: false,
       binary: path.join(home, '.local', 'bin', 'elastos'),
       dataDir: data,
       stageFile: path.join(home, '.elastos-launcher', 'install-stage.json'),
@@ -573,6 +587,7 @@ test('a custom data directory with unknown files is refused by name', async () =
     assert.equal(removed.includes(data), true);
 
     await assert.rejects(() => resetRuntime({
+      backup: false,
       binary: path.join(home, '.local', 'bin', 'elastos'),
       dataDir: '/var/lib/elastos',
       stageFile: path.join(home, '.elastos-launcher', 'install-stage.json'),
@@ -602,6 +617,7 @@ test('reset removes the resume lock and still deletes when a later sweep fails',
     fs.symlinkSync(outside, path.join(bin, '.elastos-removing-2147483646-aaaaaaaaaaaaaaaa-elastos'));
     const removed = [];
     await assert.rejects(() => resetRuntime({
+      backup: false,
       binary: path.join(bin, 'elastos'),
       dataDir: path.join(home, '.local', 'share', 'elastos'),
       stageFile: path.join(home, '.elastos-launcher', 'install-stage.json'),

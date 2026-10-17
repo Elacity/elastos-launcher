@@ -2,6 +2,7 @@ import * as crypto from 'crypto';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import { assertBackupSpace, writeRuntimeBackupOnThisComputer } from './runtimeBackup';
 import { isForeignGatewayError } from './runtimeGateway';
 import {
   foreignRuntimeDataMessage,
@@ -454,17 +455,36 @@ export async function uninstallRuntime(deps: {
   deps.remove(deps.dataDir);
 }
 
+export const RESET_CHOICE_MESSAGE =
+  'Choose whether to save a copy of your ElastOS data first. Nothing was reset.';
+
+export interface ResetResult {
+  /** The backup zip, when the person chose one and the data folder existed. */
+  backupPath: string | null;
+}
+
 export async function resetRuntime(deps: {
   binary: string;
   dataDir: string;
   stageFile: string;
   stop: () => Promise<void>;
   remove: (target: string) => void;
+  /** The person's answer to "Save a copy of your ElastOS data first". Anything but a boolean refuses Reset. */
+  backup: unknown;
+  /** Runs before Stop. Throws when the copy cannot fit. */
+  checkBackupSpace?: (dataDir: string) => void | Promise<void>;
+  /** Writes the copy after Stop and before any delete. Returns its path, or null when there is no data. */
+  saveBackup?: (dataDir: string) => Promise<string | null>;
   lstat?: (file: string) => RemovalStat;
   homeDir?: string;
   platform?: string;
   env?: NodeJS.ProcessEnv;
-}): Promise<void> {
+}): Promise<ResetResult> {
+  if (typeof deps.backup !== 'boolean') throw new Error(RESET_CHOICE_MESSAGE);
+  const wantsBackup = deps.backup;
+  if (wantsBackup && !deps.saveBackup) {
+    throw new Error('ElastOS was not reset. A copy of your data cannot be saved here. Nothing was deleted.');
+  }
   const owned = removalContext(deps);
   assertSafeRuntimeRemoval(deps.binary, deps.dataDir, owned.homeDir, owned.platform, owned.env);
   if (path.basename(deps.stageFile) !== 'install-stage.json' || !launcherOwnedDirectories(deps.stageFile, owned.homeDir, owned.platform, owned.env)) {
@@ -478,6 +498,13 @@ export async function resetRuntime(deps: {
   if (path.basename(resumeLock) !== 'resume-install.json.lock' || !launcherOwnedDirectories(resumeLock, owned.homeDir, owned.platform, owned.env)) {
     throw new Error('Refusing to remove a file that is not the ElastOS install resume.');
   }
+  if (wantsBackup && deps.checkBackupSpace) {
+    try {
+      await deps.checkBackupSpace(deps.dataDir);
+    } catch (err) {
+      throw new Error(`ElastOS was not reset. ${messageOf(err)}. Nothing was deleted. Free some space, or reset without a copy.`);
+    }
+  }
   try {
     await deps.stop();
   } catch (err) {
@@ -485,6 +512,14 @@ export async function resetRuntime(deps: {
       throw new Error('ElastOS is still running in another window. Quit it, then reset.');
     }
     throw err;
+  }
+  let backupPath: string | null = null;
+  if (wantsBackup && deps.saveBackup) {
+    try {
+      backupPath = await deps.saveBackup(deps.dataDir);
+    } catch (err) {
+      throw new Error(`ElastOS was not reset. The copy of your data could not be saved (${messageOf(err)}). Nothing was deleted.`);
+    }
   }
   const lstat = deps.lstat ?? fs.lstatSync;
   assertNoSymlinkAncestors(deps.binary, lstat);
@@ -510,11 +545,20 @@ export async function resetRuntime(deps: {
   ])) {
     sweepRemovalHoldings(parent);
   }
+  return { backupPath };
 }
 
-export async function resetRuntimeOnThisComputer(stop: () => Promise<void>): Promise<void> {
+function messageOf(err: unknown): string {
+  const text = err instanceof Error ? err.message : String(err);
+  return text.replace(/\.$/, '');
+}
+
+export async function resetRuntimeOnThisComputer(
+  stop: () => Promise<void>,
+  choice: { backup?: unknown } = {},
+): Promise<ResetResult> {
   const home = os.homedir();
-  await resetRuntime({
+  return resetRuntime({
     binary: runtimeBinaryPath(home),
     dataDir: runtimeDataDir(process.platform, home, process.env),
     stageFile: runtimeInstallStagePath(home),
@@ -522,6 +566,9 @@ export async function resetRuntimeOnThisComputer(stop: () => Promise<void>): Pro
     platform: process.platform,
     env: process.env,
     stop,
+    backup: choice.backup,
+    checkBackupSpace: (dataDir) => assertBackupSpace({ dataDir, home }),
+    saveBackup: (dataDir) => writeRuntimeBackupOnThisComputer(dataDir),
     remove: (target) => removeVerifiedTarget(target),
   });
 }

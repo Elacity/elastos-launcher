@@ -528,7 +528,7 @@ body {
 
 /* Confirm Modal */
 .confirm-modal {
-  position: absolute;
+  position: fixed;
   top: 0;
   left: 0;
   right: 0;
@@ -553,6 +553,8 @@ body {
   border: 1px solid var(--border);
   max-width: 360px;
   width: calc(100% - 32px);
+  max-height: calc(100% - 32px);
+  overflow-y: auto;
 }
 
 .confirm-icon {
@@ -607,6 +609,27 @@ body {
   display: none;
 }
 
+.reset-backup {
+  text-align: left;
+  font-size: 13px;
+  color: var(--text-normal);
+  margin: 12px 0;
+}
+
+.reset-backup.hidden,
+.reset-backup-space.hidden {
+  display: none;
+}
+
+.reset-backup-warning {
+  font-weight: 600;
+}
+
+.reset-backup-space {
+  color: var(--error);
+  margin: 0 0 8px 26px;
+}
+
 .confirm-warning {
   color: var(--error) !important;
   font-weight: 600;
@@ -627,6 +650,11 @@ body {
   font-weight: 600;
   cursor: pointer;
   transition: all 0.2s;
+}
+
+.confirm-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
 }
 
 .confirm-btn.cancel {

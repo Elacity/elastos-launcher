@@ -171,7 +171,7 @@ test('quit waits for the gateway this launcher started and leaves one it did not
   assert.match(main, /forceStopGateway/);
   const controllerSrc = fs.readFileSync(path.join(__dirname, '../src/main/launchController.ts'), 'utf8');
   const targetSrc = fs.readFileSync(path.join(__dirname, '../src/main/targets/runtimeTarget.ts'), 'utf8');
-  assert.match(controllerSrc, /resetRuntimeOnThisComputer\(\(\) => active\.stopForRemoval\(\)\)/);
+  assert.match(controllerSrc, /resetRuntimeOnThisComputer\(\(\) => active\.stopForRemoval\(\), choice \?\? \{\}\)/);
   assert.match(controllerSrc, /await active\.stop\(\)/);
   assert.match(targetSrc, /stop: \(\) => stopGateway\(false\)/);
   assert.match(targetSrc, /stopForRemoval: \(\) => stopGateway\(true\)/);

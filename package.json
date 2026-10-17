@@ -42,7 +42,8 @@
       "src/renderer/**/*"
     ],
     "asarUnpack": [
-      "dist/main/legacyPc2Worker.js"
+      "dist/main/legacyPc2Worker.js",
+      "dist/main/runtimeBackupWorker.js"
     ],
     "mac": {
       "category": "public.app-category.utilities",

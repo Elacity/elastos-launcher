@@ -144,6 +144,19 @@
             <input type="checkbox" id="confirm-backup">
             <span>Back up my PC2 data first</span>
           </label>
+          <div class="reset-backup hidden" id="reset-backup">
+            <p id="reset-backup-text"></p>
+            <p class="reset-backup-warning" id="reset-backup-warning"></p>
+            <label class="confirm-backup">
+              <input type="radio" name="reset-backup-choice" id="reset-backup-yes">
+              <span id="reset-backup-yes-label">Save a copy of your ElastOS data first</span>
+            </label>
+            <p class="reset-backup-space hidden" id="reset-backup-space"></p>
+            <label class="confirm-backup">
+              <input type="radio" name="reset-backup-choice" id="reset-backup-no">
+              <span id="reset-backup-no-label">Do not save a copy</span>
+            </label>
+          </div>
           <p class="confirm-warning">This action cannot be undone!</p>
           <div class="confirm-buttons">
             <button class="confirm-btn cancel" id="confirm-cancel">Cancel</button>

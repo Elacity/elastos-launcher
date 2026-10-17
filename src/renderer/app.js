@@ -35,6 +35,14 @@ const urlValue = document.getElementById('url-value');
 const removePc2Btn = document.getElementById('remove-pc2-btn');
 const confirmBackupRow = document.getElementById('confirm-backup-row');
 const confirmBackup = document.getElementById('confirm-backup');
+const resetBackup = document.getElementById('reset-backup');
+const resetBackupText = document.getElementById('reset-backup-text');
+const resetBackupWarning = document.getElementById('reset-backup-warning');
+const resetBackupYes = document.getElementById('reset-backup-yes');
+const resetBackupNo = document.getElementById('reset-backup-no');
+const resetBackupYesLabel = document.getElementById('reset-backup-yes-label');
+const resetBackupNoLabel = document.getElementById('reset-backup-no-label');
+const resetBackupSpace = document.getElementById('reset-backup-space');
 const browserRow = document.getElementById('browser-row');
 const browserNote = document.getElementById('browser-note');
 
@@ -43,6 +51,7 @@ let confirmMode = 'uninstall';
 let legacyItems = [];
 let legacyConfirmPaths = [];
 let pc2Busy = false;
+let resetOffer = null;
 let targetId = 'runtime';
 // The main process sends the Home address (src/main/targets/gatewayAddress.ts).
 let openUrl = '';
@@ -82,6 +91,42 @@ async function showError(message) {
 function hidePc2Backup() {
   confirmBackupRow.classList.add('hidden');
   confirmBackup.checked = false;
+}
+
+function hideResetBackup() {
+  resetOffer = null;
+  resetBackup.classList.add('hidden');
+  resetBackupYes.checked = false;
+  resetBackupNo.checked = false;
+  confirmDelete.disabled = false;
+}
+
+/** Reset stays off until the person answers the backup offer. */
+function syncResetButton() {
+  if (confirmMode !== 'reset') return;
+  if (!resetOffer) {
+    confirmDelete.disabled = true;
+    return;
+  }
+  confirmDelete.disabled = resetOffer.needsChoice && !resetBackupYes.checked && !resetBackupNo.checked;
+}
+
+function showResetBackup(description) {
+  const copy = flow.resetBackupCopy(description);
+  resetOffer = copy;
+  resetBackupText.textContent = copy.text;
+  resetBackupWarning.textContent = copy.canSave ? copy.warning : '';
+  resetBackupYesLabel.textContent = copy.yes;
+  resetBackupNoLabel.textContent = copy.no;
+  resetBackupYes.checked = false;
+  resetBackupNo.checked = false;
+  resetBackupYes.disabled = !copy.canSave;
+  resetBackupYes.parentElement.classList.toggle('hidden', !copy.needsChoice);
+  resetBackupNo.parentElement.classList.toggle('hidden', !copy.needsChoice);
+  resetBackupSpace.textContent = copy.space;
+  resetBackupSpace.classList.toggle('hidden', !copy.space);
+  resetBackup.classList.remove('hidden');
+  syncResetButton();
 }
 
 function showLegacyPc2(items) {
@@ -272,20 +317,40 @@ copyLogsBtn.addEventListener('click', async () => {
   }
 });
 
-resetBtn.addEventListener('click', () => {
+resetBtn.addEventListener('click', async () => {
   const copy = flow.resetCopy();
   confirmMode = 'reset';
   hidePc2Backup();
+  hideResetBackup();
   confirmTitle.textContent = copy.title;
   confirmBody.textContent = copy.body;
   confirmPath.textContent = 'The ElastOS program and its data folder';
   confirmDelete.textContent = 'Reset';
+  resetBackupText.textContent = 'Checking the size of your ElastOS data...';
+  resetBackupWarning.textContent = '';
+  resetBackupSpace.classList.add('hidden');
+  resetBackupYes.parentElement.classList.add('hidden');
+  resetBackupNo.parentElement.classList.add('hidden');
+  resetBackup.classList.remove('hidden');
+  confirmDelete.disabled = true;
   confirmModal.classList.remove('hidden');
+  let description = null;
+  try {
+    description = await window.elastos.describeResetBackup();
+  } catch {
+    description = null;
+  }
+  if (confirmMode !== 'reset' || confirmModal.classList.contains('hidden')) return;
+  showResetBackup(description);
 });
+
+resetBackupYes.addEventListener('change', syncResetButton);
+resetBackupNo.addEventListener('change', syncResetButton);
 
 uninstallBtn.addEventListener('click', async () => {
   confirmMode = 'uninstall';
   hidePc2Backup();
+  hideResetBackup();
   confirmDelete.textContent = 'Delete';
   const copy = flow.confirmCopy(targetId, []);
   confirmTitle.textContent = copy.title;
@@ -299,6 +364,7 @@ removePc2Btn.addEventListener('click', () => {
   legacyConfirmPaths = legacyItems.map((entry) => String(entry.path));
   const copy = flow.legacyPc2Copy(legacyItems);
   confirmMode = 'pc2';
+  hideResetBackup();
   confirmTitle.textContent = copy.title;
   confirmBody.textContent = copy.body;
   confirmPath.textContent = copy.list;
@@ -309,9 +375,19 @@ removePc2Btn.addEventListener('click', () => {
   confirmModal.classList.remove('hidden');
 });
 
-confirmCancel.addEventListener('click', () => confirmModal.classList.add('hidden'));
+confirmCancel.addEventListener('click', () => {
+  confirmModal.classList.add('hidden');
+  hideResetBackup();
+});
 
 confirmDelete.addEventListener('click', async () => {
+  let resetChoice = null;
+  if (confirmMode === 'reset') {
+    // No answer to the backup offer means no Reset.
+    if (!resetOffer) return;
+    if (resetOffer.needsChoice && !resetBackupYes.checked && !resetBackupNo.checked) return;
+    resetChoice = { backup: Boolean(resetOffer.canSave && resetBackupYes.checked) };
+  }
   confirmModal.classList.add('hidden');
   if (confirmMode === 'pc2') {
     if (pc2Busy) return;
@@ -334,10 +410,14 @@ confirmDelete.addEventListener('click', async () => {
     return;
   }
   const resetting = confirmMode === 'reset';
-  statusText.textContent = resetting ? 'Resetting...' : 'Removing...';
+  statusText.textContent = resetting
+    ? (resetChoice && resetChoice.backup ? 'Saving a copy of your data, then resetting...' : 'Resetting...')
+    : 'Removing...';
+  hideResetBackup();
   try {
     if (resetting) {
-      await window.elastos.resetRuntime();
+      const result = await window.elastos.resetRuntime(resetChoice);
+      if (result && result.backupPath) addLog(`A copy of your ElastOS data is in ${result.backupPath}. Keep it private.`);
       addLog('ElastOS was reset. Click Install to set it up again.');
     } else {
       await window.elastos.uninstall();

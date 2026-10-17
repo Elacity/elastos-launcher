@@ -11,7 +11,8 @@ import { loadActiveRuntimePin } from './targets/runtimePin';
 import { browserNote } from './targets/runtimeSupport';
 import { runtimeHeadStore } from './targets/runtimeUpdate';
 import { rollbackRuntimeUpdate } from './targets/runtimeTarget';
-import { resetRuntimeOnThisComputer } from './targets/runtimeUninstall';
+import { BackupDescription, describeRuntimeBackupOnThisComputer } from './targets/runtimeBackup';
+import { resetRuntimeOnThisComputer, ResetResult } from './targets/runtimeUninstall';
 import { finishResumeInstall as clearResumeInstall, fixWindowsOnThisComputer, resumeInstallPlanOnThisComputer, ResumeInstallPlan } from './targets/windowsHost';
 import { LaunchTarget, LaunchTargetId, TargetStatus, UpdateCheck } from './targets/types';
 
@@ -33,7 +34,9 @@ export interface LaunchController {
   install(onProgress: (message: string) => void): Promise<void>;
   update(onProgress: (message: string) => void): Promise<void>;
   uninstall(): Promise<void>;
-  resetRuntime(): Promise<void>;
+  /** `choice.backup` must be true or false. Anything else resets nothing. */
+  resetRuntime(choice?: { backup?: unknown }): Promise<ResetResult>;
+  describeResetBackup(): Promise<BackupDescription>;
   rollback(onProgress?: (message: string) => void): Promise<void>;
   getVersion(): string;
   checkForUpdate(): Promise<UpdateCheck>;
@@ -240,7 +243,8 @@ export function createLaunchController(options: LaunchControllerOptions = {}): L
     install: (onProgress) => runRuntime(() => active.install(onProgress)),
     update: (onProgress) => runRuntime(() => active.update(onProgress)),
     uninstall: () => runRuntime(() => active.uninstall()),
-    resetRuntime: () => runRuntime(() => resetRuntimeOnThisComputer(() => active.stopForRemoval())),
+    resetRuntime: (choice) => runRuntime(() => resetRuntimeOnThisComputer(() => active.stopForRemoval(), choice ?? {})),
+    describeResetBackup: () => describeRuntimeBackupOnThisComputer(),
     rollback: (onProgress) => runRuntime(() => rollbackRuntimeUpdate(onProgress)),
     getVersion: () => runRuntimeSync(() => active.getVersion()),
     checkForUpdate: () => runRuntime(() => active.checkForUpdate()),
