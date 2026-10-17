@@ -9,6 +9,7 @@ const { DISTRO_RESET_HELPER } = require('../dist/main/targets/distroResetHelper'
 const {
   describeDistroBackup,
   DISTRO_PYTHON_MISSING_MESSAGE,
+  distroInstallRecordProved,
   distroHelperArgs,
   distroPythonProbe,
   distroPythonProbeArgs,
@@ -160,6 +161,7 @@ function backupFiles(fx) {
   }
 }
 
+/** Install's plan for the fixture. Its record check is the real helper, as on Windows. */
 async function installedPlan(fx, version = PIN.version) {
   let ranInstaller = false;
   const map = inRoot(fx);
@@ -183,6 +185,7 @@ async function installedPlan(fx, version = PIN.version) {
     exists: (file) => exists(map(file)),
     statMtimeMs: () => null,
     mkdirp() {},
+    installRecordProved: () => distroInstallRecordProved(localRun([]), fx.paths, DID),
   }).catch((err) => {
     if (!/installer download was asked for/.test(err.message)) throw err;
     ranInstaller = 'download';
@@ -1062,3 +1065,42 @@ test('the Windows copy leaves out the same files as Mac and Linux, such as a cra
     fx.cleanup();
   }
 });
+
+test('Fix it on the pinned version with no, a tampered, or a linked record in the distro runs install.sh; a real record does not', POSIX, async () => {
+  const fx = distroFixture();
+  try {
+    const record = path.join(fx.paths.dataDir, 'installation', 'release-head.json');
+    const resetRefuses = async () => {
+      let message = '';
+      await assert.rejects(() => resetRuntimeInDistro({ ...resetDeps(fx, []), backup: false }), (err) => { message = err.message; return true; });
+      assert.equal(failureScreen({ error: message, checks: [], binaryPresent: true, componentsPresent: true }).kind, 'no-record');
+      assertUntouched(fx);
+    };
+    // A real install of the pinned version: already installed, nothing downloaded.
+    assert.equal(await installedPlan(fx), false);
+    assert.equal(await distroInstallRecordProved(localRun([]), fx.paths, DID), true);
+    // Missing record, same version: Reset refuses, and Install now runs install.sh (before, it said already installed).
+    fs.rmSync(record);
+    await resetRefuses();
+    assert.equal(await installedPlan(fx), 'download');
+    // Tampered record.
+    const head = JSON.parse(SIGNED_HEAD.toString('utf8'));
+    head.payload.version = '0.8.0-alpha.99';
+    fs.writeFileSync(record, JSON.stringify(head));
+    await resetRefuses();
+    assert.equal(await installedPlan(fx), 'download');
+    // A real record reached through a link: Reset does not accept it, so neither does Install.
+    fs.rmSync(record);
+    fs.writeFileSync(path.join(fx.top, 'elsewhere.json'), SIGNED_HEAD);
+    fs.symlinkSync(path.join(fx.top, 'elsewhere.json'), record);
+    await resetRefuses();
+    assert.equal(await installedPlan(fx), 'download');
+    // Signed by another key.
+    fs.rmSync(record);
+    fs.writeFileSync(record, SIGNED_HEAD);
+    assert.equal(await distroInstallRecordProved(localRun([]), fx.paths, 'did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK'), false);
+  } finally {
+    fx.cleanup();
+  }
+});
+

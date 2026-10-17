@@ -6,7 +6,6 @@ import { PinMismatchError } from './runtimeInstall';
 import { installRuntime, RuntimeInstallDeps } from './runtimeInstall';
 import { INSTALLER_ENV_NAMES, runtimeChildEnv } from './releaseHead';
 import { loadActiveRuntimePin } from './runtimePin';
-import { installRecordTextProves, runtimeJoin } from './runtimePaths';
 import { parseRuntimeVersion } from './runtimeProbe';
 import { WINDOWS_NATIVE_MESSAGE } from './runtimeSupport';
 import {
@@ -377,11 +376,13 @@ function distroInstallDeps(): RuntimeInstallDeps {
       const result = runWslSync(fileArgs('mkdir', dir));
       if (result.code !== 0) throw new Error(DISTRO_SETUP_FAILED);
     },
-    // The record bytes inside the distro, checked here against the pinned DID.
-    installRecordProved: (dataDir) => installRecordTextProves(
-      readDistroFile(runtimeJoin(dataDir, 'installation', 'release-head.json')),
-      pin.maintainerDid,
-    ),
+    // The record as Reset reads it in the distro (the fixed helper, no link
+    // followed), checked against the pinned DID. The helper's data folder is
+    // this same /root/.local/share/elastos.
+    installRecordProved: () => {
+      const reset = require('./windowsReset') as typeof import('./windowsReset');
+      return reset.distroInstallRecordProved(reset.wslHelperRun(), reset.distroResetPaths(), pin.maintainerDid);
+    },
   };
 }
 

@@ -286,12 +286,9 @@ export function distroRemovalPlan(
   if (seen.crossing.length > 0) throw new Error(mountedMessage(where, seen.crossing));
   const entries = seen.entries;
   const record = seen.record;
-  const recordText = record && record.kind === 'file' && typeof record.text === 'string'
-    ? Buffer.from(record.text, 'base64').toString('utf8')
-    : null;
   const verdict = classifyRuntimeEntries(
     entries.map(([name, kind]) => ({ name, kind })),
-    () => recordText != null && installRecordTextProves(recordText, maintainerDid),
+    () => distroRecordProves(seen, maintainerDid),
   );
   if (verdict.kind === 'foreign') {
     throw new Error(`ElastOS will not reset ${where}, because it contains files that are not part of the runtime: ${listNames(verdict.names)}. Move those files out, then reset. Nothing was deleted. To see them, open ${explorerPath(paths.dataDir)} in File Explorer.`);
@@ -305,6 +302,28 @@ export function distroRemovalPlan(
     entries,
     recordSha256: verdict.byRecord && record && typeof record.sha256 === 'string' ? record.sha256 : null,
   };
+}
+
+/**
+ * The install record as the helper read it: a plain file, opened without
+ * following a link, whose bytes verify against the pinned maintainer DID.
+ * Reset (distroRemovalPlan) and Install (distroInstallRecordProved) both use
+ * this, so an install that Install accepts is one Reset can prove.
+ */
+export function distroRecordProves(seen: DistroInspection, maintainerDid: string | null): boolean {
+  const record = seen.record;
+  if (!record || record.kind !== 'file' || typeof record.text !== 'string') return false;
+  return installRecordTextProves(Buffer.from(record.text, 'base64').toString('utf8'), maintainerDid);
+}
+
+/** For Install: true only when the distro data folder holds a record Reset would accept. */
+export async function distroInstallRecordProved(
+  run: DistroHelperRun,
+  paths: DistroResetPaths,
+  maintainerDid: string | null,
+): Promise<boolean> {
+  const seen = await inspectDistro(run, paths);
+  return seen.data === 'dir' && distroRecordProves(seen, maintainerDid);
 }
 
 function mountedMessage(where: string, names: string[]): string {
