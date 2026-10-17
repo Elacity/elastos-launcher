@@ -89,6 +89,12 @@ async function main() {
     const seen = runWslSync(['ls', '-lA', '--full-time', dir]);
     console.log(`Entries of ${dir} before Uninstall:\n${seen.stdout.trimEnd() || '(none)'}`);
   }
+  // The rootfs and its first boot make /root/.ssh and /home/ubuntu (src/main/targets/rootfsManifest.ts).
+  // Print them in full, with the SHA-256 of each small file, so this run proves the manifest.
+  const proof = runWslSync(['bash', '-c',
+    'ls -laR --full-time /root/.ssh /home 2>&1 | head -n 200; '
+    + 'find /root/.bashrc /root/.profile /root/.ssh /home -maxdepth 3 -type f -size -65k -print0 2>/dev/null | head -z -n 50 | xargs -0 -r sha256sum']);
+  console.log(`/root/.ssh and /home before Uninstall, with SHA-256:\n${proof.stdout.trimEnd() || '(none)'}`);
   const uninstall = await uninstallRuntimeInDistroOnThisComputer(() => target.stopForRemoval(), { backup: false }, async (prompt) => {
     console.log(`Second question: ${prompt.title} ${prompt.message} ${prompt.detail} -> ${prompt.confirmLabel}`);
     return true;
