@@ -108,15 +108,51 @@ function isRegularFile(file: string): boolean {
 }
 
 /**
- * The host lock or `components.json` is present as a real file. That is how an
- * XDG directory that is not the default path proves it is an ElastOS data dir.
+ * The host lock or `components.json` is present as a real file. A filename
+ * alone does not make a custom directory safe to delete.
  */
 export function elastosDataDirMarked(dataDir: string): boolean {
   return isRegularFile(runtimeHostLockPath(dataDir))
     || isRegularFile(runtimeJoin(dataDir, 'components.json'));
 }
 
-const RUNTIME_DATA_FILES = new Set(['components.json', 'host-process.lock', 'sources.json']);
+const RUNTIME_DATA_FILES = new Set([
+  'components.json',
+  'host-process.lock',
+  'sources.json',
+  'runtime-coords.json',
+]);
+const RUNTIME_DATA_DIRS = new Set(['state']);
+const KNOWN_PARTIAL_FILES = new Set(['components.json', 'host-process.lock', 'sources.json']);
+
+function readJsonObject(file: string): Record<string, unknown> | null {
+  if (!isRegularFile(file)) return null;
+  try {
+    const parsed = JSON.parse(fs.readFileSync(file, 'utf8')) as unknown;
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+    return parsed as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+}
+
+/** The host lock names the gateway, or components.json is a component manifest. */
+function elastosInstallProved(dataDir: string): boolean {
+  const lock = readJsonObject(runtimeHostLockPath(dataDir));
+  if (lock
+    && typeof lock.pid === 'number'
+    && Number.isInteger(lock.pid)
+    && lock.pid > 0
+    && lock.addr === '127.0.0.1:8090') {
+    return true;
+  }
+  const components = readJsonObject(path.join(dataDir, 'components.json'));
+  const manifest = components?.components;
+  return !!manifest
+    && typeof manifest === 'object'
+    && !Array.isArray(manifest)
+    && Object.keys(manifest as object).length > 0;
+}
 
 /** A real directory. A symlink does not count, even when its target holds a marker. */
 function isRealDirectory(dataDir: string): boolean {
@@ -131,8 +167,9 @@ function isRealDirectory(dataDir: string): boolean {
 /**
  * A custom data directory this launcher may reset: it exists as a real
  * directory and is empty, or every entry is one of the runtime's own files.
- * Anything else, including a symlink, is foreign. A missing directory is absent.
- * A foreign directory that holds the ElastOS lock or marker is still an install.
+ * Anything else, including a symlink or a user file beside a marker, is foreign.
+ * A missing directory is absent. Extra runtime files count only when the
+ * lock or components manifest proves this is an ElastOS install.
  */
 function customXdgContents(dataDir: string): 'owned' | 'foreign' | 'absent' {
   let stat: fs.Stats;
@@ -148,9 +185,22 @@ function customXdgContents(dataDir: string): 'owned' | 'foreign' | 'absent' {
   } catch {
     return 'foreign';
   }
+  let extra = false;
   for (const name of names) {
-    if (!RUNTIME_DATA_FILES.has(name) || !isRegularFile(path.join(dataDir, name))) return 'foreign';
+    const child = path.join(dataDir, name);
+    if (RUNTIME_DATA_FILES.has(name)) {
+      if (!isRegularFile(child)) return 'foreign';
+      if (!KNOWN_PARTIAL_FILES.has(name)) extra = true;
+      continue;
+    }
+    if (RUNTIME_DATA_DIRS.has(name)) {
+      if (!isRealDirectory(child)) return 'foreign';
+      extra = true;
+      continue;
+    }
+    return 'foreign';
   }
+  if (extra && !elastosInstallProved(dataDir)) return 'foreign';
   return 'owned';
 }
 
@@ -164,7 +214,6 @@ export function foreignRuntimeDataMessage(
   const extra = customXdgDataDir(homeDir, platform, env);
   if (!extra || compareKey(extra, platform) !== compareKey(dataDir, platform)) return null;
   if (customXdgContents(dataDir) !== 'foreign') return null;
-  if (isRealDirectory(dataDir) && elastosDataDirMarked(dataDir)) return null;
   return `will not reset ${dataDir} because it contains files that are not part of the runtime. Move those files out, then reset.`;
 }
 
@@ -184,12 +233,13 @@ function customXdgDataDir(
 
 /**
  * True only for an exact default runtime path of this account, or for an XDG
- * data directory under that home that is empty, holds only the runtime's own
- * files, or holds the ElastOS lock or marker as a regular file. The home
- * defaults to `os.homedir()`. A relative path, a `..` segment, another
- * account, a data directory outside that home, and a bare `<dir>/elastos`
- * are refused. A custom directory that contains anything else and has no
- * marker is refused by name.
+ * data directory under that home that is empty, holds only
+ * `components.json`, `host-process.lock`, and `sources.json`, or holds a
+ * proved ElastOS lock or components manifest and only other runtime files.
+ * The home defaults to `os.homedir()`. A relative path, a `..` segment,
+ * another account, a data directory outside that home, and a bare
+ * `<dir>/elastos` are refused. A user file is refused by name even when a
+ * marker is present.
  */
 export function launcherOwnedDirectories(
   file: string,
@@ -214,10 +264,10 @@ export function launcherOwnedDirectories(
   }
   const extra = customXdgDataDir(homeDir, platform, env);
   if (extra && compareKey(extra, platform) !== compareKey(data, platform)) {
-    const contents = customXdgContents(extra);
-    if (contents === 'owned' || (isRealDirectory(extra) && marked(extra))) {
+    if (customXdgContents(extra) === 'owned') {
       owned.push(extra, runtimeHostLockPath(extra));
     }
+    void marked;
   }
   const key = compareKey(file, platform);
   return owned.some((candidate) => compareKey(candidate, platform) === key);

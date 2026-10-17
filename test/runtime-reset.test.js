@@ -280,18 +280,39 @@ test('a real XDG install that holds the ElastOS marker is reset', async () => {
     const home = path.join(root, 'home');
     const data = path.join(home, 'custom', 'elastos');
     fs.mkdirSync(path.join(data, 'state'), { recursive: true });
-    fs.writeFileSync(path.join(data, 'host-process.lock'), '{}\n');
+    const lock = JSON.stringify({ pid: 42, addr: '127.0.0.1:8090' });
+    fs.writeFileSync(path.join(data, 'host-process.lock'), lock);
     fs.writeFileSync(path.join(data, 'components.json'), '{}\n');
     fs.writeFileSync(path.join(data, 'runtime-coords.json'), '{}\n');
     const env = { XDG_DATA_HOME: path.join(home, 'custom') };
     assert.equal(launcherOwnedDirectories(data, home, 'linux', env), true);
-    fs.rmSync(path.join(data, 'host-process.lock'));
-    fs.rmSync(path.join(data, 'components.json'));
-    assert.equal(launcherOwnedDirectories(data, home, 'linux', env), false);
     fs.writeFileSync(path.join(data, 'host-process.lock'), '{}\n');
+    assert.equal(launcherOwnedDirectories(data, home, 'linux', env), false);
+    fs.writeFileSync(path.join(data, 'host-process.lock'), lock);
+    const thesis = path.join(data, 'Documents', 'thesis.docx');
+    fs.mkdirSync(path.dirname(thesis), { recursive: true });
+    fs.writeFileSync(thesis, 'keep');
+    fs.writeFileSync(path.join(data, 'notes.txt'), 'keep');
+    assert.equal(launcherOwnedDirectories(data, home, 'linux', env), false);
     const binary = path.join(home, '.local', 'bin', 'elastos');
     fs.mkdirSync(path.dirname(binary), { recursive: true });
     fs.writeFileSync(binary, '');
+    const refused = [];
+    await assert.rejects(() => resetRuntime({
+      binary,
+      dataDir: data,
+      stageFile: path.join(home, '.elastos-launcher', 'install-stage.json'),
+      homeDir: home,
+      platform: 'linux',
+      env,
+      stop: async () => {},
+      remove: (target) => { refused.push(target); },
+    }), new RegExp(`will not reset ${data.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} because it contains files`));
+    assert.deepEqual(refused, []);
+    assert.equal(fs.readFileSync(thesis, 'utf8'), 'keep');
+    assert.equal(fs.readFileSync(path.join(data, 'notes.txt'), 'utf8'), 'keep');
+    fs.rmSync(path.join(data, 'Documents'), { recursive: true });
+    fs.rmSync(path.join(data, 'notes.txt'));
     const removed = [];
     await resetRuntime({
       binary,
