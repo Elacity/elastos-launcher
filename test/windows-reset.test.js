@@ -26,6 +26,7 @@ const {
   writeDistroBackup,
 } = require('../dist/main/targets/windowsReset');
 const { RESET_CHOICE_MESSAGE, removeVerifiedTarget } = require('../dist/main/targets/runtimeUninstall');
+const { applyFix, failureScreen } = require('../dist/main/targets/runtimeRecovery');
 const { BACKUP_FOLDER_NAME, backupExcluded, readStoredZipEntries } = require('../dist/main/targets/runtimeBackup');
 const { distroIsInstalled } = require('../dist/main/targets/windowsRuntime');
 const { installRuntime } = require('../dist/main/targets/runtimeInstall');
@@ -159,7 +160,7 @@ function backupFiles(fx) {
   }
 }
 
-async function installedPlan(fx) {
+async function installedPlan(fx, version = PIN.version) {
   let ranInstaller = false;
   const map = inRoot(fx);
   await installRuntime({
@@ -169,7 +170,7 @@ async function installedPlan(fx) {
     env: {},
     pin: PIN,
     probe: async () => (exists(map('/root/.local/bin/elastos'))
-      ? { kind: 'version', version: `ElastOS Runtime v${PIN.version}`, binaryPath: '/root/.local/bin/elastos' }
+      ? { kind: 'version', version: `ElastOS Runtime v${version}`, binaryPath: '/root/.local/bin/elastos' }
       : { kind: 'not-installed' }),
     fetchText: async (url) => {
       if (url.endsWith('/release-head.json')) return SIGNED_HEAD.toString('utf8');
@@ -419,7 +420,7 @@ test('a forged, missing, foreign-signed, or linked install record in the distro 
   const fx = distroFixture();
   try {
     const record = path.join(fx.root, '.local', 'share', 'elastos', 'installation', 'release-head.json');
-    const unproved = /will not reset .* in its Linux environment, because it has no signed ElastOS install record\. ElastOS deletes only a folder it can prove it installed\. Nothing was deleted\./;
+    const unproved = /^Error: ElastOS did not reset \/.*\/\.local\/share\/elastos in its Linux environment\. This folder has no signed ElastOS install record, so ElastOS cannot prove that it made the folder\. An older ElastOS can cause this\. Click Fix it to install ElastOS again\. This keeps your data\. Then click Reset again\. Nothing was deleted\.$/;
     const attempt = async (did = DID) => {
       const calls = [];
       await assert.rejects(() => resetRuntimeInDistro({ ...resetDeps(fx, calls), backup: false, maintainerDid: did }), unproved);
@@ -991,6 +992,27 @@ test('python3 missing in the distro gives a plain message before anything runs t
     const unsure = { ...resetDeps(fx, [], { run }), pythonPresent: async () => null };
     await assert.rejects(() => resetRuntimeInDistro(unsure), /could not check its Linux environment\. Nothing was deleted\./);
     assertUntouched(fx);
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test('no install record in the distro shows the Fix it screen, and Install then runs the installer for an older runtime', POSIX, async () => {
+  const fx = distroFixture();
+  try {
+    fs.rmSync(path.join(fx.paths.dataDir, 'installation'), { recursive: true });
+    let message = '';
+    await assert.rejects(() => resetRuntimeInDistro({ ...resetDeps(fx, []), backup: false }), (err) => { message = err.message; return true; });
+    assertUntouched(fx);
+    const facts = {
+      error: message, checks: [], binaryPresent: true, componentsPresent: true, lockText: null, lockPath: null, pidAlive: () => false,
+    };
+    assert.deepEqual(failureScreen(facts), {
+      kind: 'no-record', title: 'Install ElastOS again, then reset', message, retryLabel: 'Try again', fixLabel: 'Fix it',
+    });
+    assert.equal(await applyFix(facts, {}), 'ready');
+    // A runtime from before the record (3 October 2026) is an older version, so Install runs install.sh, which writes the record.
+    assert.equal(await installedPlan(fx, '0.8.0-alpha.1'), 'download');
   } finally {
     fx.cleanup();
   }

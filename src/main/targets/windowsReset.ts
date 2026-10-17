@@ -24,6 +24,7 @@ import {
   installRecordTextProves,
   launcherOwnedDirectories,
   listNames,
+  NO_INSTALL_RECORD,
   pinnedMaintainerDid,
   runtimeBinaryPath,
   runtimeDataDir,
@@ -296,7 +297,8 @@ export function distroRemovalPlan(
     throw new Error(`ElastOS will not reset ${where}, because it contains files that are not part of the runtime: ${listNames(verdict.names)}. Move those files out, then reset. Nothing was deleted. To see them, open ${explorerPath(paths.dataDir)} in File Explorer.`);
   }
   if (verdict.kind === 'unproved') {
-    throw new Error(`ElastOS will not reset ${where}, because it has no signed ElastOS install record. ElastOS deletes only a folder it can prove it installed. Nothing was deleted.`);
+    // The same words as on Mac and Linux, so the failure screen offers Fix it (runtimeRecovery.ts).
+    throw new Error(`ElastOS did not reset ${where}. This folder ${NO_INSTALL_RECORD}, so ElastOS cannot prove that it made the folder. An older ElastOS can cause this. Click Fix it to install ElastOS again. This keeps your data. Then click Reset again. Nothing was deleted.`);
   }
   return {
     dataKind: 'dir',
