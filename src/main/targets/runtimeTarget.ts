@@ -107,7 +107,7 @@ export function createRuntimeTarget(): LaunchTarget {
     },
     install: (onProgress) => runtimeInstall.installRuntimeOnThisComputer(onProgress),
     update: (onProgress) => applyRuntimeUpdate(runRuntimeCommand, runtimeHeadStore(), headVerify(), onProgress),
-    uninstall: () => runtimeUninstall(() => stopGateway(true)),
+    uninstall: () => (process.platform === 'win32' ? Promise.reject(new Error('Uninstall cannot remove ElastOS on Windows yet. Nothing was removed. To delete your ElastOS data, click Reset.')) : runtimeUninstall(() => stopGateway(true))),
     getVersion: () => (process.platform === 'win32' ? readDistroVersion() : readRuntimeVersion()),
     checkForUpdate: () => runtimeCheckForUpdate(),
     openInBrowser: () => openRuntimeHome(),

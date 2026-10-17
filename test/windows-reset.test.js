@@ -531,3 +531,22 @@ test('the Windows copy folder and file get owner-only access for this account SI
   });
   assert.throws(() => failing('C:\\Users\\tester\\ElastOS-backups', true), /^Error: ElastOS could not make C:\\Users\\tester\\ElastOS-backups private to this Windows account\.$/);
 });
+
+test('Uninstall on Windows says it removes nothing, instead of saying ElastOS was removed', async () => {
+  const { createRuntimeTarget } = require('../dist/main/targets/runtimeTarget');
+  const real = Object.getOwnPropertyDescriptor(process, 'platform');
+  const home = process.env.HOME;
+  // A throwaway home, so a broken guard cannot touch this machine's files.
+  process.env.HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'elastos-win-uninstall-'));
+  Object.defineProperty(process, 'platform', { ...real, value: 'win32' });
+  try {
+    await assert.rejects(
+      () => createRuntimeTarget().uninstall(),
+      /^Error: Uninstall cannot remove ElastOS on Windows yet\. Nothing was removed\. To delete your ElastOS data, click Reset\.$/,
+    );
+  } finally {
+    Object.defineProperty(process, 'platform', real);
+    fs.rmSync(process.env.HOME, { recursive: true, force: true });
+    process.env.HOME = home;
+  }
+});
