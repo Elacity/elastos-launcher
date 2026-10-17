@@ -21,6 +21,7 @@ const {
   claimResumeInstall,
   finishResumeInstall,
   prepareWindowsImportDir,
+  RESUME_LOCK_STALE_MS,
   markInstallResumeAfterReboot,
   planAfterWindowsRestart,
   resumeInstallPlanOnThisComputer,
@@ -340,15 +341,14 @@ test('a stale resume lock can be claimed again and a live one cannot', async () 
       wslInstalled: true,
       installed: async () => false,
     }), 'none');
-    const staleAt = new Date(Date.now() - 15 * 60 * 1000);
+    const staleAt = new Date(Date.now() - RESUME_LOCK_STALE_MS - 1000);
     fs.utimesSync(lock, staleAt, staleAt);
     assert.equal(await resumeInstallPlanOnThisComputer({
       homeDir: home,
       platform: 'win32',
       wslInstalled: true,
       installed: async () => false,
-    }), 'none');
-    assert.equal(claimResumeInstall(home), false);
+    }), 'install');
     finishResumeInstall(home, false);
 
     fs.writeFileSync(lock, JSON.stringify({ pid: child.pid, uptime: os.uptime() + 10000 }));
@@ -442,6 +442,64 @@ test('two reclaimers of one stale resume lock cannot take each others lock', asy
       for (const item of pair) item.proc.kill();
     }
   } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('reclaim puts a changed lock back and does not replace a newer claim', () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'elastos-resume-restore-'));
+  const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+  try {
+    const dir = path.join(home, '.elastos-launcher');
+    fs.mkdirSync(dir, { recursive: true });
+    const lock = path.join(dir, 'resume-install.json.lock');
+    const stale = JSON.stringify({ pid: 2147483646, uptime: os.uptime() });
+    const fresh = JSON.stringify({ pid: child.pid, uptime: os.uptime(), start: 'held' });
+    fs.writeFileSync(lock, stale);
+    assert.equal(claimResumeInstall(home, {
+      afterRename(junk) {
+        fs.writeFileSync(junk, fresh);
+      },
+    }), false);
+    assert.equal(fs.readFileSync(lock, 'utf8'), fresh);
+
+    fs.writeFileSync(lock, stale);
+    const third = JSON.stringify({ pid: 424242, uptime: os.uptime(), start: 'third' });
+    assert.equal(claimResumeInstall(home, {
+      afterRename(junk) {
+        fs.writeFileSync(junk, fresh);
+        const tmp = `${lock}.third`;
+        fs.writeFileSync(tmp, third);
+        fs.linkSync(tmp, lock);
+        fs.rmSync(tmp, { force: true });
+      },
+    }), false);
+    assert.equal(fs.readFileSync(lock, 'utf8'), third);
+  } finally {
+    child.kill();
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('a reused pid does not hold the resume lock forever', () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'elastos-resume-reuse-'));
+  const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+  try {
+    const dir = path.join(home, '.elastos-launcher');
+    fs.mkdirSync(dir, { recursive: true });
+    const lock = path.join(dir, 'resume-install.json.lock');
+    fs.writeFileSync(lock, JSON.stringify({
+      pid: child.pid,
+      uptime: os.uptime(),
+      start: '1',
+    }));
+    assert.equal(claimResumeInstall(home), true);
+    const held = JSON.parse(fs.readFileSync(lock, 'utf8'));
+    assert.equal(held.pid, process.pid);
+    assert.notEqual(held.start, '1');
+  } finally {
+    child.kill();
+    finishResumeInstall(home, false);
     fs.rmSync(home, { recursive: true, force: true });
   }
 });

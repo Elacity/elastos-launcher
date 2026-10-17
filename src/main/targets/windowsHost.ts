@@ -342,6 +342,10 @@ function resumeLockPath(homeDir: string): string {
   return runtimeResumeInstallLockPath(homeDir);
 }
 
+/** A silent lock is reclaimable after this. A live holder refreshes the timestamp sooner. */
+export const RESUME_LOCK_STALE_MS = 2 * 60 * 1000;
+const RESUME_LOCK_BEAT_MS = 30 * 1000;
+
 function pidIsAlive(pid: number): boolean {
   try {
     process.kill(pid, 0);
@@ -352,18 +356,71 @@ function pidIsAlive(pid: number): boolean {
   }
 }
 
-/** Empty, unreadable, rebooted, or dead. A live pid stays, whatever the file's age. */
-function resumeLockBytesAreStale(bytes: Buffer): boolean {
-  let parsed: { pid?: unknown; uptime?: unknown } | null = null;
+/** Linux start-time ticks. A reused pid has a different value. Other platforms have none. */
+function processStartToken(pid: number): string | null {
+  if (process.platform !== 'linux') return null;
+  if (!Number.isInteger(pid) || pid <= 0) return null;
   try {
-    parsed = JSON.parse(bytes.toString('utf8')) as { pid?: unknown; uptime?: unknown };
+    const stat = fs.readFileSync(`/proc/${pid}/stat`, 'utf8');
+    const end = stat.lastIndexOf(')');
+    if (end < 0) return null;
+    const start = stat.slice(end + 2).trim().split(/\s+/)[19];
+    return start && /^\d+$/.test(start) ? start : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Empty, unreadable, rebooted, dead, or a pid whose start time changed.
+ * A live pid whose lock has not been refreshed within the bound is stale too,
+ * so a reused pid cannot block Install until the next boot.
+ */
+function resumeLockBytesAreStale(bytes: Buffer, mtimeMs: number): boolean {
+  let parsed: { pid?: unknown; uptime?: unknown; start?: unknown } | null = null;
+  try {
+    parsed = JSON.parse(bytes.toString('utf8')) as { pid?: unknown; uptime?: unknown; start?: unknown };
   } catch {
     return true;
   }
   if (!parsed || typeof parsed.pid !== 'number' || parsed.pid <= 0) return true;
   if (parsed.pid === process.pid) return false;
   if (typeof parsed.uptime === 'number' && os.uptime() + 1 < parsed.uptime) return true;
-  return !pidIsAlive(parsed.pid);
+  const currentStart = processStartToken(parsed.pid);
+  if (typeof parsed.start === 'string' && currentStart && parsed.start !== currentStart) return true;
+  if (!pidIsAlive(parsed.pid)) return true;
+  return Number.isFinite(mtimeMs) && Date.now() - mtimeMs > RESUME_LOCK_STALE_MS;
+}
+
+const resumeBeats = new Map<string, NodeJS.Timeout>();
+
+function startResumeHeartbeat(homeDir: string): void {
+  if (resumeBeats.has(homeDir)) return;
+  const timer = setInterval(() => {
+    const lock = resumeLockPath(homeDir);
+    try {
+      const parsed = JSON.parse(fs.readFileSync(lock, 'utf8')) as { pid?: unknown };
+      if (parsed.pid !== process.pid) {
+        clearInterval(timer);
+        resumeBeats.delete(homeDir);
+        return;
+      }
+      const now = new Date();
+      fs.utimesSync(lock, now, now);
+    } catch {
+      clearInterval(timer);
+      resumeBeats.delete(homeDir);
+    }
+  }, RESUME_LOCK_BEAT_MS);
+  timer.unref?.();
+  resumeBeats.set(homeDir, timer);
+}
+
+function stopResumeHeartbeat(homeDir: string): void {
+  const timer = resumeBeats.get(homeDir);
+  if (!timer) return;
+  clearInterval(timer);
+  resumeBeats.delete(homeDir);
 }
 
 function tryCreateResumeLock(lock: string, payload: string): boolean {
@@ -387,55 +444,142 @@ function tryCreateResumeLock(lock: string, payload: string): boolean {
   }
 }
 
-/**
- * One process claims the resume. An empty, crashed, or rebooted lock can be
- * taken. A live pid is kept even when the file is old. Reclaim renames the
- * stale bytes aside and puts them back when those bytes are no longer the
- * ones that were stale.
- */
-export function claimResumeInstall(homeDir: string, beforeReclaim?: () => void): boolean {
-  const lock = resumeLockPath(homeDir);
+type ResumeReclaimHook = (() => void) | {
+  beforeReclaim?: () => void;
+  afterRename?: (junk: string) => void;
+};
+
+function claimReclaimToken(lock: string): string | null {
+  const token = `${lock}.reclaim`;
   const payload = JSON.stringify({ pid: process.pid, uptime: os.uptime() });
-  if (tryCreateResumeLock(lock, payload)) return true;
-  let judged: Buffer;
+  if (tryCreateResumeLock(token, payload)) return token;
+  let text = '';
   try {
-    judged = fs.readFileSync(lock);
+    text = fs.readFileSync(token, 'utf8');
   } catch {
-    return false;
+    return null;
   }
-  if (!resumeLockBytesAreStale(judged)) return false;
-  if (beforeReclaim) beforeReclaim();
-  const junk = `${lock}.stale-${process.pid}-${crypto.randomBytes(4).toString('hex')}`;
+  let pid = 0;
   try {
-    fs.renameSync(lock, junk);
+    const parsed = JSON.parse(text) as { pid?: unknown };
+    pid = typeof parsed.pid === 'number' ? parsed.pid : 0;
   } catch {
-    return false;
+    pid = 0;
   }
-  let moved: Buffer;
+  if (pid === process.pid) return token;
+  if (pid > 0 && pidIsAlive(pid)) return null;
+  const junk = `${token}.dead-${process.pid}-${crypto.randomBytes(4).toString('hex')}`;
   try {
-    moved = fs.readFileSync(junk);
+    fs.renameSync(token, junk);
   } catch {
-    try {
-      fs.renameSync(junk, lock);
-    } catch {
-      // The next open can create a lock that is no longer here.
-    }
-    return false;
-  }
-  if (!moved.equals(judged)) {
-    try {
-      fs.renameSync(junk, lock);
-    } catch {
-      // The winner already replaced this name.
-    }
-    return false;
+    return null;
   }
   try {
     fs.rmSync(junk, { force: true });
   } catch {
-    // The stale bytes are no longer the lock. The next create can proceed.
+    // The dead token is no longer the name. The next create can proceed.
   }
-  return tryCreateResumeLock(lock, payload);
+  return tryCreateResumeLock(token, payload) ? token : null;
+}
+
+function releaseReclaimToken(token: string): void {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(token, 'utf8')) as { pid?: unknown };
+    if (parsed.pid !== process.pid) return;
+  } catch {
+    return;
+  }
+  try {
+    fs.rmSync(token, { force: true });
+  } catch {
+    // The next claim can take a token whose process is gone.
+  }
+}
+
+/** Put moved bytes back only while the lock name is free. Never replace a newer lock. */
+function restoreResumeLock(junk: string, lock: string): void {
+  try {
+    fs.linkSync(junk, lock);
+  } catch {
+    return;
+  }
+  try {
+    fs.rmSync(junk, { force: true });
+  } catch {
+    // The lock name and the junk name are the same bytes. The name is what matters.
+  }
+}
+
+/**
+ * One process claims the resume. An empty, crashed, rebooted, or silent lock
+ * can be taken. A live pid that is still refreshing the lock is kept. Reclaim
+ * holds an exclusive token, and a restore links the moved bytes back only
+ * when that name is still free.
+ */
+export function claimResumeInstall(homeDir: string, hook?: ResumeReclaimHook): boolean {
+  const hooks = typeof hook === 'function' ? { beforeReclaim: hook } : (hook ?? {});
+  const lock = resumeLockPath(homeDir);
+  const payload = JSON.stringify({
+    pid: process.pid,
+    uptime: os.uptime(),
+    start: processStartToken(process.pid),
+  });
+  if (tryCreateResumeLock(lock, payload)) {
+    startResumeHeartbeat(homeDir);
+    return true;
+  }
+  let judged: Buffer;
+  let mtime = 0;
+  try {
+    const stat = fs.statSync(lock);
+    mtime = stat.mtimeMs;
+    judged = fs.readFileSync(lock);
+  } catch {
+    return false;
+  }
+  if (!resumeLockBytesAreStale(judged, mtime)) return false;
+  if (hooks.beforeReclaim) hooks.beforeReclaim();
+  const token = claimReclaimToken(lock);
+  if (!token) return false;
+  try {
+    let again: Buffer;
+    let againMtime = 0;
+    try {
+      const stat = fs.statSync(lock);
+      againMtime = stat.mtimeMs;
+      again = fs.readFileSync(lock);
+    } catch {
+      return false;
+    }
+    if (!again.equals(judged) || !resumeLockBytesAreStale(again, againMtime)) return false;
+    const junk = `${lock}.stale-${process.pid}-${crypto.randomBytes(4).toString('hex')}`;
+    try {
+      fs.renameSync(lock, junk);
+    } catch {
+      return false;
+    }
+    if (hooks.afterRename) hooks.afterRename(junk);
+    let moved: Buffer;
+    try {
+      moved = fs.readFileSync(junk);
+    } catch {
+      return false;
+    }
+    if (!moved.equals(judged)) {
+      restoreResumeLock(junk, lock);
+      return false;
+    }
+    try {
+      fs.rmSync(junk, { force: true });
+    } catch {
+      // The stale bytes are no longer the lock. The next create can proceed.
+    }
+    const created = tryCreateResumeLock(lock, payload);
+    if (created) startResumeHeartbeat(homeDir);
+    return created;
+  } finally {
+    releaseReclaimToken(token);
+  }
 }
 
 /**
@@ -486,10 +630,28 @@ export async function resumeInstallPlanOnThisComputer(deps: {
 
 /** Drop the resume lock. Remove the marker only after Install succeeded. */
 export function finishResumeInstall(homeDir: string, ok: boolean): void {
+  stopResumeHeartbeat(homeDir);
+  const lock = resumeLockPath(homeDir);
   try {
-    fs.rmSync(resumeLockPath(homeDir), { force: true });
+    fs.rmSync(lock, { force: true });
   } catch {
     // The next open can reclaim a lock whose process is gone.
+  }
+  const dir = path.dirname(lock);
+  const base = path.basename(lock);
+  let names: string[] = [];
+  try {
+    names = fs.readdirSync(dir);
+  } catch {
+    names = [];
+  }
+  for (const name of names) {
+    if (!name.startsWith(`${base}.stale-`) && !name.startsWith(`${base}.reclaim.dead-`)) continue;
+    try {
+      fs.rmSync(path.join(dir, name), { force: true });
+    } catch {
+      // A later reset removes the launcher directory.
+    }
   }
   if (!ok) return;
   try {
