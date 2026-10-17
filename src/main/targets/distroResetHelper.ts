@@ -13,12 +13,22 @@
  * - `zip`: writes a stored zip of the data folder to stdout, with ZIP64 when
  *   needed, and the entry count to stderr. Each file is read twice and must
  *   not change between the reads.
- * - `remove`: checks that nothing changed since `inspect`, then deletes the
- *   program, the stage file, and the data folder. Prints JSON. Exit 3 means
- *   it refused before deleting anything.
+ * - `remove`: checks that nothing changed since `inspect`, then moves the
+ *   data folder aside, deletes the program and the stage file, and then
+ *   deletes the moved folder. Prints JSON. Exit 3 means it refused before
+ *   it changed anything. Exit 4 means a step failed; the JSON says which
+ *   step, and where the data is now.
+ *
+ * Every delete goes through an open folder: the helper opens each folder
+ * with no link followed, checks that it is still the folder it saw (drive,
+ * inode, and type) and that it is on the same drive and mount as the data
+ * folder, and deletes names only through that open folder. It never enters
+ * another drive or mount, so a drive mounted inside the data folder (such as
+ * /mnt/c) is never touched. `inspect` reports such names so Reset can refuse
+ * before it stops or copies anything.
  */
 export const DISTRO_RESET_HELPER = `
-import base64, hashlib, json, os, secrets, shutil, stat, struct, sys, time, zlib
+import base64, hashlib, json, os, secrets, stat, struct, sys, time, zlib
 op = sys.argv[1]
 req = json.loads(sys.stdin.buffer.read().decode('utf-8', 'surrogateescape') or '{}')
 root = req['root']
@@ -26,8 +36,14 @@ HEAD_MAX = 64 * 1024
 CHUNK = 1024 * 1024
 HOLD = '.elastos-removing-'
 NL = chr(10)
+CLOEXEC = getattr(os, 'O_CLOEXEC', 0)
+DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | CLOEXEC
+LINUX = sys.platform.startswith('linux')
 
 class Refused(Exception):
+    pass
+
+class Partial(Exception):
     pass
 
 def checked(p):
@@ -37,13 +53,7 @@ def checked(p):
         raise Refused('bad path')
     return p
 
-def kind(p):
-    try:
-        st = os.lstat(p)
-    except FileNotFoundError:
-        return 'absent'
-    except OSError:
-        return 'unknown'
+def kind_of(st):
     if stat.S_ISLNK(st.st_mode):
         return 'link'
     if stat.S_ISDIR(st.st_mode):
@@ -52,20 +62,90 @@ def kind(p):
         return 'file'
     return 'other'
 
-def entries(data):
-    out = []
-    for name in sorted(os.listdir(data)):
-        out.append([name, kind(os.path.join(data, name))])
-    return out
+def kind(p):
+    try:
+        st = os.lstat(p)
+    except FileNotFoundError:
+        return 'absent'
+    except OSError:
+        return 'unknown'
+    return kind_of(st)
 
-def record(data):
-    folder = os.path.join(data, 'installation')
-    head = os.path.join(folder, 'release-head.json')
-    if kind(folder) != 'dir':
-        return {'kind': kind(folder)}
-    if kind(head) != 'file':
-        return {'kind': kind(head)}
-    fd = os.open(head, os.O_RDONLY | os.O_NOFOLLOW)
+def lstat_at(dfd, name):
+    return os.stat(name, dir_fd=dfd, follow_symlinks=False)
+
+def kind_at(dfd, name):
+    try:
+        st = lstat_at(dfd, name)
+    except FileNotFoundError:
+        return 'absent'
+    except OSError:
+        return 'unknown'
+    return kind_of(st)
+
+def ident(st):
+    return (st.st_dev, st.st_ino, stat.S_IFMT(st.st_mode))
+
+def mount_id(fd):
+    try:
+        with open('/proc/self/fdinfo/' + str(fd), 'r') as f:
+            text = f.read()
+    except OSError:
+        return None
+    for line in text.split(NL):
+        if line.startswith('mnt_id:'):
+            return int(line.split(':', 1)[1].strip())
+    return None
+
+def place(fd):
+    # The drive and the mount of an open folder. On Linux both must be known.
+    mid = mount_id(fd)
+    if LINUX and mid is None:
+        raise Refused('check')
+    return (os.fstat(fd).st_dev, mid)
+
+def open_under_root(p):
+    # Open the folder p one name at a time below root, never through a link.
+    fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | CLOEXEC)
+    try:
+        for part in [x for x in p[len(root) + 1:].split('/') if x]:
+            nfd = os.open(part, DIR_FLAGS, dir_fd=fd)
+            os.close(fd)
+            fd = nfd
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+def open_dir_at(dfd, name, st, base):
+    # Open name in dfd only when it is still the folder seen as st, on the drive and mount of base.
+    try:
+        fd = os.open(name, DIR_FLAGS, dir_fd=dfd)
+    except OSError:
+        return None
+    try:
+        if ident(os.fstat(fd)) == ident(st) and place(fd) == base:
+            return fd
+    except (OSError, Refused):
+        pass
+    os.close(fd)
+    return None
+
+def entries_at(dfd):
+    return [[name, kind_at(dfd, name)] for name in sorted(os.listdir(dfd))]
+
+def record_at(dfd):
+    k = kind_at(dfd, 'installation')
+    if k != 'dir':
+        return {'kind': k}
+    ifd = os.open('installation', DIR_FLAGS, dir_fd=dfd)
+    try:
+        k = kind_at(ifd, 'release-head.json')
+        if k != 'file':
+            return {'kind': k}
+        fd = os.open('release-head.json', os.O_RDONLY | os.O_NOFOLLOW | CLOEXEC, dir_fd=ifd)
+    finally:
+        os.close(ifd)
     try:
         st = os.fstat(fd)
         if not stat.S_ISREG(st.st_mode) or st.st_size > HEAD_MAX:
@@ -77,13 +157,86 @@ def record(data):
         return {'kind': 'other'}
     return {'kind': 'file', 'text': base64.b64encode(raw).decode('ascii'), 'sha256': hashlib.sha256(raw).hexdigest()}
 
-def excluded(rel, excludes):
-    for entry in excludes:
-        if rel == entry or rel.startswith(entry + '/'):
-            return True
-    return False
+def crossings(dfd, base, rel, out):
+    # Names below the open folder dfd that are on another drive or mount, or that changed while they were read.
+    for name in sorted(os.listdir(dfd)):
+        sub = rel + '/' + name if rel else name
+        st = lstat_at(dfd, name)
+        if st.st_dev != base[0]:
+            out.append(sub)
+        elif stat.S_ISDIR(st.st_mode):
+            cfd = open_dir_at(dfd, name, st, base)
+            if cfd is None:
+                out.append(sub)
+                continue
+            try:
+                crossings(cfd, base, sub, out)
+            finally:
+                os.close(cfd)
+    return out
+
+def same_again(dfd, name, st):
+    try:
+        return ident(lstat_at(dfd, name)) == ident(st)
+    except OSError:
+        return False
+
+def wipe(dfd, base, rel, left):
+    # Delete what is in the open folder dfd, through dfd only. A name on another
+    # drive or mount, or one that changed after it was checked, is left and reported.
+    for name in os.listdir(dfd):
+        sub = rel + '/' + name if rel else name
+        try:
+            st = lstat_at(dfd, name)
+            if st.st_dev != base[0]:
+                left.append(sub)
+                continue
+            if stat.S_ISDIR(st.st_mode):
+                cfd = open_dir_at(dfd, name, st, base)
+                if cfd is None:
+                    left.append(sub)
+                    continue
+                before = len(left)
+                try:
+                    wipe(cfd, base, sub, left)
+                finally:
+                    os.close(cfd)
+                if len(left) != before:
+                    continue
+                if not same_again(dfd, name, st):
+                    left.append(sub)
+                    continue
+                os.rmdir(name, dir_fd=dfd)
+            else:
+                if not same_again(dfd, name, st):
+                    left.append(sub)
+                    continue
+                os.unlink(name, dir_fd=dfd)
+        except OSError:
+            left.append(sub)
+
+def remove_folder_at(pfd, name, st, base):
+    # Delete the folder name in pfd, seen as st. Returns the names it left.
+    left = []
+    hfd = open_dir_at(pfd, name, st, base)
+    if hfd is None:
+        return ['.']
+    try:
+        wipe(hfd, base, '', left)
+    finally:
+        os.close(hfd)
+    if left:
+        return left
+    try:
+        if not same_again(pfd, name, st):
+            return ['.']
+        os.rmdir(name, dir_fd=pfd)
+    except OSError:
+        return ['.']
+    return []
 
 def walk(data, excludes):
+    dev = os.lstat(data).st_dev
     stack = ['']
     while stack:
         rel = stack.pop()
@@ -91,7 +244,7 @@ def walk(data, excludes):
         if rel and excluded(rel, excludes):
             continue
         st = os.lstat(full)
-        if stat.S_ISLNK(st.st_mode):
+        if stat.S_ISLNK(st.st_mode) or st.st_dev != dev:
             continue
         if stat.S_ISDIR(st.st_mode):
             for name in os.listdir(full):
@@ -99,6 +252,12 @@ def walk(data, excludes):
             continue
         if stat.S_ISREG(st.st_mode):
             yield rel, full
+
+def excluded(rel, excludes):
+    for entry in excludes:
+        if rel == entry or rel.startswith(entry + '/'):
+            return True
+    return False
 
 def arcname(rel):
     return ('elastos/' + rel).encode('utf-8', 'surrogateescape')
@@ -108,8 +267,25 @@ def do_inspect():
     out = {'binary': kind(checked(req['binary'])), 'stage': kind(checked(req['stage'])), 'data': kind(data)}
     out['ancestors'] = [[p, kind(checked(p))] for p in req['ancestors']]
     if out['data'] == 'dir':
-        out['entries'] = entries(data)
-        out['record'] = record(data)
+        try:
+            pfd = open_under_root(os.path.dirname(data))
+        except OSError:
+            out['data'] = 'unknown'
+            pfd = None
+        if pfd is not None:
+            try:
+                dfd = os.open(os.path.basename(data), DIR_FLAGS, dir_fd=pfd)
+                try:
+                    out['entries'] = entries_at(dfd)
+                    out['record'] = record_at(dfd)
+                    base = place(dfd)
+                    out['crossing'] = ['.'] if base != place(pfd) else crossings(dfd, base, '', [])
+                finally:
+                    os.close(dfd)
+            except OSError:
+                out['data'] = 'unknown'
+            finally:
+                os.close(pfd)
     print(json.dumps(out))
 
 def do_measure():
@@ -223,11 +399,14 @@ def pid_gone(raw):
         return False
     return False
 
-def sweep(parent, names):
+def sweep(pfd, parent, names):
+    # Delete holding folders that an earlier Reset left when it stopped. Returns what is still there.
+    left = []
     try:
-        listing = os.listdir(parent)
-    except OSError:
-        return
+        base = place(pfd)
+        listing = os.listdir(pfd)
+    except (OSError, Refused):
+        return left
     for name in listing:
         if not name.startswith(HOLD):
             continue
@@ -238,12 +417,100 @@ def sweep(parent, names):
             continue
         if not pid_gone(parts[0]):
             continue
-        full = os.path.join(parent, name)
-        k = kind(full)
-        if k == 'dir':
-            shutil.rmtree(full)
-        elif k == 'file':
-            os.unlink(full)
+        full = parent + '/' + name
+        try:
+            st = lstat_at(pfd, name)
+            if stat.S_ISDIR(st.st_mode):
+                if remove_folder_at(pfd, name, st, base):
+                    left.append(full)
+            elif stat.S_ISREG(st.st_mode):
+                os.unlink(name, dir_fd=pfd)
+        except OSError:
+            left.append(full)
+    return left
+
+def unlink_file(p):
+    # Delete the plain file p through its open folder. False when it is not there.
+    try:
+        pfd = open_under_root(os.path.dirname(p))
+    except FileNotFoundError:
+        return False
+    try:
+        name = os.path.basename(p)
+        try:
+            st = lstat_at(pfd, name)
+        except FileNotFoundError:
+            return False
+        if not stat.S_ISREG(st.st_mode):
+            raise Refused('changed')
+        os.unlink(name, dir_fd=pfd)
+        return True
+    finally:
+        os.close(pfd)
+
+def put_back(pfd, hold, name):
+    # Move the data folder back to its own name. False when that cannot be done.
+    try:
+        lstat_at(pfd, name)
+        return False
+    except FileNotFoundError:
+        pass
+    except OSError:
+        return False
+    try:
+        os.rename(hold, name, src_dir_fd=pfd, dst_dir_fd=pfd)
+        return True
+    except OSError:
+        return False
+
+def partial(step, removed, restored, holding, left):
+    return Partial({'failed': step, 'removed': removed, 'restored': restored, 'holding': holding, 'left': left[:20]})
+
+def remove_with_data(pfd, data, binary, stage):
+    parent = os.path.dirname(data)
+    name = os.path.basename(data)
+    try:
+        dfd = os.open(name, DIR_FLAGS, dir_fd=pfd)
+    except OSError:
+        raise Refused('changed')
+    try:
+        seen = os.fstat(dfd)
+        base = place(dfd)
+        if base != place(pfd):
+            raise Refused('mount')
+        if entries_at(dfd) != req['entries']:
+            raise Refused('changed')
+        if req['recordSha256'] is not None and record_at(dfd).get('sha256') != req['recordSha256']:
+            raise Refused('changed')
+        if crossings(dfd, base, '', []):
+            raise Refused('mount')
+    finally:
+        os.close(dfd)
+    # Step 1: move the data aside, in the same folder, so it is on the same drive.
+    hold = HOLD + str(os.getpid()) + '-' + secrets.token_hex(8) + '-' + name
+    try:
+        os.rename(name, hold, src_dir_fd=pfd, dst_dir_fd=pfd)
+    except OSError:
+        raise partial('move', [], True, None, [])
+    if not same_again(pfd, hold, seen):
+        if put_back(pfd, hold, name):
+            raise Refused('changed')
+        raise partial('move', [], False, parent + '/' + hold, [])
+    # Step 2: delete the program. If that fails, put the data back.
+    removed = []
+    try:
+        for p in (binary, stage):
+            if unlink_file(p):
+                removed.append(p)
+    except (OSError, Refused):
+        back = put_back(pfd, hold, name)
+        raise partial('program', removed, back, None if back else parent + '/' + hold, [])
+    removed.append(data)
+    # Step 3: delete the moved data.
+    left = remove_folder_at(pfd, hold, seen, base)
+    if left:
+        raise partial('delete', removed, False, parent + '/' + hold, left)
+    return removed
 
 def do_remove():
     data = checked(req['data'])
@@ -256,31 +523,34 @@ def do_remove():
         if kind(p) not in ('file', 'absent'):
             raise Refused('changed')
     now = kind(data)
-    if now != req['dataKind']:
+    if now != req['dataKind'] or now not in ('dir', 'absent'):
         raise Refused('changed')
-    if now == 'dir':
-        if entries(data) != req['entries']:
+    parent = os.path.dirname(data)
+    try:
+        pfd = open_under_root(parent)
+    except FileNotFoundError:
+        if now == 'dir':
             raise Refused('changed')
-        if req['recordSha256'] is not None:
-            seen = record(data)
-            if seen.get('sha256') != req['recordSha256']:
-                raise Refused('changed')
-    elif now != 'absent':
+        pfd = None
+    except OSError:
         raise Refused('changed')
-    removed = []
-    for p in (binary, stage):
-        if kind(p) == 'file':
-            os.unlink(p)
-            removed.append(p)
-    if now == 'dir':
-        parent = os.path.dirname(data)
-        holding = os.path.join(parent, HOLD + str(os.getpid()) + '-' + secrets.token_hex(8) + '-' + os.path.basename(data))
-        os.rename(data, holding)
-        if kind(holding) != 'dir':
-            raise OSError('the data folder changed while it was removed')
-        shutil.rmtree(holding)
-        removed.append(data)
-    sweep(os.path.dirname(data), ('elastos',))
+    try:
+        if now == 'dir':
+            removed = remove_with_data(pfd, data, binary, stage)
+        else:
+            removed = []
+            try:
+                for p in (binary, stage):
+                    if unlink_file(p):
+                        removed.append(p)
+            except (OSError, Refused):
+                raise partial('program', removed, True, None, [])
+        left = sweep(pfd, parent, ('elastos',)) if pfd is not None else []
+    finally:
+        if pfd is not None:
+            os.close(pfd)
+    if left:
+        raise partial('delete', removed, False, left[0], left)
     print(json.dumps({'removed': removed}))
 
 try:
@@ -297,4 +567,7 @@ try:
 except Refused as err:
     sys.stderr.write('ELASTOS-REFUSED ' + str(err) + NL)
     sys.exit(3)
+except Partial as err:
+    print(json.dumps(err.args[0]))
+    sys.exit(4)
 `.trim();

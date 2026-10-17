@@ -89,13 +89,16 @@ export type DistroHelperRun = (
   options?: { outFd?: number; timeoutMs?: number },
 ) => Promise<DistroHelperResult>;
 
+/** The python3 that runs the Reset helper inside the ElastOS Linux environment. */
+export const DISTRO_PYTHON = '/usr/bin/python3';
+
 /**
  * The wsl.exe arguments. `--exec` runs python3 with no Linux shell, and the
  * only values are the fixed helper and the operation name. Paths and names
  * go through stdin, never through this list.
  */
 export function distroHelperArgs(op: DistroHelperOp): string[] {
-  return ['-d', DISTRO_NAME, '-u', 'root', '--exec', '/usr/bin/python3', '-c', DISTRO_RESET_HELPER, op];
+  return ['-d', DISTRO_NAME, '-u', 'root', '--exec', DISTRO_PYTHON, '-c', DISTRO_RESET_HELPER, op];
 }
 
 /** Spawn a helper process with no shell. Exported so tests can run the same helper with a local python3. */
@@ -176,6 +179,8 @@ export interface DistroInspection {
   ancestors: Array<[string, string]>;
   entries?: Array<[string, RuntimeDataEntry['kind']]>;
   record?: { kind: string; text?: string; sha256?: string };
+  /** Names in the data folder on another drive or mount. `.` is the data folder itself. */
+  crossing?: string[];
 }
 
 /** What `remove` must find again before it deletes anything. */
@@ -239,6 +244,10 @@ export function distroRemovalPlan(
   if (seen.data !== 'dir' || !Array.isArray(seen.entries)) {
     throw new Error(`ElastOS will not reset ${where}, because it is not a real folder. Nothing was deleted.`);
   }
+  if (!Array.isArray(seen.crossing)) {
+    throw new Error(`ElastOS was not reset because it could not check its files ${DATA_IN_LINUX}. Nothing was deleted. Try again.`);
+  }
+  if (seen.crossing.length > 0) throw new Error(mountedMessage(where, seen.crossing));
   const entries = seen.entries;
   const record = seen.record;
   const recordText = record && record.kind === 'file' && typeof record.text === 'string'
@@ -261,6 +270,14 @@ export function distroRemovalPlan(
   };
 }
 
+function mountedMessage(where: string, names: string[]): string {
+  const self = names.includes('.');
+  const what = self
+    ? `${where}, because that folder is on another drive or is mounted from another folder`
+    : `${where}, because these names in it are on another drive or are mounted from another folder: ${listNames(names)}`;
+  return `ElastOS will not reset ${what}. ElastOS deletes only its own files, never files on another drive. Nothing was deleted. Unmount ${self ? 'it' : 'them'}, then click Reset.`;
+}
+
 /** The File Explorer address of a path in the ElastOS Linux environment. */
 export function explorerPath(file: string): string {
   return `\\\\wsl$\\${DISTRO_NAME}${file.replace(/\//g, '\\')}`;
@@ -273,8 +290,10 @@ export async function removeInDistro(
 ): Promise<string[]> {
   const result = await run('remove', { ...helperInput(paths), ...plan }, { timeoutMs: 30 * 60 * 1000 });
   if (result.code === 3) {
+    if (/ELASTOS-REFUSED mount/.test(result.stderr)) throw new Error(mountedMessage(`${paths.dataDir} ${DATA_IN_LINUX}`, ['.']));
     throw new Error(`ElastOS was not reset, because its files ${DATA_IN_LINUX} changed. Nothing was deleted there. Click Reset to try again.`);
   }
+  if (result.code === 4) throw new Error(partialMessage(result.stdout, paths));
   if (result.code !== 0) {
     throw new Error(`ElastOS could not finish removing its files ${DATA_IN_LINUX}. Click Reset to try again.`);
   }
@@ -283,6 +302,42 @@ export async function removeInDistro(
   } catch {
     throw new Error(`ElastOS could not finish removing its files ${DATA_IN_LINUX}. Click Reset to try again.`);
   }
+}
+
+interface DistroPartial {
+  failed?: string;
+  restored?: boolean;
+  holding?: string | null;
+  left?: string[];
+}
+
+/**
+ * The helper stopped at one step (exit 4). Say what is where now, and that
+ * Reset finishes the job: it moves the data aside first, so a second Reset
+ * finds either the old install or only the moved folder, which it deletes.
+ */
+function partialMessage(stdout: string, paths: DistroResetPaths): string {
+  let seen: DistroPartial = {};
+  try {
+    seen = parseJson<DistroPartial>(stdout);
+  } catch {
+    seen = {};
+  }
+  const holding = typeof seen.holding === 'string' ? seen.holding : null;
+  if (seen.failed === 'move' && seen.restored) {
+    return `ElastOS was not reset, because it could not move its data folder ${paths.dataDir} ${DATA_IN_LINUX}. Nothing was deleted. Click Reset to try again.`;
+  }
+  if (seen.failed === 'program' && seen.restored) {
+    return `ElastOS was not reset, because it could not remove its program ${DATA_IN_LINUX}. Your data was not deleted. Click Reset to try again.`;
+  }
+  if ((seen.failed === 'move' || seen.failed === 'program') && holding) {
+    return `ElastOS was not fully reset. Your data is now in ${holding} ${DATA_IN_LINUX}, and none of it was deleted. Click Reset to finish.`;
+  }
+  if (seen.failed === 'delete' && holding) {
+    const names = Array.isArray(seen.left) && seen.left.length && !seen.left.includes('.') ? `: ${listNames(seen.left)}` : '';
+    return `ElastOS was reset, but some old files in ${holding} ${DATA_IN_LINUX} were not deleted${names}. ElastOS never deletes files on another drive. Click Reset to try again.`;
+  }
+  return `ElastOS could not finish removing its files ${DATA_IN_LINUX}. Click Reset to try again.`;
 }
 
 /** The copy's size, measured inside the Linux environment with the same exclusions. Null when there is no data. */
@@ -503,7 +558,12 @@ export async function resetRuntimeInDistro(deps: {
     }
     // Look again after Stop and the copy, and delete only what this look proved.
     const plan = distroRemovalPlan(await deps.inspect(), paths, deps.maintainerDid);
-    await deps.removeInDistro(plan);
+    try {
+      await deps.removeInDistro(plan);
+    } catch (err) {
+      if (!backupPath) throw err;
+      throw new Error(`${messageOf(err)}. Your copy of your data is in ${backupPath}.`);
+    }
   }
   const lstat = deps.lstat ?? fs.lstatSync;
   for (const file of hostFiles) {

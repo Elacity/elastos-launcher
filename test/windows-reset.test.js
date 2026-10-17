@@ -1,4 +1,5 @@
 const assert = require('node:assert/strict');
+const { execFileSync } = require('node:child_process');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -607,3 +608,357 @@ test('Uninstall on Windows says it removes nothing, instead of saying ElastOS wa
     process.env.HOME = home;
   }
 });
+
+/**
+ * The real helper with Python lines run before it. The lines replace an os
+ * call, to fake another drive, a swap in a race, a failed step, or a crash.
+ * The helper itself is not changed.
+ */
+function patchedRun(calls, prelude) {
+  return async (op, input, options) => {
+    calls.push(op);
+    const args = distroHelperArgs(op);
+    const [, helper, name] = args.slice(args.indexOf('--exec') + 2);
+    return spawnHelper('python3', ['-c', `${prelude}\n${helper}`, name], input, options);
+  };
+}
+
+/** Every stat of these names says they are on another drive (st_dev + 4242). With afterMove, only after the data folder is moved. */
+function fakeDrive(names, { afterMove = false } = {}) {
+  return `
+import os as _o
+_names = ${JSON.stringify(names)}
+_armed = [${afterMove ? 'False' : 'True'}]
+_stat, _fstat, _open, _close, _rename = _o.stat, _o.fstat, _o.open, _o.close, _o.rename
+_fds = set()
+def _shift(r):
+    v = list(r[:10])
+    v[2] = v[2] + 4242
+    return _o.stat_result(v)
+def _p_stat(p, *a, **k):
+    r = _stat(p, *a, **k)
+    return _shift(r) if _armed[0] and p in _names else r
+def _p_open(p, *a, **k):
+    fd = _open(p, *a, **k)
+    if _armed[0] and p in _names:
+        _fds.add(fd)
+    return fd
+def _p_fstat(fd):
+    r = _fstat(fd)
+    return _shift(r) if fd in _fds else r
+def _p_close(fd):
+    _fds.discard(fd)
+    return _close(fd)
+def _p_rename(*a, **k):
+    r = _rename(*a, **k)
+    _armed[0] = True
+    return r
+_o.stat, _o.fstat, _o.open, _o.close, _o.rename = _p_stat, _p_fstat, _p_open, _p_close, _p_rename
+`;
+}
+
+/** The first call of os.<fn> on this name fails (OSError) or ends the process at once (crash). */
+function failAt(fn, name, how) {
+  const act = how === 'crash' ? '_o._exit(9)' : "raise OSError(5, 'injected failure')";
+  return `
+import os as _o
+_real = _o.${fn}
+def _p(*a, **k):
+    if a and a[0] == ${JSON.stringify(name)}:
+        ${act}
+    return _real(*a, **k)
+_o.${fn} = _p
+`;
+}
+
+function holdings(fx) {
+  return fs.readdirSync(path.join(fx.root, '.local', 'share')).filter((name) => name.startsWith('.elastos-removing-'));
+}
+
+function assertFullyReset(fx) {
+  assert.equal(exists(fx.paths.binary), false);
+  assert.equal(exists(fx.paths.stageFile), false);
+  assert.equal(exists(fx.paths.dataDir), false);
+  assert.deepEqual(fs.readdirSync(path.join(fx.root, '.local', 'share')), ['other-app']);
+  assert.equal(fs.readFileSync(path.join(fx.root, '.bashrc'), 'utf8'), 'keep');
+  assert.equal(fs.readFileSync(path.join(fx.root, 'Documents', 'thesis.docx'), 'utf8'), 'keep');
+  assert.equal(exists(path.join(fx.winHome, '.elastos-launcher', 'install-stage.json')), false);
+  assert.equal(distroIsInstalled((file) => exists(inRoot(fx)(file))), false);
+}
+
+test('a name in the distro data folder on another drive is refused before Stop, and never deleted when it appears later', POSIX, async () => {
+  const fx = distroFixture();
+  try {
+    // Seen at the first look: Reset refuses before Stop and before the copy.
+    let calls = [];
+    await assert.rejects(
+      () => resetRuntimeInDistro(resetDeps(fx, calls, { run: patchedRun(calls, fakeDrive(['MyWebSite'])) })),
+      /^Error: ElastOS will not reset \/.*\/\.local\/share\/elastos in its Linux environment, because these names in it are on another drive or are mounted from another folder: MyWebSite\. ElastOS deletes only its own files, never files on another drive\. Nothing was deleted\. Unmount them, then click Reset\.$/,
+    );
+    assert.deepEqual(calls, ['inspect']);
+    assertUntouched(fx);
+    assert.deepEqual(backupFiles(fx), []);
+
+    // Not there at the look, there at the delete's own check: nothing changes.
+    const plain = localRun([]);
+    const plan = distroRemovalPlan(await inspectDistro(plain, fx.paths), fx.paths, DID);
+    calls = [];
+    await assert.rejects(() => removeInDistro(patchedRun(calls, fakeDrive(['alice'])), fx.paths, plan), /on another drive/);
+    assertUntouched(fx);
+    assert.deepEqual(holdings(fx), []);
+
+    // It appears only after the data was moved aside: the delete leaves it and says so.
+    await assert.rejects(
+      () => removeInDistro(patchedRun([], fakeDrive(['MyWebSite'], { afterMove: true })), fx.paths, plan),
+      /^Error: ElastOS was reset, but some old files in \/.*\/\.elastos-removing-\d+-[0-9a-f]{16}-elastos in its Linux environment were not deleted: MyWebSite\. ElastOS never deletes files on another drive\. Click Reset to try again\.$/,
+    );
+    const [held] = holdings(fx);
+    assert.ok(held);
+    assert.equal(fs.readFileSync(path.join(fx.root, '.local', 'share', held, 'MyWebSite', 'index.html'), 'utf8'), '<p>hi</p>');
+    assert.deepEqual(fs.readdirSync(path.join(fx.root, '.local', 'share', held)), ['MyWebSite']);
+    assert.equal(exists(fx.paths.binary), false);
+    // The next Reset deletes what is left.
+    await resetRuntimeInDistro({ ...resetDeps(fx, []), backup: false });
+    assertFullyReset(fx);
+  } finally {
+    fx.cleanup();
+  }
+});
+
+function canMount() {
+  if (process.platform !== 'linux' || typeof process.getuid !== 'function' || process.getuid() !== 0) return false;
+  const top = fs.mkdtempSync(path.join(os.tmpdir(), 'elastos-mount-check-'));
+  try {
+    fs.mkdirSync(path.join(top, 'a'));
+    fs.mkdirSync(path.join(top, 'b'));
+    execFileSync('mount', ['--bind', path.join(top, 'a'), path.join(top, 'b')], { stdio: 'ignore' });
+    execFileSync('umount', [path.join(top, 'b')], { stdio: 'ignore' });
+    return true;
+  } catch {
+    return false;
+  } finally {
+    fs.rmSync(top, { recursive: true, force: true });
+  }
+}
+
+const MOUNTS = { skip: canMount() ? false : 'needs root and mount --bind (Linux)' };
+
+function unmountAll(points) {
+  for (const point of points.reverse()) {
+    try { execFileSync('umount', ['-l', point], { stdio: 'ignore' }); } catch { /* not mounted */ }
+  }
+}
+
+/** Every mount below top, wherever a rename moved it, so cleanup never deletes through one. */
+function unmountUnder(top) {
+  const points = fs.readFileSync('/proc/self/mountinfo', 'utf8').split('\n')
+    .map((line) => line.split(' ')[4])
+    .filter((point) => point && point.startsWith(`${top}/`));
+  unmountAll(points.sort());
+}
+
+test('a real bind mount and a real tmpfs inside the distro data folder are never entered or deleted', MOUNTS, async () => {
+  const fx = distroFixture();
+  const outside = path.join(fx.top, 'outside');
+  const bindAt = path.join(fx.paths.dataDir, 'Users', 'alice', 'c');
+  const tmpfsAt = path.join(fx.paths.dataDir, 'Users', 'alice', 't');
+  const mounted = [];
+  const mount = (args, at) => { execFileSync('mount', [...args, at]); mounted.push(at); };
+  const precious = () => fs.readFileSync(path.join(outside, 'precious.txt'), 'utf8');
+  try {
+    fs.mkdirSync(outside);
+    fs.writeFileSync(path.join(outside, 'precious.txt'), 'on drive C');
+    fs.mkdirSync(bindAt);
+    fs.mkdirSync(tmpfsAt);
+    // A bind of a folder on the same drive has the same st_dev. Only the mount id tells it apart.
+    mount(['--bind', outside], bindAt);
+    mount(['-t', 'tmpfs', 'none'], tmpfsAt);
+    fs.writeFileSync(path.join(tmpfsAt, 'in-tmpfs.txt'), 'tmpfs');
+    assert.equal(fs.statSync(bindAt).dev, fs.statSync(fx.paths.dataDir).dev);
+
+    const calls = [];
+    await assert.rejects(
+      () => resetRuntimeInDistro(resetDeps(fx, calls)),
+      /because these names in it are on another drive or are mounted from another folder: Users\/alice\/c, Users\/alice\/t\..*Nothing was deleted/,
+    );
+    assert.deepEqual(calls, ['inspect']);
+    assertUntouched(fx);
+    assert.equal(precious(), 'on drive C');
+    assert.equal(fs.readFileSync(path.join(tmpfsAt, 'in-tmpfs.txt'), 'utf8'), 'tmpfs');
+
+    // Mounted after the look: the delete's own check refuses, and nothing changes.
+    unmountAll(mounted.splice(0));
+    const plan = distroRemovalPlan(await inspectDistro(localRun([]), fx.paths), fx.paths, DID);
+    mount(['--bind', outside], bindAt);
+    await assert.rejects(() => removeInDistro(localRun([]), fx.paths, plan), /on another drive or is mounted from another folder\. .*Nothing was deleted/);
+    assertUntouched(fx);
+    assert.equal(precious(), 'on drive C');
+
+    // Mounted after the data was moved aside: the delete does not enter it.
+    unmountAll(mounted.splice(0));
+    const plan2 = distroRemovalPlan(await inspectDistro(localRun([]), fx.paths), fx.paths, DID);
+    const mountAfterMove = `
+import os as _o, subprocess as _sp
+_rename = _o.rename
+def _p_rename(src, dst, **k):
+    r = _rename(src, dst, **k)
+    if src == 'elastos':
+        here = _o.readlink('/proc/self/fd/' + str(k['dst_dir_fd']))
+        _sp.run(['mount', '--bind', ${JSON.stringify(outside)}, here + '/' + dst + '/Users/alice/c'], check=True)
+    return r
+_o.rename = _p_rename
+`;
+    await assert.rejects(
+      () => removeInDistro(patchedRun([], mountAfterMove), fx.paths, plan2),
+      /were not deleted: Users\/alice\/c\. ElastOS never deletes files on another drive/,
+    );
+    assert.equal(holdings(fx).length, 1);
+    assert.equal(precious(), 'on drive C');
+    assert.deepEqual(fs.readdirSync(outside), ['precious.txt']);
+    unmountUnder(fx.top);
+    await resetRuntimeInDistro({ ...resetDeps(fx, []), backup: false });
+    assertFullyReset(fx);
+    assert.equal(precious(), 'on drive C');
+  } finally {
+    unmountUnder(fx.top);
+    fx.cleanup();
+  }
+});
+
+test('a folder swapped for a link, before or during the delete, is never followed', POSIX, async () => {
+  const fx = distroFixture();
+  const outside = path.join(fx.top, 'outside');
+  try {
+    fs.mkdirSync(outside);
+    fs.writeFileSync(path.join(outside, 'precious.txt'), 'outside');
+    // Before Reset: a folder deep in the data is a link to a folder outside it.
+    const alice = path.join(fx.paths.dataDir, 'Users', 'alice');
+    fs.renameSync(alice, `${alice}-real`);
+    fs.symlinkSync(outside, alice);
+    await resetRuntimeInDistro({ ...resetDeps(fx, []), backup: false });
+    assertFullyReset(fx);
+    assert.equal(fs.readFileSync(path.join(outside, 'precious.txt'), 'utf8'), 'outside');
+  } finally {
+    fx.cleanup();
+  }
+
+  const fx2 = distroFixture();
+  const outside2 = path.join(fx2.top, 'outside');
+  try {
+    fs.mkdirSync(outside2);
+    fs.writeFileSync(path.join(outside2, 'precious.txt'), 'outside');
+    const plan = distroRemovalPlan(await inspectDistro(localRun([]), fx2.paths), fx2.paths, DID);
+    // During the delete: after the check of Users/alice and before it is opened, it becomes a link.
+    const swap = `
+import os as _o
+_open, _rename = _o.open, _o.rename
+_armed = [False]
+def _p_rename(*a, **k):
+    r = _rename(*a, **k)
+    _armed[0] = True
+    return r
+def _p_open(p, flags, *a, **k):
+    if _armed[0] and p == 'alice' and flags & _o.O_DIRECTORY:
+        _armed[0] = False
+        d = k.get('dir_fd')
+        _rename('alice', 'alice-moved', src_dir_fd=d, dst_dir_fd=d)
+        _o.symlink(${JSON.stringify(outside2)}, 'alice', dir_fd=d)
+    return _open(p, flags, *a, **k)
+_o.rename, _o.open = _p_rename, _p_open
+`;
+    await assert.rejects(() => removeInDistro(patchedRun([], swap), fx2.paths, plan), /were not deleted: Users\/alice\./);
+    assert.deepEqual(fs.readdirSync(outside2), ['precious.txt']);
+    assert.equal(fs.readFileSync(path.join(outside2, 'precious.txt'), 'utf8'), 'outside');
+
+    // A file replaced by another one between its check and its delete is left.
+    const fx3 = distroFixture();
+    try {
+      const plan3 = distroRemovalPlan(await inspectDistro(localRun([]), fx3.paths), fx3.paths, DID);
+      const swapFile = `
+import os as _o
+_stat, _rename = _o.stat, _o.rename
+_armed = [False]
+_seen = [0]
+def _p_rename(*a, **k):
+    r = _rename(*a, **k)
+    _armed[0] = True
+    return r
+def _p_stat(p, *a, **k):
+    if _armed[0] and p == 'notes.txt' and k.get('dir_fd') is not None:
+        _seen[0] += 1
+        if _seen[0] == 2:
+            d = k['dir_fd']
+            fd = _o.open('swap.tmp', _o.O_WRONLY | _o.O_CREAT | _o.O_EXCL, 0o600, dir_fd=d)
+            _o.write(fd, b'swapped in')
+            _o.close(fd)
+            _rename('swap.tmp', 'notes.txt', src_dir_fd=d, dst_dir_fd=d)
+    return _stat(p, *a, **k)
+_o.stat, _o.rename = _p_stat, _p_rename
+`;
+      await assert.rejects(() => removeInDistro(patchedRun([], swapFile), fx3.paths, plan3), /were not deleted: Users\/alice\/notes\.txt\./);
+      const [held] = holdings(fx3);
+      assert.equal(fs.readFileSync(path.join(fx3.root, '.local', 'share', held, 'Users', 'alice', 'notes.txt'), 'utf8'), 'swapped in');
+    } finally {
+      fx3.cleanup();
+    }
+  } finally {
+    fx2.cleanup();
+  }
+});
+
+const STEPS = [
+  { step: 'move the data aside', fn: 'rename', name: 'elastos' },
+  { step: 'delete the program', fn: 'unlink', name: 'elastos' },
+  { step: 'delete the stage file', fn: 'unlink', name: 'install-stage.json' },
+  { step: 'delete the moved data', fn: 'unlink', name: 'notes.txt' },
+];
+
+for (const { step, fn, name } of STEPS) {
+  for (const how of ['error', 'crash']) {
+    test(`Windows Reset that stops at "${step}" (${how}) leaves the old install or a moved folder, and Reset again finishes`, POSIX, async () => {
+      const fx = distroFixture();
+      try {
+        const calls = [];
+        const run = patchedRun([], failAt(fn, name, how));
+        const deps = resetDeps(fx, calls);
+        deps.removeInDistro = (plan) => removeInDistro(run, fx.paths, plan);
+        const err = await resetRuntimeInDistro(deps).then(() => null, (e) => e);
+        assert.ok(err, 'Reset must fail');
+        // The copy was saved before the delete, and the message says where it is.
+        const [copy] = backupFiles(fx);
+        assert.ok(copy);
+        assert.ok(err.message.endsWith(`Your copy of your data is in ${path.join(fx.winHome, BACKUP_FOLDER_NAME, copy)}.`), err.message);
+        // The Windows-side files are removed only after the distro is done.
+        assert.equal(exists(path.join(fx.winHome, '.elastos-launcher', 'install-stage.json')), true);
+        const notes = path.join(fx.paths.dataDir, 'Users', 'alice', 'notes.txt');
+        if (step === 'move the data aside') {
+          // Nothing was deleted: the program and the data are where they were.
+          assertUntouched(fx);
+          assert.deepEqual(holdings(fx), []);
+          if (how === 'error') assert.match(err.message, /could not move its data folder .*\. Nothing was deleted\. Click Reset to try again\./);
+        } else if (how === 'error' && step !== 'delete the moved data') {
+          // The program could not be removed: the data was put back, whole.
+          assert.match(err.message, /could not remove its program in its Linux environment\. Your data was not deleted\. Click Reset to try again\./);
+          assert.equal(fs.readFileSync(notes, 'utf8'), 'my notes');
+          assert.deepEqual(holdings(fx), []);
+        } else {
+          // The data is whole at its own name, or it is in one moved folder. Never half here, half there.
+          const held = holdings(fx);
+          if (exists(fx.paths.dataDir)) {
+            assert.equal(fs.readFileSync(notes, 'utf8'), 'my notes');
+            assert.deepEqual(held, []);
+          } else {
+            assert.equal(held.length, 1);
+          }
+          if (how === 'crash') assert.match(err.message, /could not finish removing its files in its Linux environment\. Click Reset to try again\./);
+          else assert.match(err.message, /some old files in .* were not deleted: Users\/alice\/notes\.txt\./);
+        }
+        // Reset again, with no failure, finishes the job.
+        await resetRuntimeInDistro({ ...resetDeps(fx, []), backup: false });
+        assertFullyReset(fx);
+      } finally {
+        fx.cleanup();
+      }
+    });
+  }
+}
