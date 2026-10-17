@@ -191,7 +191,7 @@ export function isRuntimeDataName(name: string): boolean {
 const RUNTIME_PARTIAL_FILES = new Set(['components.json', 'host-process.lock', 'sources.json']);
 /** install.sh writes the verified release head here before anything else runs. */
 export const INSTALLED_RELEASE_HEAD = path.join('installation', 'release-head.json');
-const RELEASE_HEAD_MAX_BYTES = 64 * 1024;
+export const RELEASE_HEAD_MAX_BYTES = 64 * 1024;
 
 /** A real directory. A symlink does not count, even when its target holds a marker. */
 function isRealDirectory(dataDir: string): boolean {
@@ -228,7 +228,17 @@ export function signedInstallRecord(
   try {
     const stat = fs.lstatSync(head);
     if (!stat.isFile() || stat.size > RELEASE_HEAD_MAX_BYTES) return false;
-    verifyReleaseHead(fs.readFileSync(head, 'utf8'), maintainerDid);
+    return installRecordTextProves(fs.readFileSync(head, 'utf8'), maintainerDid);
+  } catch {
+    return false;
+  }
+}
+
+/** The bytes of an install record prove ownership only when they verify against the pinned DID. */
+export function installRecordTextProves(text: string, maintainerDid: string | null): boolean {
+  if (!maintainerDid || Buffer.byteLength(text, 'utf8') > RELEASE_HEAD_MAX_BYTES) return false;
+  try {
+    verifyReleaseHead(text, maintainerDid);
     return true;
   } catch {
     return false;

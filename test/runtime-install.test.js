@@ -38,6 +38,8 @@ const SCRIPT = '#!/bin/bash\necho stamped-installer\n';
 const SCRIPT_SHA = crypto.createHash('sha256').update(SCRIPT).digest('hex');
 const FIXTURE_HEAD_CID = releaseHeadCid(SIGNED_HEAD);
 const SOURCES = `${HOME}/.local/share/elastos/sources.json`;
+const RECORD = `${HOME}/.local/share/elastos/installation/release-head.json`;
+const { installRecordTextProves } = require('../dist/main/targets/runtimePaths');
 
 function canaryPin(overrides = {}) {
   return {
@@ -93,6 +95,8 @@ function harness(overrides = {}) {
         default_source: 'default',
         sources: [{ name: 'default', head_cid: env.ELASTOS_HEAD_CID }],
       }));
+      // install-release writes the verified head as the install record.
+      files.set(RECORD, SIGNED_HEAD);
       return { stdout: '', stderr: '' };
     },
     runSetup: async (binary) => {
@@ -105,6 +109,11 @@ function harness(overrides = {}) {
     exists: (file) => files.has(file),
     statMtimeMs: (file) => (mtimes.has(file) ? mtimes.get(file) : null),
     mkdirp: () => {},
+    // The same check Reset uses, on the in-memory record.
+    installRecordProved: (dataDir) => {
+      const text = files.get(`${dataDir}/installation/release-head.json`);
+      return typeof text === 'string' && installRecordTextProves(text, deps.pin.maintainerDid);
+    },
     ...overrides,
   };
   return { deps, files, mtimes, calls };
@@ -256,6 +265,7 @@ test('an interrupted install rechecks the signed head and does not download the 
     default_source: 'default',
     sources: [{ name: 'default', head_cid: FIXTURE_HEAD_CID }],
   }));
+  files.set(RECORD, SIGNED_HEAD);
   await installRuntime(deps, () => {});
   const headFetches = calls.filter((call) => call[0] === 'fetch' && String(call[1]).endsWith('/release-head.json'));
   assert.equal(headFetches.length, 1);
@@ -276,11 +286,91 @@ test('a finished install rechecks the signed head and does not download again', 
     default_source: 'default',
     sources: [{ name: 'default', head_cid: FIXTURE_HEAD_CID }],
   }));
+  files.set(RECORD, SIGNED_HEAD);
   await installRuntime(deps, () => {});
   const headFetches = calls.filter((call) => call[0] === 'fetch' && String(call[1]).endsWith('/release-head.json'));
   assert.equal(headFetches.length, 1);
   assert.equal(calls.some((call) => call[0] === 'installer'), false);
   assert.equal(calls.some((call) => call[0] === 'setup'), false);
+});
+
+function installedWithoutProof(record) {
+  const { deps, calls, files } = harness({
+    probe: async () => ({
+      kind: 'version',
+      version: `ElastOS Runtime v${FIXTURE_VERSION}`,
+      binaryPath: `${HOME}/.local/bin/elastos`,
+    }),
+  });
+  files.set(COMPONENTS, '{}');
+  files.set(SOURCES, JSON.stringify({
+    default_source: 'default',
+    sources: [{ name: 'default', head_cid: FIXTURE_HEAD_CID }],
+  }));
+  if (record != null) files.set(RECORD, record);
+  return { deps, calls, files };
+}
+
+test('the pinned version with no signed install record is not installed: Install runs install.sh again', async () => {
+  const { deps, calls, files } = installedWithoutProof(null);
+  await installRuntime(deps, () => {});
+  assert.equal(calls.filter((call) => call[0] === 'installer').length, 1);
+  assert.equal(files.get(RECORD), SIGNED_HEAD);
+  // components.json is there, so setup does not run again.
+  assert.equal(calls.some((call) => call[0] === 'setup'), false);
+  // Now the record proves the install, and a second Install changes nothing.
+  calls.length = 0;
+  await installRuntime(deps, () => {});
+  assert.equal(calls.some((call) => call[0] === 'installer'), false);
+});
+
+test('a tampered or foreign-signed install record is not proof: Install runs install.sh again', async () => {
+  const tampered = SIGNED_HEAD.replace('"version":"0.7.1"', '"version":"0.7.9"');
+  for (const record of [tampered, '{}', '', SIGNED_HEAD.replace(FIXTURE_DID, DID)]) {
+    const { deps, calls, files } = installedWithoutProof(record);
+    await installRuntime(deps, () => {});
+    assert.equal(calls.filter((call) => call[0] === 'installer').length, 1, record);
+    assert.equal(files.get(RECORD), SIGNED_HEAD);
+  }
+  // A record check that throws (an unreadable file) is not proof either.
+  const { deps, calls } = installedWithoutProof(SIGNED_HEAD);
+  deps.installRecordProved = () => { throw new Error('unreadable'); };
+  await assert.rejects(() => installRuntime(deps, () => {}), /did not save its signed install record/);
+  assert.equal(calls.filter((call) => call[0] === 'installer').length, 1);
+});
+
+test('an install.sh run that leaves no valid record fails in plain words', async () => {
+  const { deps, calls } = harness({
+    runInstaller: async (script, args, env) => {
+      calls.push(['installer', script, [...args], env]);
+      deps.writeFile(SOURCES, JSON.stringify({
+        default_source: 'default',
+        sources: [{ name: 'default', head_cid: env.ELASTOS_HEAD_CID }],
+      }));
+      return { stdout: '', stderr: '' };
+    },
+  });
+  await assert.rejects(() => installRuntime(deps, () => {}), {
+    message: 'ElastOS was installed, but it did not save its signed install record, so ElastOS cannot prove this install. Click Install to try again.',
+  });
+  assert.equal(calls.some((call) => call[0] === 'setup'), false);
+});
+
+test('the plan needs version, head CID and the signed record before it says already installed', () => {
+  const base = {
+    platform: 'linux',
+    arch: 'x64',
+    installedVersion: `ElastOS Runtime v${FIXTURE_VERSION}`,
+    installedHeadCid: FIXTURE_HEAD_CID,
+    installRecordProved: true,
+    componentsPresent: true,
+    pin: canaryPin(),
+    publisher: { ...verifyReleaseHead(SIGNED_HEAD, FIXTURE_DID) },
+  };
+  assert.equal(planRuntimeInstall(base).action, 'already-installed');
+  assert.equal(planRuntimeInstall({ ...base, componentsPresent: false }).action, 'resume-setup');
+  assert.equal(planRuntimeInstall({ ...base, installRecordProved: false }).action, 'pinned');
+  assert.equal(planRuntimeInstall({ ...base, installRecordProved: false, componentsPresent: false }).action, 'pinned');
 });
 
 test('a local install that matches the pin is refused when the signed head does not', async () => {
@@ -327,6 +417,7 @@ test('Intel Mac gets a friendly message and does not download', async () => {
     pin: canaryPin(),
     publisher: null,
     installedHeadCid: null,
+    installRecordProved: false,
   });
   assert.equal(plan.action, 'blocked');
   assert.equal(plan.message, INTEL_MAC_MESSAGE);
