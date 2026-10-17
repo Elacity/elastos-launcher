@@ -11,8 +11,18 @@ const {
   signalProcessGroup,
   ForeignGatewayError,
   foreignListenerIsElastos,
-  healthListenInodes,
-  pidOwnsSocketInodes,
+  installedGatewayKind,
+  FOREIGN_LISTENER_MESSAGE,
+  LEGACY_STILL_RUNNING_MESSAGE,
+  combineHealth,
+  listenerOwnership,
+  localhostIsLoopback,
+  parseLsofListeners,
+  pidOwnsGatewayPort,
+  probeGatewayHealth,
+  procListenersFor,
+  procNetAddress,
+  procNetListeners,
 } = require('../dist/main/targets/runtimeGateway');
 const { uninstallRuntime } = require('../dist/main/targets/runtimeUninstall');
 
@@ -87,16 +97,17 @@ test('start spawns the gateway and becomes running when /healthz is OK', async (
   const world = supervisor();
   assert.equal(await world.sup.start(), 'started');
   assert.equal(world.sup.phase(), 'running');
-  assert.deepEqual(world.spawned[0][1], ['gateway', '--addr', '127.0.0.1:8090']);
+  assert.deepEqual(world.spawned[0][1], ['gateway', '--addr', 'localhost:8090']);
   world.sup.openHome();
   assert.deepEqual(world.opened, [HOME_URL]);
+  assert.equal(HOME_URL, 'http://localhost:8090/home/');
 });
 
 test('a held host lock opens Home only when the listener is the ElastOS gateway', async () => {
   const world = supervisor();
   world.setHealth(null);
   let asked = 0;
-  const lock = JSON.stringify({ pid: 7, role: 'gateway', addr: '127.0.0.1:8090' });
+  const lock = JSON.stringify({ pid: 7, role: 'gateway', addr: 'localhost:8090' });
   const pending = createGatewaySupervisor({
     binary: '/bin/elastos',
     spawn() {
@@ -120,7 +131,7 @@ test('a held host lock opens Home only when the listener is the ElastOS gateway'
     healthTimeoutMs: 5000,
     confirmForeign: async () => foreignListenerIsElastos({
       lockText: lock,
-      command: '/home/user/.local/bin/elastos gateway --addr 127.0.0.1:8090',
+      command: '/home/user/.local/bin/elastos gateway --addr localhost:8090',
       pidAlive: (pid) => pid === 7,
       ownsSocket: (pid) => pid === 7,
     }),
@@ -153,7 +164,7 @@ test('a held host lock opens Home only when the listener is the ElastOS gateway'
     log: () => {},
     healthTimeoutMs: 5000,
     confirmForeign: async () => foreignListenerIsElastos({
-      lockText: JSON.stringify({ pid: 9, role: 'other', addr: '127.0.0.1:8090' }),
+      lockText: JSON.stringify({ pid: 9, role: 'other', addr: 'localhost:8090' }),
       command: 'python3 -m http.server 8090',
       pidAlive: () => true,
       ownsSocket: () => true,
@@ -162,29 +173,271 @@ test('a held host lock opens Home only when the listener is the ElastOS gateway'
   assert.deepEqual(impostor.opened, []);
   assert.equal(foreignListenerIsElastos({
     lockText: lock,
-    command: '/home/user/.local/bin/elastos gateway --addr 127.0.0.1:8090',
+    command: '/home/user/.local/bin/elastos gateway --addr localhost:8090',
     pidAlive: () => false,
     ownsSocket: () => true,
   }), false);
   assert.equal(foreignListenerIsElastos({
     lockText: lock,
-    command: '/home/user/.local/bin/elastos gateway --addr 127.0.0.1:8090',
+    command: '/home/user/.local/bin/elastos gateway --addr localhost:8090',
     pidAlive: () => true,
     ownsSocket: () => false,
   }), false);
 });
 
-test('the health socket inode must belong to the lock pid', () => {
-  const tcp = [
-    '  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode',
-    '   0: 0100007F:1F9A 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 4242 1 0000000000000000 100 0 0 10 0',
-    '   1: 00000000:0050 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 9999 1 0000000000000000 100 0 0 10 0',
-  ].join('\n');
-  const inodes = healthListenInodes(tcp);
-  assert.deepEqual([...inodes], ['4242']);
-  assert.equal(pidOwnsSocketInodes(['socket:[4242]', 'pipe:[1]'], inodes), true);
-  assert.equal(pidOwnsSocketInodes(['socket:[9999]'], inodes), false);
-  assert.equal(pidOwnsSocketInodes([], inodes), false);
+const TCP_HEADER = '  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode';
+const tcpRow = (addr, inode, state = '0A') => `   0: ${addr}:1F9A 00000000:0000 ${state} 00000000:00000000 00:00000000 00000000     0        0 ${inode} 1 0000000000000000 100 0 0 10 0`;
+const V6_LOOPBACK = '00000000000000000000000001000000';
+const V6_ANY = '00000000000000000000000000000000';
+
+test('/proc/net addresses decode for IPv4, ::1, ::, and v4-mapped 127.0.0.1', () => {
+  assert.equal(procNetAddress('0100007F'), '127.0.0.1');
+  assert.equal(procNetAddress('00000000'), '0.0.0.0');
+  assert.equal(procNetAddress(V6_LOOPBACK), '::1');
+  assert.equal(procNetAddress(V6_ANY), '::');
+  assert.equal(procNetAddress('0000000000000000FFFF00000100007F'), '::ffff:127.0.0.1');
+  assert.equal(procNetAddress('zz'), null);
+});
+
+test('the gateway must own every localhost listener, on 127.0.0.1 and on ::1', () => {
+  const tcp = [TCP_HEADER, tcpRow('0100007F', 4242), tcpRow('00000000', 9999, '01')].join('\n');
+  const tcp6 = [TCP_HEADER, tcpRow(V6_LOOPBACK, 4343)].join('\n');
+  assert.deepEqual(procNetListeners(tcp, tcp6), [
+    { address: '127.0.0.1', inode: '4242' },
+    { address: '::1', inode: '4343' },
+  ]);
+  const wants = ['127.0.0.1', '::1'];
+  assert.equal(listenerOwnership(procListenersFor(tcp, tcp6, ['socket:[4242]', 'socket:[4343]', 'pipe:[1]']), wants), 'owned');
+  // Tamper: another process holds ::1, where the browser can land for localhost.
+  assert.equal(listenerOwnership(procListenersFor(tcp, tcp6, ['socket:[4242]']), wants), 'foreign');
+  assert.equal(listenerOwnership(procListenersFor(tcp, tcp6, []), wants), 'foreign');
+  // A wildcard listener of another process covers 127.0.0.1 too.
+  const wild = [TCP_HEADER, tcpRow('0100007F', 4242), tcpRow('00000000', 5555)].join('\n');
+  assert.equal(listenerOwnership(procListenersFor(wild, '', ['socket:[4242]']), wants), 'foreign');
+  assert.equal(listenerOwnership(procListenersFor(TCP_HEADER, '', ['socket:[4242]']), wants), 'none');
+  // A gateway that binds one family is enough when nothing else listens and nothing else answered.
+  assert.equal(listenerOwnership(procListenersFor(tcp, '', ['socket:[4242]']), wants), 'owned');
+  // An address that answered the probe but is not a socket of the pid is foreign
+  // (macOS lsof cannot list another account's sockets).
+  assert.equal(listenerOwnership(procListenersFor(tcp, '', ['socket:[4242]']), wants, ['127.0.0.1', '::1']), 'foreign');
+  assert.equal(listenerOwnership(procListenersFor(tcp, tcp6, ['socket:[4242]', 'socket:[4343]']), wants, ['::1']), 'owned');
+});
+
+test('lsof listeners name the owner pid for IPv4, [::1], and *', () => {
+  const out = ['p41', 'f7', 'n127.0.0.1:8090', 'f8', 'n[::1]:8090', 'p99', 'f3', 'n*:8090', 'p100', 'n127.0.0.1:9000'].join('\n');
+  assert.deepEqual(parseLsofListeners(out, 41), [
+    { address: '127.0.0.1', owned: true },
+    { address: '::1', owned: true },
+    { address: '*', owned: false },
+  ]);
+  assert.equal(listenerOwnership(parseLsofListeners(out, 41), ['127.0.0.1', '::1']), 'foreign');
+  assert.equal(listenerOwnership(parseLsofListeners(out.split('\np99')[0], 41), ['127.0.0.1', '::1']), 'owned');
+});
+
+async function listenOn(host) {
+  const net = require('node:net');
+  const server = net.createServer();
+  const ok = await new Promise((resolve) => {
+    server.once('error', () => resolve(false));
+    server.listen({ port: 0, host, ipv6Only: host.includes(':') }, () => resolve(true));
+  });
+  return ok ? server : null;
+}
+
+function selfFdLinks() {
+  const fs = require('node:fs');
+  return fs.readdirSync('/proc/self/fd').map((name) => {
+    try { return fs.readlinkSync(`/proc/self/fd/${name}`); } catch { return ''; }
+  });
+}
+
+function readNet(file) {
+  try { return require('node:fs').readFileSync(file, 'utf8'); } catch { return ''; }
+}
+
+test('the Linux /proc reader sees a real 127.0.0.1 listener of this process', async (t) => {
+  if (process.platform !== 'linux') return t.skip('Linux only');
+  const server = await listenOn('127.0.0.1');
+  try {
+    const port = server.address().port;
+    const listeners = procListenersFor(readNet('/proc/net/tcp'), readNet('/proc/net/tcp6'), selfFdLinks(), port);
+    assert.deepEqual(listeners, [{ address: '127.0.0.1', owned: true }]);
+    assert.equal(listenerOwnership(listeners, ['127.0.0.1', '::1'], ['127.0.0.1']), 'owned');
+    // The same socket seen from a pid that does not hold it.
+    assert.equal(listenerOwnership(procListenersFor(readNet('/proc/net/tcp'), '', [], port), ['127.0.0.1', '::1']), 'foreign');
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test('the Linux /proc reader sees a real ::1 listener of this process', async (t) => {
+  if (process.platform !== 'linux') return t.skip('Linux only');
+  const server = await listenOn('::1');
+  if (!server) return t.skip('this machine has no ::1');
+  try {
+    const port = server.address().port;
+    const listeners = procListenersFor(readNet('/proc/net/tcp'), readNet('/proc/net/tcp6'), selfFdLinks(), port);
+    assert.deepEqual(listeners, [{ address: '::1', owned: true }]);
+    assert.equal(listenerOwnership(listeners, ['127.0.0.1', '::1'], ['::1']), 'owned');
+    assert.equal(listenerOwnership(procListenersFor('', readNet('/proc/net/tcp6'), [], port), ['::1']), 'foreign');
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test('pidOwnsGatewayPort refuses when the listeners cannot be read', async () => {
+  assert.equal(await pidOwnsGatewayPort(7, ['127.0.0.1', '::1'], [], async () => null), false);
+  assert.equal(await pidOwnsGatewayPort(7, ['127.0.0.1', '::1'], [], async () => [{ address: '::1', owned: true }]), true);
+});
+
+test('the health probe asks every address localhost resolves to', async () => {
+  const asked = [];
+  const ok = { status: 200, body: 'OK' };
+  const only6 = await probeGatewayHealth({
+    lookup: async () => ['::1', '127.0.0.1'],
+    get: async (address) => { asked.push(address); return address === '::1' ? ok : null; },
+  });
+  assert.deepEqual(asked.sort(), ['127.0.0.1', '::1']);
+  assert.equal(isHealthOk(only6), true);
+  assert.deepEqual(only6.addresses, ['::1']);
+  const both = await probeGatewayHealth({ lookup: async () => ['127.0.0.1', '::1'], get: async () => ok });
+  assert.deepEqual(both.addresses, ['127.0.0.1', '::1']);
+  // Tamper: something else answers on one address. The browser can land there, so it is not OK.
+  const mixed = await probeGatewayHealth({
+    lookup: async () => ['::1', '127.0.0.1'],
+    get: async (address) => (address === '::1' ? { status: 404, body: 'Not Found' } : ok),
+  });
+  assert.equal(isHealthOk(mixed), false);
+  // Tamper: localhost points away from this computer. Nothing is asked.
+  let called = false;
+  assert.equal(await probeGatewayHealth({ lookup: async () => ['127.0.0.1', '10.0.0.5'], get: async () => { called = true; return ok; } }), null);
+  assert.equal(called, false);
+  assert.equal(await probeGatewayHealth({ lookup: async () => { throw new Error('ENOTFOUND'); } }), null);
+  assert.equal(await probeGatewayHealth({ lookup: async () => [], get: async () => ok }), null);
+  assert.equal(await probeGatewayHealth({ lookup: async () => ['127.0.0.1'], get: async () => null }), null);
+  assert.equal(localhostIsLoopback(['127.0.0.1', '::1']), true);
+  assert.equal(localhostIsLoopback(['127.0.1.1']), false);
+  assert.equal(combineHealth([]), null);
+});
+
+test('an OK that the started gateway does not own never opens Home', async () => {
+  const opened = [];
+  let clock = 0;
+  const owners = [];
+  const sup = createGatewaySupervisor({
+    binary: '/bin/elastos',
+    spawn: () => fakeProcess(41),
+    fetchHealth: async () => ({ status: 200, body: 'OK', addresses: ['::1'] }),
+    listenerOwned: (pid, health) => { owners.push([pid, health.addresses]); return false; },
+    sleep: async () => { clock += 1000; },
+    now: () => clock,
+    openUrl: (url) => opened.push(url),
+    log: () => {},
+    healthTimeoutMs: 3000,
+    pollMs: 1000,
+  });
+  await assert.rejects(() => sup.start(), (err) => err.message === FOREIGN_LISTENER_MESSAGE);
+  assert.deepEqual(opened, []);
+  assert.deepEqual(owners[0], [41, ['::1']]);
+  assert.match(FOREIGN_LISTENER_MESSAGE, /localhost:8090/);
+
+  const ready = createGatewaySupervisor({
+    binary: '/bin/elastos',
+    spawn: () => fakeProcess(42),
+    fetchHealth: async () => ({ status: 200, body: 'OK', addresses: ['127.0.0.1'] }),
+    listenerOwned: (pid) => pid === 42,
+    sleep: async () => {},
+    now: () => 0,
+    openUrl: () => {},
+    log: () => {},
+  });
+  assert.equal(await ready.start(), 'started');
+});
+
+test('upgrade: a gateway an earlier launcher started on 127.0.0.1 is stopped and started on localhost', async () => {
+  const legacyLock = JSON.stringify({ pid: 7, role: 'gateway', addr: '127.0.0.1:8090' });
+  const legacyFacts = {
+    lockText: legacyLock,
+    command: '/home/user/.local/bin/elastos gateway --addr 127.0.0.1:8090',
+    pidAlive: () => true,
+    ownsSocket: (_pid, wants) => wants.length === 1 && wants[0] === '127.0.0.1',
+  };
+  assert.equal(installedGatewayKind(legacyFacts), 'legacy');
+  // Home never opens on the legacy gateway.
+  assert.equal(foreignListenerIsElastos(legacyFacts), false);
+  assert.equal(installedGatewayKind({ ...legacyFacts, lockText: JSON.stringify({ pid: 7, addr: '0.0.0.0:8090' }) }), null);
+  assert.equal(installedGatewayKind({ ...legacyFacts, ownsSocket: () => false }), null);
+
+  const spawned = [];
+  const opened = [];
+  const logs = [];
+  let legacyRunning = true;
+  const legacySignals = [];
+  const legacy = {
+    pid: 7,
+    onOutput() {},
+    onExit() {},
+    hasExited: () => !legacyRunning,
+    signal(sig) { legacySignals.push(sig); legacyRunning = false; },
+  };
+  let mine = null;
+  const sup = createGatewaySupervisor({
+    binary: '/bin/elastos',
+    spawn(binary, args) {
+      spawned.push([...args]);
+      const proc = fakeProcess(50 + spawned.length);
+      if (legacyRunning) {
+        queueMicrotask(() => {
+          proc.emit('another ElastOS host already owns this data directory\n');
+          proc.exit(1);
+        });
+      } else {
+        mine = proc;
+      }
+      return proc;
+    },
+    fetchHealth: async () => (legacyRunning || mine ? { status: 200, body: 'OK', addresses: ['127.0.0.1'] } : null),
+    sleep: async () => {},
+    now: () => 0,
+    openUrl: (url) => opened.push(url),
+    log: (line) => logs.push(line),
+    confirmForeign: async () => foreignListenerIsElastos(legacyFacts),
+    foreignIsLegacy: async () => installedGatewayKind(legacyFacts) === 'legacy',
+    adoptInstalled: () => legacy,
+    listenerOwned: (pid) => Boolean(mine && pid === mine.pid),
+  });
+  assert.equal(await sup.start(), 'started');
+  assert.deepEqual(legacySignals, ['SIGTERM']);
+  assert.deepEqual(spawned, [['gateway', '--addr', 'localhost:8090'], ['gateway', '--addr', 'localhost:8090']]);
+  assert.deepEqual(opened, []);
+  assert.ok(logs.some((line) => /older ElastOS is running on 127\.0\.0\.1:8090/.test(line)));
+  sup.openHome();
+  assert.deepEqual(opened, ['http://localhost:8090/home/']);
+});
+
+test('upgrade: a legacy gateway that cannot be adopted is not opened and says so', async () => {
+  const opened = [];
+  const sup = createGatewaySupervisor({
+    binary: '/bin/elastos',
+    spawn() {
+      const proc = fakeProcess(60);
+      queueMicrotask(() => {
+        proc.emit('another ElastOS host already owns this data directory\n');
+        proc.exit(1);
+      });
+      return proc;
+    },
+    fetchHealth: async () => ({ status: 200, body: 'OK' }),
+    sleep: async () => {},
+    now: () => 0,
+    openUrl: (url) => opened.push(url),
+    log: () => {},
+    confirmForeign: async () => false,
+    foreignIsLegacy: async () => true,
+    adoptInstalled: () => null,
+  });
+  await assert.rejects(() => sup.start(), (err) => err.message === LEGACY_STILL_RUNNING_MESSAGE);
+  assert.deepEqual(opened, []);
 });
 
 const REPLACED = 'host executable /bin/elastos was replaced on disk. Exiting stale host.\n';

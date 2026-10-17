@@ -42,7 +42,8 @@ let legacyItems = [];
 let legacyConfirmPaths = [];
 let pc2Busy = false;
 let targetId = 'runtime';
-let openUrl = 'http://127.0.0.1:8090/home/';
+// The main process sends the Home address (src/main/targets/gatewayAddress.ts).
+let openUrl = '';
 let busy = false;
 let isUpdating = false;
 let logs = [];
@@ -131,7 +132,7 @@ function updateStatus(status) {
   uninstallBtn.disabled = !isInstalled || status === 'running' || busy;
 
   firstRun.textContent = flow.firstRunCopy(targetId, status);
-  urlValue.textContent = flow.urlLabel(openUrl);
+  urlValue.textContent = flow.urlLabel(openUrl) || '...';
   if (status !== 'error') {
     // Keep a visible error until the next successful action.
   }

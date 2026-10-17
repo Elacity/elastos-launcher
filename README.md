@@ -4,7 +4,7 @@ A one-click desktop app that installs the ElastOS runtime and opens Home in the 
 
 ## What it does
 
-Click Install. The launcher checks the signed release pin, runs the pinned installer, starts `elastos gateway` on `127.0.0.1:8090`, and opens `http://127.0.0.1:8090/home/`.
+Click Install. The launcher checks the signed release pin, runs the pinned installer, starts `elastos gateway` on `localhost:8090`, and opens `http://localhost:8090/home/`. Passkeys need the `localhost` name: browsers refuse them on `127.0.0.1`.
 
 The window talks to the main process through `window.elastos` and `elastos:*` IPC. There is one launch target, the runtime.
 

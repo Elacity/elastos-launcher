@@ -186,10 +186,10 @@ test('quit waits for the gateway this launcher started and leaves one it did not
 });
 
 test('the runtime health contract is the gateway', () => {
-  assert.equal(RUNTIME_TARGET.health.url, 'http://127.0.0.1:8090/healthz');
+  assert.equal(RUNTIME_TARGET.health.url, 'http://localhost:8090/healthz');
   assert.equal(RUNTIME_TARGET.health.expectBodyIncludes, 'OK');
-  assert.equal(RUNTIME_TARGET.openUrl, 'http://127.0.0.1:8090/home/');
-  assert.deepEqual(RUNTIME_TARGET.startArgs, ['gateway', '--addr', '127.0.0.1:8090']);
+  assert.equal(RUNTIME_TARGET.openUrl, 'http://localhost:8090/home/');
+  assert.deepEqual(RUNTIME_TARGET.startArgs, ['gateway', '--addr', 'localhost:8090']);
   assert.equal(RUNTIME_TARGET.binary, '~/.local/bin/elastos');
   assert.equal(getLaunchTargetDescriptor('runtime').id, 'runtime');
   assert.equal(targetSupportsHost(RUNTIME_TARGET, 'darwin', 'arm64'), true);

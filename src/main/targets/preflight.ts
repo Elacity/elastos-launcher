@@ -3,7 +3,8 @@ import * as fs from 'fs';
 import * as net from 'net';
 import * as os from 'os';
 import * as path from 'path';
-import { HEALTH_URL } from './runtimeGateway';
+import { GATEWAY_ADDR, GATEWAY_PORT, LOOPBACK_ADDRESSES } from './gatewayAddress';
+import { isHealthOk, localhostIsLoopback, probeGatewayHealth, resolveLocalhost } from './runtimeGateway';
 import { BIP39_ENGLISH } from './bip39English';
 import { launcherOwnedDirectories } from './runtimePaths';
 import { BASH_MESSAGE, detectLinuxLibc, MUSL_MESSAGE, resolveBash } from './hostTools';
@@ -38,7 +39,12 @@ export interface PreflightInput {
   distroReady?: boolean;
   libc?: 'glibc' | 'musl' | 'unknown';
   bashPresent?: boolean;
+  /** What `localhost` resolves to. Absent when it was not checked. */
+  localhostAddresses?: string[] | null;
 }
+
+export const LOCALHOST_MESSAGE =
+  'On this computer, the name localhost does not point to this computer. ElastOS needs it to. Ask the person who looks after this computer to fix the hosts file, then try again.';
 
 export function evaluatePreflight(input: PreflightInput): PreflightReport {
   const checks: PreflightCheck[] = [];
@@ -79,9 +85,15 @@ export function evaluatePreflight(input: PreflightInput): PreflightReport {
   if (input.healthOk) {
     checks.push({ id: 'port', level: 'pass', message: 'Your computer is already running.' });
   } else if (input.portBusy) {
-    checks.push({ id: 'port', level: 'block', message: 'Port 8090 is being used by another program. Quit that program and try again.' });
+    checks.push({ id: 'port', level: 'block', message: `Port ${GATEWAY_PORT} is being used by another program. Quit that program and try again.` });
   } else {
-    checks.push({ id: 'port', level: 'pass', message: 'Port 8090 is free.' });
+    checks.push({ id: 'port', level: 'pass', message: `Port ${GATEWAY_PORT} is free.` });
+  }
+
+  if (input.localhostAddresses !== undefined) {
+    checks.push(input.localhostAddresses && localhostIsLoopback(input.localhostAddresses)
+      ? { id: 'localhost', level: 'pass', message: `${GATEWAY_ADDR} points to this computer.` }
+      : { id: 'localhost', level: 'block', message: LOCALHOST_MESSAGE });
   }
 
   if (input.networkChecked === false) {
@@ -380,23 +392,48 @@ export function freeBytes(dir: string): number | null {
   }
 }
 
-export function portBusy(port: number, host = '127.0.0.1'): Promise<boolean> {
+export type ListenResult = 'free' | 'busy' | 'no-address';
+
+/** Try to listen on one address. An address this computer does not have (IPv6 off) is `no-address`. */
+export function tryListen(port: number, host: string): Promise<ListenResult> {
   return new Promise((resolve) => {
     const server = net.createServer();
-    server.once('error', () => resolve(true));
-    server.once('listening', () => {
-      server.close(() => resolve(false));
+    server.once('error', (err: NodeJS.ErrnoException) => {
+      const code = err && err.code;
+      resolve(code === 'EADDRNOTAVAIL' || code === 'EAFNOSUPPORT' ? 'no-address' : 'busy');
     });
-    server.listen(port, host);
+    server.once('listening', () => {
+      server.close(() => resolve('free'));
+    });
+    server.listen({ port, host, ipv6Only: host.includes(':') });
   });
 }
 
+/**
+ * True when anything holds `port` on 127.0.0.1 or ::1, the addresses
+ * `localhost` names. A host without IPv6 checks 127.0.0.1 only. An
+ * unexpected error counts as busy.
+ */
+export async function portBusy(
+  port: number,
+  hosts: readonly string[] = LOOPBACK_ADDRESSES,
+  listen: (port: number, host: string) => Promise<ListenResult> = tryListen,
+): Promise<boolean> {
+  for (const host of hosts) {
+    if ((await listen(port, host)) === 'busy') return true;
+  }
+  return false;
+}
+
 async function healthOk(): Promise<boolean> {
+  return isHealthOk(await probeGatewayHealth({ timeoutMs: 800 }));
+}
+
+async function localhostAddresses(): Promise<string[] | null> {
   try {
-    const response = await fetch(HEALTH_URL, { signal: AbortSignal.timeout(800) });
-    return response.ok && (await response.text()).trim() === 'OK';
+    return await resolveLocalhost();
   } catch {
-    return false;
+    return null;
   }
 }
 
@@ -449,7 +486,7 @@ export async function collectPreflight(
   platform = process.platform,
   arch = process.arch,
 ): Promise<PreflightReport> {
-  const busy = platform === 'win32' ? false : await portBusy(8090);
+  const busy = platform === 'win32' ? false : await portBusy(GATEWAY_PORT);
   const healthy = busy ? await healthOk() : false;
   let procVersion = '';
   try {
@@ -478,5 +515,6 @@ export async function collectPreflight(
     distroReady,
     libc: platform === 'linux' ? detectLinuxLibc(platform) : 'unknown',
     bashPresent: platform === 'win32' ? true : resolveBash() !== null,
+    localhostAddresses: await localhostAddresses(),
   });
 }

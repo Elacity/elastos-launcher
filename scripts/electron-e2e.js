@@ -11,6 +11,10 @@ const path = require('node:path');
 const root = path.join(__dirname, '..');
 const electronPath = require('electron');
 const { _electron: electron } = require('playwright');
+const { HOME_URL, isHealthOk, probeGatewayHealth } = require('../dist/main/targets/runtimeGateway');
+
+// Passkeys need a localhost origin. Browsers refuse them on 127.0.0.1.
+const EXPECTED_HOME = 'http://localhost:8090/home/';
 
 const REQUIRED_LOGS = [
   'Release head signature matches the pinned maintainer',
@@ -178,6 +182,18 @@ async function main() {
             throw new Error(`Install log is missing: ${line}`);
           }
         }
+        if (HOME_URL !== EXPECTED_HOME) {
+          throw new Error(`The launcher opens ${HOME_URL}, not ${EXPECTED_HOME}`);
+        }
+        const shown = (await page.locator('#url-value').innerText()).trim();
+        if (shown !== 'localhost:8090/home') {
+          throw new Error(`The window shows ${shown}, not localhost:8090/home`);
+        }
+        const health = await probeGatewayHealth();
+        if (!isHealthOk(health)) {
+          throw new Error(`/healthz on localhost was not OK (${health ? `HTTP ${health.status}` : 'no answer'})`);
+        }
+        console.log(`Home is ${HOME_URL}; /healthz is OK on ${health.addresses.join(', ')}`);
         console.log('Install reached Open my computer');
         return;
       }

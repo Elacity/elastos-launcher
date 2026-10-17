@@ -10,12 +10,14 @@ import { WINDOWS_NATIVE_MESSAGE } from './runtimeSupport';
 import {
   createGatewaySupervisor,
   emitRuntimeLog,
-  foreignListenerIsElastos,
   GATEWAY_ARGS,
   GatewayProcess,
-  healthListenInodes,
+  InstalledGatewayKind,
+  installedGatewayKind,
+  listenerOwnership,
   openRuntimeHome,
-  pidOwnsSocketInodes,
+  probeGatewayHealth,
+  procListenersFor,
 } from './runtimeGateway';
 import {
   assertPinnedRootfs,
@@ -96,7 +98,7 @@ except OSError:
 const FACTS_HELPER = `
 import json, os
 lock_path = '/root/.local/share/elastos/host-process.lock'
-out = {'lock': None, 'command': None, 'tcp': '', 'links': [], 'alive': False}
+out = {'lock': None, 'command': None, 'tcp': '', 'tcp6': '', 'links': [], 'alive': False}
 try:
     out['lock'] = open(lock_path).read()
 except Exception:
@@ -116,6 +118,10 @@ if type(pid) is int and pid > 1:
         out['tcp'] = open('/proc/net/tcp').read()
     except Exception:
         out['tcp'] = ''
+    try:
+        out['tcp6'] = open('/proc/net/tcp6').read()
+    except Exception:
+        out['tcp6'] = ''
     links = []
     fd = f'/proc/{pid}/fd'
     try:
@@ -488,19 +494,18 @@ export function createDistroGatewaySupervisor() {
   return createGatewaySupervisor({
     binary: '/root/.local/bin/elastos',
     spawn: () => spawnDistroGatewayProcess(),
-    fetchHealth: async () => {
-      try {
-        const response = await fetch('http://127.0.0.1:8090/healthz', { signal: AbortSignal.timeout(2000) });
-        return { status: response.status, body: await response.text() };
-      } catch {
-        return null;
-      }
-    },
+    // Windows forwards localhost to the distro. Probe each address Windows
+    // resolves localhost to, the same way the Windows browser can connect.
+    fetchHealth: () => probeGatewayHealth(),
     sleep: (ms) => new Promise((resolve) => { setTimeout(resolve, ms); }),
     now: () => Date.now(),
     openUrl: openRuntimeHome,
     log: emitRuntimeLog,
     confirmForeign: confirmDistroGateway,
+    foreignIsLegacy: async () => (await distroListenerKind()) === 'legacy',
+    // The Windows side of the forward has no pid this launcher can check.
+    // Inside the distro, the lock pid must own every gateway socket.
+    listenerOwned: () => confirmDistroGateway(),
     adoptInstalled: () => adoptInstalledDistroGateway(),
   });
 }
@@ -541,11 +546,12 @@ export async function distroPidAlive(
   }
 }
 
-export type DistroListenerKind = 'elastos' | 'other' | 'unknown';
+/** `elastos` is a localhost:8090 gateway. `legacy` is one on 127.0.0.1:8090 from an earlier launcher. */
+export type DistroListenerKind = 'elastos' | 'legacy' | 'other' | 'unknown';
 
 export interface DistroListenerIdentity {
   kind: DistroListenerKind;
-  /** The lock pid the facts proved is the gateway. Null unless kind is `elastos`. */
+  /** The lock pid the facts proved is the gateway. Null unless kind is `elastos` or `legacy`. */
   pid: number | null;
 }
 
@@ -572,9 +578,11 @@ export async function distroListenerIdentity(
   try {
     const result = await run(['python3', '-c', FACTS_HELPER], 8000);
     if (result.code !== 0) return { kind: 'unknown', pid: null };
-    if (!factsAreElastos(result.stdout)) return { kind: 'other', pid: null };
+    const gateway = factsGatewayKind(result.stdout);
+    if (!gateway) return { kind: 'other', pid: null };
     const pid = factsLockPid(result.stdout);
-    return pid == null ? { kind: 'unknown', pid: null } : { kind: 'elastos', pid };
+    if (pid == null) return { kind: 'unknown', pid: null };
+    return { kind: gateway === 'current' ? 'elastos' : 'legacy', pid };
   } catch {
     return { kind: 'unknown', pid: null };
   }
@@ -650,7 +658,7 @@ export async function adoptInstalledDistroGateway(deps: {
   } catch {
     return null;
   }
-  if (seen.kind !== 'elastos' || seen.pid == null || !Number.isInteger(seen.pid) || seen.pid <= 1) return null;
+  if ((seen.kind !== 'elastos' && seen.kind !== 'legacy') || seen.pid == null || !Number.isInteger(seen.pid) || seen.pid <= 1) return null;
   return adopt(seen.pid);
 }
 
@@ -674,26 +682,33 @@ export function readDistroVersion(): string {
   }
 }
 
-export function factsAreElastos(raw: string): boolean {
+/** The gateway kind the distro facts prove, from tcp and tcp6, or null. */
+export function factsGatewayKind(raw: string): InstalledGatewayKind | null {
   let parsed: {
     lock?: string | null;
     command?: string | null;
     tcp?: string;
+    tcp6?: string;
     links?: string[];
     alive?: boolean;
   };
   try {
     parsed = JSON.parse(raw) as typeof parsed;
   } catch {
-    return false;
+    return null;
   }
-  const inodes = healthListenInodes(parsed.tcp ?? '');
-  return foreignListenerIsElastos({
+  const listeners = procListenersFor(parsed.tcp ?? '', parsed.tcp6 ?? '', parsed.links ?? []);
+  return installedGatewayKind({
     lockText: parsed.lock ?? null,
     command: parsed.command ?? null,
     pidAlive: () => parsed.alive === true,
-    ownsSocket: () => pidOwnsSocketInodes(parsed.links ?? [], inodes),
+    ownsSocket: (_pid, wants) => listenerOwnership(listeners, wants) === 'owned',
   });
+}
+
+/** True only for a localhost:8090 gateway. A 127.0.0.1:8090 one is stopped, not opened. */
+export function factsAreElastos(raw: string): boolean {
+  return factsGatewayKind(raw) === 'current';
 }
 
 export async function confirmDistroGateway(): Promise<boolean> {

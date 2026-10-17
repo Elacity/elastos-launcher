@@ -57,7 +57,7 @@ test('distro paths stay POSIX and the installer uses ELASTOS_HEAD_CID', () => {
   assert.deepEqual(args.slice(6), ['bash', '/root/.elastos-launcher/install.sh', '--install-only', '--maintainer-did', DID]);
   assert.deepEqual([...wslCommandPrefix(), ...args].slice(0, 4), ['-d', 'ElastOS', '-u', 'root']);
   assert.equal(wslSpawnEnv({}).WSL_UTF8, '1');
-  assert.deepEqual(distroGatewayArgs().slice(-3), ['gateway', '--addr', '127.0.0.1:8090']);
+  assert.deepEqual(distroGatewayArgs().slice(-3), ['gateway', '--addr', 'localhost:8090']);
   assert.match(distroPackageArgs().join(' '), /nameserver 8\.8\.8\.8/);
   assert.match(distroPackageArgs().join(' '), /python3 curl ca-certificates/);
 });
@@ -137,8 +137,8 @@ test('the distro gateway identity uses the lock pid socket and a positive wsl pi
     '   0: 0100007F:1F9A 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 4242 1 0000000000000000 100 0 0 10 0',
   ].join('\n');
   const facts = {
-    lock: JSON.stringify({ pid: 7, addr: '127.0.0.1:8090' }),
-    command: '/root/.local/bin/elastos gateway --addr 127.0.0.1:8090',
+    lock: JSON.stringify({ pid: 7, addr: 'localhost:8090' }),
+    command: '/root/.local/bin/elastos gateway --addr localhost:8090',
     tcp,
     links: ['socket:[4242]'],
     alive: true,
@@ -349,14 +349,61 @@ test('an adopted distro gateway uses the lock pid and does not report a live pid
   }
 });
 
+const TCP_HEADER = '  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode';
+const TCP6_HEADER = '  sl  local_address                         remote_address                        st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode';
+const V4_LISTEN = (inode) => `   0: 0100007F:1F9A 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 ${inode} 1 0000000000000000 100 0 0 10 0`;
+const V6_LISTEN = (inode) => `   0: 00000000000000000000000001000000:1F9A 00000000000000000000000000000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 ${inode} 1 0000000000000000 100 0 0 10 0`;
+
+test('distro facts cover ::1 in tcp6, and a foreign ::1 listener is not ElastOS', () => {
+  const facts = {
+    lock: JSON.stringify({ pid: 7, role: 'gateway', addr: 'localhost:8090' }),
+    command: '/root/.local/bin/elastos gateway --addr localhost:8090',
+    tcp: [TCP_HEADER, V4_LISTEN(4242)].join('\n'),
+    tcp6: [TCP6_HEADER, V6_LISTEN(4343)].join('\n'),
+    links: ['socket:[4242]', 'socket:[4343]'],
+    alive: true,
+  };
+  assert.equal(factsAreElastos(JSON.stringify(facts)), true);
+  // The gateway holds only 127.0.0.1. Another process holds ::1, where a browser can land for localhost.
+  assert.equal(factsAreElastos(JSON.stringify({ ...facts, links: ['socket:[4242]'] })), false);
+  // A gateway on ::1 only is ElastOS.
+  assert.equal(factsAreElastos(JSON.stringify({ ...facts, tcp: TCP_HEADER, links: ['socket:[4343]'] })), true);
+  // An older runtime that has no tcp6 field still reads.
+  const { tcp6, ...noV6 } = facts;
+  assert.equal(factsAreElastos(JSON.stringify({ ...noV6, links: ['socket:[4242]'] })), true);
+});
+
+test('a distro gateway from an earlier launcher on 127.0.0.1 is legacy: stopped, never opened', async () => {
+  const facts = {
+    lock: JSON.stringify({ pid: 7, role: 'gateway', addr: '127.0.0.1:8090' }),
+    command: '/root/.local/bin/elastos gateway --addr 127.0.0.1:8090',
+    tcp: [TCP_HEADER, V4_LISTEN(4242)].join('\n'),
+    tcp6: TCP6_HEADER,
+    links: ['socket:[4242]'],
+    alive: true,
+  };
+  assert.equal(factsAreElastos(JSON.stringify(facts)), false);
+  const reply = (stdout) => async () => ({ code: 0, stdout, stderr: '' });
+  assert.deepEqual(await distroListenerIdentity(reply(JSON.stringify(facts))), { kind: 'legacy', pid: 7 });
+  assert.equal(await distroListenerKind(reply(JSON.stringify(facts))), 'legacy');
+  const adopted = await adoptInstalledDistroGateway({ identify: async () => ({ kind: 'legacy', pid: 7 }) });
+  assert.equal(adopted && adopted.pid, 7);
+  // Any other recorded address is not ElastOS.
+  assert.equal(factsAreElastos(JSON.stringify({ ...facts, lock: JSON.stringify({ pid: 7, addr: '0.0.0.0:8090' }) })), false);
+  assert.deepEqual(
+    await distroListenerIdentity(reply(JSON.stringify({ ...facts, lock: JSON.stringify({ pid: 7, addr: '0.0.0.0:8090' }) }))),
+    { kind: 'other', pid: null },
+  );
+});
+
 test('Reset adopts the distro pid the identity facts proved, not a second lock read', async () => {
   const tcp = [
     '  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode',
     '   0: 0100007F:1F9A 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 4242 1 0000000000000000 100 0 0 10 0',
   ].join('\n');
   const facts = {
-    lock: JSON.stringify({ pid: 7, role: 'gateway', addr: '127.0.0.1:8090' }),
-    command: '/root/.local/bin/elastos gateway --addr 127.0.0.1:8090',
+    lock: JSON.stringify({ pid: 7, role: 'gateway', addr: 'localhost:8090' }),
+    command: '/root/.local/bin/elastos gateway --addr localhost:8090',
     tcp,
     links: ['socket:[4242]'],
     alive: true,

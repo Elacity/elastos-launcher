@@ -10,8 +10,8 @@ A pin mismatch stops the install. The launcher does not clone a git tree and doe
 
 ## What a change has to keep
 
-- Health is `GET http://127.0.0.1:8090/healthz` with body `OK`.
-- Home is `http://127.0.0.1:8090/home/`.
+- Health is `GET http://localhost:8090/healthz` with body `OK`, probed on every address `localhost` resolves to (`src/main/targets/gatewayAddress.ts`, `probeGatewayHealth` in `src/main/targets/runtimeGateway.ts`).
+- Home is `http://localhost:8090/home/`.
 - Stop signals the gateway process group: `SIGTERM`, 15 seconds, then `SIGKILL`, and only after the pid has exited and `/healthz` has failed twice.
 - Reset and uninstall remove only the ElastOS program, its data directory, and the launcher stage file. Other home directories stay on disk.
 - IPC channel names are `elastos:*`. The preload object is `window.elastos`.

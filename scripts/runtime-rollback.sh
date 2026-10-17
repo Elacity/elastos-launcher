@@ -112,7 +112,7 @@ stop_gateway() {
   fi
   wait "${gw_pid}" 2>/dev/null || true
   gw_pid=""
-  if curl -fsS --max-time 2 http://127.0.0.1:8090/healthz >/dev/null 2>&1; then
+  if curl -fsS --max-time 2 http://localhost:8090/healthz >/dev/null 2>&1; then
     echo "Gateway still answering /healthz after stop" >&2
     exit 1
   fi
@@ -131,7 +131,7 @@ cleanup() {
 trap cleanup EXIT
 
 require_health() {
-  "${runtime_bin}" gateway --addr 127.0.0.1:8090 >"${gw_log}" 2>&1 &
+  "${runtime_bin}" gateway --addr localhost:8090 >"${gw_log}" 2>&1 &
   gw_pid=$!
   local healthy=0
   local _
@@ -141,7 +141,7 @@ require_health() {
       exit 1
     fi
     local body
-    body="$(curl -fsS --max-time 2 http://127.0.0.1:8090/healthz 2>/dev/null || true)"
+    body="$(curl -fsS --max-time 2 http://localhost:8090/healthz 2>/dev/null || true)"
     if [[ "${body}" == "OK" ]]; then
       healthy=1
       break

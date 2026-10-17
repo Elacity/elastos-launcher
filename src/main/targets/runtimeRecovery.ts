@@ -1,6 +1,7 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import { GATEWAY_PORT } from './gatewayAddress';
 import { confirmInstalledGateway, isHealthOk } from './runtimeGateway';
 import { installRuntimeOnThisComputer } from './runtimeInstall';
 import { launcherOwnedDirectories, runtimeBinaryPath, runtimeComponentsPath, runtimeDataDir, runtimeHostLockPath } from './runtimePaths';
@@ -293,7 +294,7 @@ export async function recheckPortWith(deps: {
 
 async function recheckPort(): Promise<'free' | 'ours' | 'busy'> {
   return recheckPortWith({
-    portBusy: () => portBusy(8090),
+    portBusy: () => portBusy(GATEWAY_PORT),
     confirm: () => confirmInstalledGateway(),
   });
 }
