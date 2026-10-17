@@ -107,6 +107,11 @@ function withinHome(candidate: string, homeDir: string, platform: string): boole
  * create. A custom data directory holding any other name is refused by name.
  * A publisher's `release-key.hex` and `releases` are not on this list, so a
  * reset never deletes a release signing key.
+ *
+ * This copies the runtime layout; the runtime publishes no list of its own.
+ * It was read from the runtime source of 0.8.0-alpha.22 (changelog commit
+ * 5f74c7c0) and of develop 9be009b1, which write the same top-level names.
+ * Paths below are in elastos/crates/elastos-server/src unless named.
  */
 const RUNTIME_DATA_NAMES = new Set([
   'AppCapsules', 'ElastOS', 'Local', 'MyWebSite', 'Public', 'Users', 'UsersAI', 'WebSpaces',
@@ -119,8 +124,56 @@ const RUNTIME_DATA_NAMES = new Set([
   'config', 'config.toml', 'providers', 'protected-content', 'model-preparation',
   'services-model-runs.json', 'services-model-remote-runs.json', 'operator-control.json',
   'backups', 'logs', 'policy', 'shares', 'storage', 'time_counter', 'audit.log', '.audit',
-  'crosvm', 'crosvm-empty', 'vz', 'vz-browser', 'rootfs-cache', 'Image', 'Runtime',
+  'crosvm', 'crosvm-empty', 'vz', 'vz-browser', 'rootfs-cache', 'Runtime',
+  // Community, which first setup joins (collaboration_release_network.rs:30-36,
+  // collaboration_startup.rs:34, collaboration_core.rs:2732).
+  '.collaboration-network-choice.lock', 'collaboration', 'collaboration-network-v1.json',
+  'collaboration-isolated-v1', 'collaboration-community-membership-v1.json',
+  // The IPFS provider's Kubo node (capsules/ipfs-provider/src/main.rs:558, 953, 2012).
+  'ipfs-repo', 'ipfs-startup.lock', 'ipfs-coords.json',
+  // Child runtimes (runtime_control.rs:527, runtime_control/gateway_children.rs:91)
+  // and `elastos run` provider hosts (provider_host.rs:28).
+  'managed-runtimes', 'gateway-owned-runtimes', 'run',
+  // Gateway and operator records (api/gateway_inspect_actions/store.rs:8,
+  // jev_approval_lens.rs:36, operator_control.rs:43-44).
+  'inspect-actions', 'jev-approval-lens', 'operator-control-audit.jsonl', 'operator-control-requests.jsonl',
+  // Linux Browser TURN credential (setup/browser_config.rs:530) and the chain
+  // provider's node state (capsules/chain-provider/src/lifecycle.rs:125).
+  'runtime-turn', 'chain-provider',
+  // Install and update recovery state, kept until the next run finishes it
+  // (installed_release.rs:21, install_transaction.rs:25-26 beside components.json
+  // and sources.json, install_transaction/support.rs:4).
+  '.elastos.installation-migrate', '.elastos.update-stage', '.elastos.update-rollback', '.elastos.update-support',
 ]);
+
+/**
+ * Temporary names the runtime writes beside a top-level file, then renames.
+ * A crash between the write and the rename leaves one behind. Each pattern is
+ * the exact name one writer uses, never a general `*.tmp`.
+ */
+const RUNTIME_DATA_TEMP_NAMES: readonly RegExp[] = [
+  // setup.rs:4552 sibling_scratch `.<name>.tmp-<pid>`, for components.json
+  // (setup.rs:707, 2933) and model-catalog.json (setup.rs:3014).
+  /^\.(components|model-catalog)\.json\.tmp-\d+$/,
+  // runtime_control.rs:692, 16 random bytes in hex, for gateway-runtime-coords.json only.
+  /^\.gateway-runtime-coords\.json\.[0-9a-f]{32}\.tmp$/,
+  // collaboration_release_network.rs:101 and :463.
+  /^\.community-membership\.[0-9a-f]{32}\.tmp$/,
+  /^\.collaboration-network-v1\.json\.release\.tmp$/,
+  // with_extension("tmp") on ipfs-coords.json (capsules/ipfs-provider/src/main.rs:2026,
+  // capsules/content-block-graph-provider/src/main.rs:473).
+  /^ipfs-coords\.tmp$/,
+  // with_extension("json.tmp") (api/gateway_model_service.rs:283, api/gateway_model_remote.rs:171).
+  /^services-model-(remote-)?runs\.json\.tmp$/,
+  // setup.rs:3872 tempfile::tempdir_in(data_dir): tempfile 3 names it `.tmp` and 6 letters or digits.
+  /^\.tmp[A-Za-z0-9]{6}$/,
+];
+
+/** True when `name` is a top-level name the runtime writes in its data directory. */
+export function isRuntimeDataName(name: string): boolean {
+  return RUNTIME_DATA_NAMES.has(name) || RUNTIME_DATA_TEMP_NAMES.some((pattern) => pattern.test(name));
+}
+
 /** What a half-finished install leaves. These alone need no signed record. */
 const RUNTIME_PARTIAL_FILES = new Set(['components.json', 'host-process.lock', 'sources.json']);
 /** install.sh writes the verified release head here before anything else runs. */
@@ -210,7 +263,7 @@ export function classifyRuntimeEntries(
   let partialOnly = true;
   for (const entry of [...entries].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))) {
     const plain = entry.kind === 'file' || entry.kind === 'dir';
-    if (!RUNTIME_DATA_NAMES.has(entry.name) || !plain) {
+    if (!isRuntimeDataName(entry.name) || !plain) {
       foreign.push(entry.name);
       continue;
     }

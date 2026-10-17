@@ -5,7 +5,7 @@ const path = require('node:path');
 const test = require('node:test');
 
 const { removeVerifiedTarget, resetRuntime, sweepRemovalHoldings } = require('../dist/main/targets/runtimeUninstall');
-const { foreignRuntimeDataMessage, launcherOwnedDirectories, signedInstallRecord } = require('../dist/main/targets/runtimePaths');
+const { foreignRuntimeDataMessage, isRuntimeDataName, launcherOwnedDirectories, signedInstallRecord } = require('../dist/main/targets/runtimePaths');
 const { ForeignGatewayError } = require('../dist/main/targets/runtimeGateway');
 const flow = require('../src/renderer/flow.js');
 
@@ -333,6 +333,107 @@ test('a real custom XDG install with a signed install record is reset', async ()
     const removed = [];
     await resetRuntime(resetDeps(home, data, env, removed));
     assert.equal(removed.includes(data), true);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+/**
+ * What `elastos setup` adds when it joins elastos.community. The first five
+ * names are the ones Windows CI job 117369675723 (run 39023450359) printed
+ * when Reset refused a real alpha.22 install and setup. That message cut the
+ * list at "and 1 more"; `ipfs-startup.lock` is the one runtime name that sorts
+ * after `ipfs-repo` and is written on every Kubo start (ipfs-provider main.rs:953).
+ */
+const SETUP_COMMUNITY_NAMES = [
+  '.collaboration-network-choice.lock', 'collaboration', 'collaboration-network-v1.json',
+  'ipfs-coords.json', 'ipfs-repo', 'ipfs-startup.lock',
+];
+
+function realSetupWithCommunity(data) {
+  realXdgInstall(data);
+  fs.mkdirSync(path.join(data, 'collaboration', 'config'), { recursive: true });
+  fs.writeFileSync(path.join(data, 'collaboration', 'config', 'accepted-profile-head-v1.json'), '{}');
+  fs.mkdirSync(path.join(data, 'ipfs-repo', 'blocks'), { recursive: true });
+  fs.writeFileSync(path.join(data, 'ipfs-repo', 'config'), '{}');
+  for (const file of ['.collaboration-network-choice.lock', 'collaboration-network-v1.json', 'ipfs-coords.json', 'ipfs-startup.lock']) {
+    fs.writeFileSync(path.join(data, file), 'x');
+  }
+}
+
+test('a custom XDG folder after a real install and a setup that joined elastos.community is reset', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'elastos-xdg-setup-'));
+  try {
+    const home = path.join(root, 'home');
+    const data = path.join(home, 'custom', 'elastos');
+    const env = { XDG_DATA_HOME: path.join(home, 'custom') };
+    realSetupWithCommunity(data);
+    for (const name of SETUP_COMMUNITY_NAMES) assert.ok(fs.existsSync(path.join(data, name)), name);
+    assert.equal(foreignRuntimeDataMessage(data, home, 'linux', env), null);
+    assert.equal(launcherOwnedDirectories(data, home, 'linux', env), true);
+    const removed = [];
+    await resetRuntime(resetDeps(home, data, env, removed));
+    assert.equal(removed.includes(data), true);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('a foreign name beside a real setup is still refused by name', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'elastos-xdg-setup-foreign-'));
+  try {
+    const home = path.join(root, 'home');
+    const data = path.join(home, 'custom', 'elastos');
+    const env = { XDG_DATA_HOME: path.join(home, 'custom') };
+    realSetupWithCommunity(data);
+    // A user folder, and names that look like runtime names but are not.
+    fs.mkdirSync(path.join(data, 'holiday-photos'));
+    fs.writeFileSync(path.join(data, 'holiday-photos', 'beach.jpg'), 'keep');
+    fs.mkdirSync(path.join(data, 'ipfs-repo.old'));
+    fs.writeFileSync(path.join(data, 'collaboration-network-v2.json'), 'keep');
+    // Only a runtime unit test writes `Image` in a data folder (setup.rs tests).
+    assert.equal(isRuntimeDataName('Image'), false);
+    assert.equal(launcherOwnedDirectories(data, home, 'linux', env), false);
+    const refused = [];
+    await assert.rejects(
+      () => resetRuntime(resetDeps(home, data, env, refused)),
+      new RegExp(`will not reset ${quote(data)} because it contains files that are not part of the runtime: collaboration-network-v2\\.json, holiday-photos, ipfs-repo\\.old\\.`),
+    );
+    assert.deepEqual(refused, []);
+    assert.equal(fs.readFileSync(path.join(data, 'holiday-photos', 'beach.jpg'), 'utf8'), 'keep');
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('a temporary file a crashed runtime write leaves is matched only by its exact name', () => {
+  const hex = '0123456789abcdef0123456789abcdef';
+  const runtimeTemps = [
+    '.components.json.tmp-4242', '.model-catalog.json.tmp-7',
+    `.gateway-runtime-coords.json.${hex}.tmp`, `.community-membership.${hex}.tmp`,
+    '.collaboration-network-v1.json.release.tmp', 'ipfs-coords.tmp',
+    'services-model-runs.json.tmp', 'services-model-remote-runs.json.tmp', '.tmpAb12Cd',
+  ];
+  for (const name of runtimeTemps) assert.equal(isRuntimeDataName(name), true, name);
+  const lookalikes = [
+    'notes.tmp', '.tmp', '.tmpAb12C', '.tmpAb12Cde', '.tmp-ab12cd', '.components.json.tmp-',
+    '.components.json.tmp-12a', '.sources.json.tmp-12', `.runtime-coords.json.${hex}.tmp`,
+    `.gateway-runtime-coords.json.${hex.toUpperCase()}.tmp`, `.community-membership.${hex}0.tmp`,
+    'ipfs-coords.json.tmp', 'services-model-runs.tmp', 'collaboration.tmp',
+  ];
+  for (const name of lookalikes) assert.equal(isRuntimeDataName(name), false, name);
+
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'elastos-xdg-temp-'));
+  try {
+    const home = path.join(root, 'home');
+    const data = path.join(home, 'custom', 'elastos');
+    const env = { XDG_DATA_HOME: path.join(home, 'custom') };
+    realSetupWithCommunity(data);
+    fs.writeFileSync(path.join(data, '.components.json.tmp-4242'), '{}');
+    fs.mkdirSync(path.join(data, '.tmpAb12Cd'));
+    assert.equal(launcherOwnedDirectories(data, home, 'linux', env), true);
+    fs.writeFileSync(path.join(data, 'notes.tmp'), 'keep');
+    assert.match(foreignRuntimeDataMessage(data, home, 'linux', env), /not part of the runtime: notes\.tmp\./);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
