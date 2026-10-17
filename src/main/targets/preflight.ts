@@ -199,37 +199,71 @@ function isDiagnosticHex(token: string, line: string): boolean {
   return /\b(sha-?256|sha-?1|checksum|hash|cid|commit|installer)\b/i.test(line);
 }
 
-/** A 12- or 24-word BIP39 phrase. Shorter text, including `secret-line`, stays. */
-function redactMnemonicPhrases(line: string): string {
-  return line.replace(/[a-z]+(?:[ \t]+[a-z]+){11,}/g, (phrase) => {
-    const words = phrase.split(/[ \t]+/);
-    const drop = words.map(() => false);
-    for (const size of [24, 12]) {
-      if (words.length < size) continue;
-      for (let start = 0; start <= words.length - size; start += 1) {
-        let mnemonic = true;
-        for (let offset = 0; offset < size; offset += 1) {
-          if (!BIP39_ENGLISH.has(words[start + offset])) {
-            mnemonic = false;
-            break;
-          }
-        }
-        if (!mnemonic) continue;
-        for (let offset = 0; offset < size; offset += 1) drop[start + offset] = true;
-      }
+/**
+ * Separators a person or a tool puts between seed words: spaces, line breaks,
+ * commas, hyphens, quotes, brackets, and numbering such as `1.`, `2:` or `(3)`.
+ * Other letters, and a colon after a word (`seed: ...`), end the run.
+ */
+const MNEMONIC_GAP = /^(?:[\s,;'"`\[\](){}<>|\/.\-\u2013\u2014*#]|\d+:?){1,16}$/;
+
+/**
+ * Remove a run of 12 or more BIP39 words. Case does not matter, and the words
+ * may be split over lines or joined by commas, hyphens, quotes, or numbers.
+ * Shorter text, including `secret-line`, stays.
+ */
+function redactMnemonicRuns(text: string): string {
+  const words = [...text.matchAll(/[A-Za-z]+/g)].map((match) => ({
+    start: match.index ?? 0,
+    end: (match.index ?? 0) + match[0].length,
+    bip39: BIP39_ENGLISH.has(match[0].toLowerCase()),
+  }));
+  const runs: Array<[number, number]> = [];
+  let first = -1;
+  const close = (last: number) => {
+    if (first >= 0 && last - first + 1 >= 12) runs.push([words[first].start, words[last].end]);
+    first = -1;
+  };
+  for (let index = 0; index < words.length; index += 1) {
+    const word = words[index];
+    if (!word.bip39) {
+      close(index - 1);
+      continue;
     }
-    if (!drop.some(Boolean)) return phrase;
-    const kept: string[] = [];
-    for (let index = 0; index < words.length; index += 1) {
-      if (!drop[index]) {
-        kept.push(words[index]);
-        continue;
-      }
-      if (kept[kept.length - 1] !== '[removed]') kept.push('[removed]');
-      while (index + 1 < words.length && drop[index + 1]) index += 1;
+    if (first >= 0 && !MNEMONIC_GAP.test(text.slice(words[index - 1].end, word.start))) close(index - 1);
+    if (first < 0) first = index;
+  }
+  close(words.length - 1);
+  let out = text;
+  for (const [start, end] of runs.reverse()) out = `${out.slice(0, start)}[removed]${out.slice(end)}`;
+  return out;
+}
+
+const HEX_LINE = /^\s*(?:0[xX])?([0-9a-fA-F]+)\s*$/;
+
+/**
+ * A key wrapped over several lines. Two or more lines in a row that hold only
+ * hex, with 32 or more hex characters together, are removed unless every line
+ * is a whole 40- or 64-character hash.
+ */
+function redactWrappedHex(lines: string[]): string[] {
+  const out = [...lines];
+  let index = 0;
+  while (index < lines.length) {
+    if (!HEX_LINE.test(lines[index])) {
+      index += 1;
+      continue;
     }
-    return kept.join(' ');
-  });
+    let end = index;
+    while (end + 1 < lines.length && HEX_LINE.test(lines[end + 1])) end += 1;
+    const pieces = lines.slice(index, end + 1).map((line) => (HEX_LINE.exec(line) as RegExpExecArray)[1]);
+    const total = pieces.reduce((sum, piece) => sum + piece.length, 0);
+    const wholeHashes = pieces.every((piece) => piece.length === 40 || piece.length === 64);
+    if (pieces.length >= 2 && total >= 32 && !wholeHashes) {
+      for (let at = index; at <= end; at += 1) out[at] = '[removed]';
+    }
+    index = end + 1;
+  }
+  return out;
 }
 
 /** Paths, hashes, ids, and names a support bundle needs. A mixed-case secret is not one of these. */
@@ -252,6 +286,8 @@ function keepDiagnosticToken(token: string, line: string): boolean {
 function redactHighEntropy(line: string): string {
   return line.replace(HIGH_ENTROPY, (token) => {
     if (KNOWN_SECRET.test(token)) return '[removed]';
+    const bare = token.replace(/^0[xX]/, '');
+    if (bare !== token && /^[0-9a-fA-F]{32,}$/.test(bare) && !isDiagnosticHex(bare, line)) return '[removed]';
     if (keepDiagnosticToken(token, line)) return token;
     if (/^[0-9a-fA-F]{32,}$/.test(token)) return '[removed]';
     if (/^[A-Z][A-Z0-9]{15,}$/.test(token) && /\d/.test(token)) return '[removed]';
@@ -264,7 +300,9 @@ function redactHighEntropy(line: string): string {
 
 /**
  * Drop PEM and coordinate-file lines. Redact labeled secrets, the rest of a
- * seed, mnemonic, private_key, or secret line, a 12- or 24-word BIP39 phrase,
+ * seed, mnemonic, private_key, or secret line, a run of 12 or more BIP39 words
+ * in any case and split by spaces, lines, commas, or numbering, hex wrapped
+ * over several lines,
  * known secret prefixes (AWS keys, ghp_ tokens, sk- keys), hex of 32 or more
  * characters including a 64-character hex string that is not on a sha256 or
  * hash line, and an unlabeled mixed-case token of 20 or more characters with
@@ -275,10 +313,10 @@ function redactHighEntropy(line: string): string {
  */
 export function scrubSupportText(text: string): string {
   const shielded = shieldKeptTokens(text);
-  const scrubbed = shielded.text
+  const scrubbed = redactWrappedHex(redactMnemonicRuns(shielded.text)
     .split('\n')
-    .filter((line) => !DROP_SUPPORT_LINE.test(line))
-    .map((line) => redactHighEntropy(redactMnemonicPhrases(line
+    .filter((line) => !DROP_SUPPORT_LINE.test(line)))
+    .map((line) => redactHighEntropy((line
       .replace(/\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/g, '[removed]')
       .replace(/(\battach_secret\s*[:=]\s*)\S+/gi, '$1[removed]')
       .replace(/(\bapi[_-]?key\s*[:=]\s*)\S+/gi, '$1[removed]')
