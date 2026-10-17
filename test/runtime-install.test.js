@@ -317,7 +317,7 @@ test('Intel Mac gets a friendly message and does not download', async () => {
       return '';
     },
   });
-  await assert.rejects(() => installRuntime(deps, () => {}), /not yet supported on Intel Macs/);
+  await assert.rejects(() => installRuntime(deps, () => {}), /Error: Intel Mac is not supported yet\.$/);
   assert.equal(fetched, false);
   const plan = planRuntimeInstall({
     platform: 'darwin',

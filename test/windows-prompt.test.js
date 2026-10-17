@@ -58,12 +58,15 @@ test('linux and Apple silicon install, Intel waits for a signed release', () => 
   assert.equal(runtimeInstallBlock('linux', 'x64'), null);
   assert.equal(runtimeInstallBlock('linux', 'arm64'), null);
   assert.equal(runtimeInstallBlock('darwin', 'arm64'), null);
-  assert.match(runtimeInstallBlock('darwin', 'x64'), /not yet supported on Intel Macs/);
+  assert.equal(runtimeInstallBlock('darwin', 'x64'), 'Intel Mac is not supported yet.');
+  const intelPrompt = hostPrompt({ platform: 'darwin', arch: 'x64', wslInstalled: false, distroReady: false });
+  assert.equal(intelPrompt.title, 'Intel Mac is not supported yet');
+  assert.equal(/source|developer|build|signed|cargo|git/i.test(`${intelPrompt.title} ${intelPrompt.body} ${runtimeInstallBlock('darwin', 'x64')}`), false);
   assert.equal(/terminal|powershell/i.test(runtimeInstallBlock('darwin', 'x64')), false);
   const intel = failureScreen(facts({
     checks: [{ id: 'platform', level: 'block', message: runtimeInstallBlock('darwin', 'x64') }],
   }));
-  assert.match(intel.message, /Intel Macs/);
+  assert.equal(intel.message, 'Intel Mac is not supported yet.');
   assert.equal(intel.fixLabel, null);
 });
 

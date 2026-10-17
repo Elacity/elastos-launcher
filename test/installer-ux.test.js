@@ -44,7 +44,7 @@ test('preflight blocks disk, offline, a busy port, and Intel Mac', () => {
   assert.equal(already.checks.find((check) => check.id === 'port').level, 'pass');
 
   const intel = evaluatePreflight({ ...base, platform: 'darwin', arch: 'x64' });
-  assert.match(intel.checks.find((check) => check.id === 'platform').message, /Intel Macs/);
+  assert.equal(intel.checks.find((check) => check.id === 'platform').message, 'Intel Mac is not supported yet.');
 
   const kvm = evaluatePreflight({ ...base, wsl: true, kvm: false });
   assert.equal(kvm.ok, true);

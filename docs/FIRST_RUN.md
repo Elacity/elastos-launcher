@@ -22,7 +22,7 @@ The pinned `install.sh` is not changed. It still requires `bash`, `curl`, a `pyt
 | Reboot | None for Install. | None for Install. | Possible, only when Linux support was off. |
 | Disk | About 2 GB free. | About 2 GB free. | About 2 GB free. |
 
-Intel Macs stop with “not yet supported on Intel Macs”. Nothing is downloaded.
+Intel Macs stop with “Intel Mac is not supported yet.” Nothing is downloaded.
 
 ## macOS
 

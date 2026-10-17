@@ -11,7 +11,7 @@ The window talks to the main process through `window.elastos` and `elastos:*` IP
 ## Platforms
 
 - Linux x64 and macOS Apple silicon install the pinned runtime directly.
-- Intel Macs show “not yet supported on Intel Macs” until a signed release exists.
+- Intel Macs show “Intel Mac is not supported yet.” until a signed release exists.
 - Windows installs the Linux runtime inside a dedicated WSL2 distro named `ElastOS` and opens Home in the Windows browser.
 
 ## Signing

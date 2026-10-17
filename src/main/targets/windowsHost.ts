@@ -37,8 +37,8 @@ export function hostPrompt(facts: WindowsFacts): HostPrompt {
   if (facts.platform === 'darwin' && facts.arch === 'x64') {
     return {
       kind: 'intel',
-      title: 'Intel Macs are not ready yet',
-      body: 'A signed ElastOS release for this Mac is not published yet. Nothing was downloaded.',
+      title: 'Intel Mac is not supported yet',
+      body: 'Nothing was downloaded.',
       actionLabel: null,
     };
   }

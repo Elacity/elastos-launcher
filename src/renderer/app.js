@@ -453,7 +453,7 @@ window.elastos.onUpdateProgress((message) => {
 async function refreshVersion() {
   try {
     const version = await window.elastos.getVersion();
-    versionEl.textContent = !version || version === 'not installed' || version.includes('not yet supported')
+    versionEl.textContent = !version || version === 'not installed' || /not supported/i.test(version)
       ? '—'
       : (version.startsWith('v') || version.startsWith('ElastOS') ? version : `v${version}`);
   } catch {

@@ -1,8 +1,8 @@
 import { RUNTIME_TARGET } from './descriptors';
 import { targetSupportsHost } from './registry';
 
-export const INTEL_MAC_MESSAGE =
-  'ElastOS is not yet supported on Intel Macs. A signed release for this Mac is not published yet.';
+/** The words the team chose. It does not point to a developer build. */
+export const INTEL_MAC_MESSAGE = 'Intel Mac is not supported yet.';
 
 export const WINDOWS_NATIVE_MESSAGE =
   'ElastOS on Windows runs in its own Linux environment. Click Enable. Windows will ask for permission once. You do not type any commands.';
