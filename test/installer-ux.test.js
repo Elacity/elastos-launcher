@@ -156,3 +156,19 @@ test('preflight blocks when localhost does not point to this computer', () => {
   }
   assert.equal(evaluatePreflight(base).checks.some((check) => check.id === 'localhost'), false);
 });
+
+test('Windows shows that its Browser is not available yet, and only Windows', () => {
+  const { browserNote, WINDOWS_BROWSER_MESSAGE } = require('../dist/main/targets/runtimeSupport');
+  assert.equal(WINDOWS_BROWSER_MESSAGE, 'Browser is not available on this computer yet.');
+  assert.equal(browserNote('win32'), WINDOWS_BROWSER_MESSAGE);
+  for (const platform of ['darwin', 'linux']) assert.equal(browserNote(platform), null);
+  assert.equal(flow.browserNoteText({ browserNote: WINDOWS_BROWSER_MESSAGE }), WINDOWS_BROWSER_MESSAGE);
+  assert.equal(flow.browserNoteText({ browserNote: null }), '');
+  assert.equal(flow.browserNoteText(undefined), '');
+  const html = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'index.html'), 'utf8');
+  assert.match(html, /<div class="info-row single hidden" id="browser-row">/);
+  const app = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'app.js'), 'utf8');
+  assert.match(app, /browserRow\.classList\.toggle\('hidden', !browserText\)/);
+  const controller = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'launchController.ts'), 'utf8');
+  assert.match(controller, /browserNote: browserNote\(process\.platform\)/);
+});

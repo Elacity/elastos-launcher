@@ -51,6 +51,7 @@ The Linux test is an `ubuntu:24.04` container with curl, python3, and gcc absent
 2. Windows asks for permission once. If Windows says a restart is required, ElastOS says: Restart Windows. When you open ElastOS again, Install continues.
 3. After the restart, if Linux support is on, opening ElastOS continues Install. The app adds its own Linux environment, installs python3 and curl there if they are missing, and installs the runtime. If Linux support is still off, Install waits.
 4. The button becomes Open my computer. The page opens in the Windows browser at `http://localhost:8090/home/`.
+5. The info panel says: Browser is not available on this computer yet. The in-computer Browser does not run on Windows yet. Home opens in the Windows browser.
 
 The ElastOS Linux environment is not removed by Remove PC2.
 

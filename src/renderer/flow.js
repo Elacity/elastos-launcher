@@ -89,6 +89,11 @@ function legacyPc2Copy(items) {
   };
 }
 
+/** The info-panel Browser line. The main process sends it on Windows only. */
+function browserNoteText(info) {
+  return info && typeof info.browserNote === 'string' ? info.browserNote : '';
+}
+
 function urlLabel(openUrl) {
   return String(openUrl || '').replace(/^https?:\/\//, '').replace(/\/$/, '');
 }
@@ -103,6 +108,7 @@ const api = {
   firstRunCopy,
   formatBytes,
   legacyPc2Copy,
+  browserNoteText,
   urlLabel,
 };
 

@@ -35,6 +35,8 @@ const urlValue = document.getElementById('url-value');
 const removePc2Btn = document.getElementById('remove-pc2-btn');
 const confirmBackupRow = document.getElementById('confirm-backup-row');
 const confirmBackup = document.getElementById('confirm-backup');
+const browserRow = document.getElementById('browser-row');
+const browserNote = document.getElementById('browser-note');
 
 let currentStatus = 'stopped';
 let confirmMode = 'uninstall';
@@ -428,6 +430,9 @@ async function refreshLaunch() {
   openUrl = info.openUrl;
   if (rollbackBtn) rollbackBtn.classList.toggle('hidden', !info.canRollback);
   loginCheckbox.checked = Boolean(info.openAtLogin);
+  const browserText = flow.browserNoteText(info);
+  browserNote.textContent = browserText;
+  browserRow.classList.toggle('hidden', !browserText);
   const blocks = (info.preflight.checks || []).filter((check) => check.level === 'block' || check.level === 'warn');
   if (info.platformNote || blocks.length) {
     platformNote.textContent = info.platformNote || blocks.map((check) => check.message).join(' ');

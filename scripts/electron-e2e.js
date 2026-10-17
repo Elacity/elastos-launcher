@@ -194,6 +194,16 @@ async function main() {
           throw new Error(`/healthz on localhost was not OK (${health ? `HTTP ${health.status}` : 'no answer'})`);
         }
         console.log(`Home is ${HOME_URL}; /healthz is OK on ${health.addresses.join(', ')}`);
+        const browserRowHidden = await page.locator('#browser-row').evaluate((node) => node.classList.contains('hidden'));
+        const browserText = (await page.locator('#browser-note').innerText()).trim();
+        if (process.platform === 'win32') {
+          if (browserRowHidden || browserText !== 'Browser is not available on this computer yet.') {
+            throw new Error(`Windows must say the Browser is not available yet (shown: ${browserRowHidden ? 'hidden' : browserText})`);
+          }
+          console.log(`Browser note: ${browserText}`);
+        } else if (!browserRowHidden) {
+          throw new Error(`Only Windows shows a Browser note (shown: ${browserText})`);
+        }
         console.log('Install reached Open my computer');
         return;
       }

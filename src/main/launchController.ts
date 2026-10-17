@@ -8,6 +8,7 @@ import { LAUNCH_TARGET_ENV, retiredPc2Notice } from './targets/registry';
 import { createLaunchTarget } from './targets';
 import { setRuntimeLogSink } from './targets/runtimeGateway';
 import { loadActiveRuntimePin } from './targets/runtimePin';
+import { browserNote } from './targets/runtimeSupport';
 import { runtimeHeadStore } from './targets/runtimeUpdate';
 import { rollbackRuntimeUpdate } from './targets/runtimeTarget';
 import { resetRuntimeOnThisComputer } from './targets/runtimeUninstall';
@@ -115,6 +116,8 @@ export interface LaunchInfo {
   openUrl: string;
   status: TargetStatus;
   platformNote: string | null;
+  /** Shown in the info panel. Windows only: its Browser is not available yet. */
+  browserNote: string | null;
   preflight: PreflightReport;
   openAtLogin: boolean;
   canRollback: boolean;
@@ -264,6 +267,7 @@ export function createLaunchController(options: LaunchControllerOptions = {}): L
         openUrl: active.descriptor.openUrl,
         status,
         platformNote: platform?.message ?? null,
+        browserNote: browserNote(process.platform),
         preflight,
         openAtLogin: readOpenAtLogin(),
         canRollback: Boolean(runtimeHeadStore().get()),

@@ -367,6 +367,16 @@ body {
   letter-spacing: 0.3px;
 }
 
+#browser-row {
+  border-top: 1px solid var(--border);
+}
+
+.info-note {
+  color: var(--text-normal);
+  font-size: 12px;
+  text-align: right;
+}
+
 .info-value {
   color: var(--text-normal);
   font-size: 12px;
