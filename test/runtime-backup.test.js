@@ -323,5 +323,5 @@ test('the packaged app loads the backup worker from app.asar, where its imports 
   assert.equal(backupWorkerScript(), path.join(__dirname, '..', 'dist', 'main', 'runtimeBackupWorker.js'));
   const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8'));
   // An unpacked worker cannot require ./targets/runtimeBackup, which stays in app.asar.
-  assert.equal(pkg.build.asarUnpack.includes('dist/main/runtimeBackupWorker.js'), false);
+  assert.equal((pkg.build.asarUnpack || []).includes('dist/main/runtimeBackupWorker.js'), false);
 });

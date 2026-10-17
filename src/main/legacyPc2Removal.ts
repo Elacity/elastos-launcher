@@ -1145,11 +1145,13 @@ export function legacyPc2DescribeRuns(): number {
   return describeRuns;
 }
 
-function legacyPc2WorkerScript(): string {
-  const bundled = path.join(__dirname, 'legacyPc2Worker.js');
-  const unpacked = bundled.replace(`${path.sep}app.asar${path.sep}`, `${path.sep}app.asar.unpacked${path.sep}`);
-  if (unpacked !== bundled && fs.existsSync(unpacked)) return unpacked;
-  return bundled;
+/**
+ * The worker loads from inside app.asar. Electron reads asar in worker
+ * threads. An unpacked copy could not require ./legacyPc2Removal, which
+ * stays in app.asar, so Remove PC2 never appeared in a packaged build.
+ */
+export function legacyPc2WorkerScript(): string {
+  return path.join(__dirname, 'legacyPc2Worker.js');
 }
 
 function runPc2Worker<T>(
