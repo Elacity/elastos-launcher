@@ -7,6 +7,7 @@ const test = require('node:test');
 const { removeVerifiedTarget, resetRuntime, sweepRemovalHoldings } = require('../dist/main/targets/runtimeUninstall');
 const { foreignRuntimeDataMessage, isRuntimeDataName, launcherOwnedDirectories, signedInstallRecord } = require('../dist/main/targets/runtimePaths');
 const { ForeignGatewayError } = require('../dist/main/targets/runtimeGateway');
+const { applyFix, failureScreen } = require('../dist/main/targets/runtimeRecovery');
 const flow = require('../src/renderer/flow.js');
 
 test('reset removes the runtime program, data, and unfinished install', async () => {
@@ -470,7 +471,7 @@ test('a lock, a components manifest, or a forged install record does not prove a
     const home = path.join(root, 'home');
     const data = path.join(home, 'custom', 'elastos');
     const env = { XDG_DATA_HOME: path.join(home, 'custom') };
-    const unproved = new RegExp(`will not reset ${quote(data)} because it has no signed ElastOS install record`);
+    const unproved = new RegExp(`ElastOS did not reset ${quote(data)}\\. This folder has no signed ElastOS install record`);
     // The markers that used to be enough: a gateway lock, a manifest, coordinates, and folders with runtime names.
     fs.mkdirSync(path.join(data, 'capsules'), { recursive: true });
     fs.mkdirSync(path.join(data, 'Users', 'me'), { recursive: true });
@@ -502,6 +503,90 @@ test('a lock, a components manifest, or a forged install record does not prove a
     assert.equal(launcherOwnedDirectories(data, home, 'linux', env), false);
     assert.deepEqual(refused, []);
     assert.equal(fs.readFileSync(path.join(data, 'Users', 'me', 'photo.jpg'), 'utf8'), 'keep');
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('the default data folder is reset by its path alone, with no install record and no name check', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'elastos-default-old-'));
+  try {
+    const home = path.join(root, 'home');
+    // An install from before the runtime wrote installation/, plus a name Reset does not know.
+    const data = path.join(home, '.local', 'share', 'elastos');
+    realXdgInstall(data);
+    fs.rmSync(path.join(data, 'installation'), { recursive: true });
+    fs.writeFileSync(path.join(data, 'notes.txt'), 'x');
+    assert.equal(signedInstallRecord(data), false);
+    assert.equal(launcherOwnedDirectories(data, home, 'linux', {}), true);
+    assert.equal(launcherOwnedDirectories(path.join(home, 'Library', 'Application Support', 'elastos'), home, 'darwin', {}), true);
+    const removed = [];
+    await resetRuntime(resetDeps(home, data, {}, removed));
+    assert.ok(removed.includes(data));
+    // The same folder named by $XDG_DATA_HOME is checked by name and by record.
+    const env = { XDG_DATA_HOME: path.join(home, 'custom') };
+    const custom = path.join(home, 'custom', 'elastos');
+    realXdgInstall(custom);
+    fs.rmSync(path.join(custom, 'installation'), { recursive: true });
+    assert.equal(launcherOwnedDirectories(custom, home, 'linux', env), false);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('an old custom XDG install with no installation folder says in plain words to click Fix it, then Reset', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'elastos-xdg-old-'));
+  try {
+    const home = path.join(root, 'home');
+    const data = path.join(home, 'custom', 'elastos');
+    const env = { XDG_DATA_HOME: path.join(home, 'custom') };
+    realXdgInstall(data);
+    fs.rmSync(path.join(data, 'installation'), { recursive: true });
+    const removed = [];
+    let message = '';
+    await assert.rejects(() => resetRuntime(resetDeps(home, data, env, removed)), (err) => {
+      message = err.message;
+      return true;
+    });
+    assert.deepEqual(removed, []);
+    assert.equal(message, `ElastOS did not reset ${data}. This folder has no signed ElastOS install record, so ElastOS cannot prove `
+      + 'that it made the folder. An older ElastOS can cause this. Click Fix it to install ElastOS again. This keeps your data. '
+      + 'Then click Reset again. Nothing was deleted.');
+    // A stale host lock or a missing components.json does not hide this screen.
+    const facts = {
+      error: message,
+      checks: [],
+      binaryPresent: true,
+      componentsPresent: false,
+      lockText: JSON.stringify({ pid: 4242, role: 'gateway', addr: 'localhost:8090' }),
+      lockPath: path.join(data, 'host-process.lock'),
+      pidAlive: () => false,
+    };
+    const screen = failureScreen(facts);
+    assert.deepEqual(screen, {
+      kind: 'no-record',
+      title: 'Install ElastOS again, then reset',
+      message,
+      retryLabel: 'Try again',
+      fixLabel: 'Fix it',
+    });
+    // Fix it changes nothing itself. The window then runs Install, which writes the signed record.
+    const calls = [];
+    const fail = (name) => async () => { calls.push(name); throw new Error(`${name} must not run`); };
+    assert.equal(await applyFix(facts, {
+      recheckPort: fail('port'),
+      recheckOnline: fail('online'),
+      resumeSetup: fail('setup'),
+      removeLock: (file) => { calls.push(['remove', file]); },
+    }), 'ready');
+    assert.deepEqual(calls, []);
+    assert.ok(fs.existsSync(facts.lockPath));
+    // Once Install has written the record, Reset can prove the folder.
+    fs.mkdirSync(path.join(data, 'installation'));
+    fs.writeFileSync(path.join(data, 'installation', 'release-head.json'), SIGNED_HEAD);
+    fs.writeFileSync(path.join(data, 'installation', 'release.json'), 'x');
+    await resetRuntime(resetDeps(home, data, env, removed));
+    assert.ok(removed.includes(data));
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

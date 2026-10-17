@@ -150,24 +150,37 @@ const RUNTIME_DATA_NAMES = new Set([
  * Temporary names the runtime writes beside a top-level file, then renames.
  * A crash between the write and the rename leaves one behind. Each pattern is
  * the exact name one writer uses, never a general `*.tmp`.
+ *
+ * These first ones are the temporary copies of files that a Reset copy leaves
+ * out (`RUNTIME_BACKUP_EXCLUDES` in runtimeBackup.ts): live process state, or
+ * files that Install and setup write again. A crashed one is left out of the
+ * copy too. The gateway coords file holds the local attach secret.
  */
-const RUNTIME_DATA_TEMP_NAMES: readonly RegExp[] = [
+export const RUNTIME_LEFT_OUT_TEMP_NAMES: readonly RegExp[] = [
   // setup.rs:4552 sibling_scratch `.<name>.tmp-<pid>`, for components.json
   // (setup.rs:707, 2933) and model-catalog.json (setup.rs:3014).
   /^\.(components|model-catalog)\.json\.tmp-\d+$/,
-  // runtime_control.rs:692, 16 random bytes in hex, for gateway-runtime-coords.json only.
+  // runtime_control.rs:692, 16 random bytes in hex, mode 0600 (:700). Its one
+  // caller writes gateway-runtime-coords.json (runtime_control.rs:659).
   /^\.gateway-runtime-coords\.json\.[0-9a-f]{32}\.tmp$/,
-  // collaboration_release_network.rs:101 and :463.
-  /^\.community-membership\.[0-9a-f]{32}\.tmp$/,
-  /^\.collaboration-network-v1\.json\.release\.tmp$/,
   // with_extension("tmp") on ipfs-coords.json (capsules/ipfs-provider/src/main.rs:2026,
   // capsules/content-block-graph-provider/src/main.rs:473).
   /^ipfs-coords\.tmp$/,
-  // with_extension("json.tmp") (api/gateway_model_service.rs:283, api/gateway_model_remote.rs:171).
-  /^services-model-(remote-)?runs\.json\.tmp$/,
-  // setup.rs:3872 tempfile::tempdir_in(data_dir): tempfile 3 names it `.tmp` and 6 letters or digits.
+  // setup.rs:3872 tempfile::tempdir_in(data_dir), the update staging folder:
+  // tempfile 3 names it `.tmp` and 6 letters or digits.
   /^\.tmp[A-Za-z0-9]{6}$/,
 ];
+
+/** Temporary copies of files a Reset copy keeps: the Community choice and the model run records. */
+const RUNTIME_KEPT_TEMP_NAMES: readonly RegExp[] = [
+  // collaboration_release_network.rs:101 and :463.
+  /^\.community-membership\.[0-9a-f]{32}\.tmp$/,
+  /^\.collaboration-network-v1\.json\.release\.tmp$/,
+  // with_extension("json.tmp") (api/gateway_model_service.rs:283, api/gateway_model_remote.rs:171).
+  /^services-model-(remote-)?runs\.json\.tmp$/,
+];
+
+const RUNTIME_DATA_TEMP_NAMES: readonly RegExp[] = [...RUNTIME_LEFT_OUT_TEMP_NAMES, ...RUNTIME_KEPT_TEMP_NAMES];
 
 /** True when `name` is a top-level name the runtime writes in its data directory. */
 export function isRuntimeDataName(name: string): boolean {
@@ -314,6 +327,12 @@ export function listNames(names: string[]): string {
   return names.length > 5 ? `${shown}, and ${names.length - 5} more` : shown;
 }
 
+/**
+ * Part of the refusal for a folder with no signed install record. The failure
+ * screen (runtimeRecovery.ts) finds the refusal by these words.
+ */
+export const NO_INSTALL_RECORD = 'has no signed ElastOS install record';
+
 /** Names the path, and the entries, when a custom data directory is not one Reset may delete. */
 export function foreignRuntimeDataMessage(
   dataDir: string,
@@ -330,7 +349,7 @@ export function foreignRuntimeDataMessage(
     return `will not reset ${dataDir} because it contains files that are not part of the runtime${named}. Move those files out, then reset.`;
   }
   if (contents.kind === 'unproved') {
-    return `will not reset ${dataDir} because it has no signed ElastOS install record. ElastOS deletes only a folder it can prove it installed.`;
+    return `ElastOS did not reset ${dataDir}. This folder ${NO_INSTALL_RECORD}, so ElastOS cannot prove that it made the folder. An older ElastOS can cause this. Click Fix it to install ElastOS again. This keeps your data. Then click Reset again. Nothing was deleted.`;
   }
   return null;
 }
@@ -350,14 +369,26 @@ function customXdgDataDir(
 }
 
 /**
- * True only for an exact default runtime path of this account, or for an XDG
- * data directory under that home that is empty, holds only
- * `components.json`, `host-process.lock`, and `sources.json`, or holds only
- * runtime names and an install record signed by the pinned maintainer.
+ * True only for an exact launcher or runtime path of this account:
+ * - The program, the install stage, the resume marker and its lock, and the
+ *   support file.
+ * - The default data directory (`~/.local/share/elastos`, or
+ *   `~/Library/Application Support/elastos` on macOS) and its host lock.
+ *   This is accepted by its path alone. Its contents are not checked: there
+ *   is no name check and no signed install record check. The launcher
+ *   contract fixes this path for the runtime ("Data directory and lock" in
+ *   the runtime's docs/LAUNCHER_CONTRACT.md). An install from before the
+ *   runtime wrote `installation/` (runtime f13bb9de, 3 October 2026) has no
+ *   record, and Reset is how a person clears an old or broken install. The
+ *   Reset dialog asks first and offers a copy of the data.
+ * - A custom `$XDG_DATA_HOME/elastos` under that home, only when it is empty,
+ *   holds only `components.json`, `host-process.lock`, and `sources.json`, or
+ *   holds only runtime names and an install record signed by the pinned
+ *   maintainer. `$XDG_DATA_HOME` can name any folder, so here a user file is
+ *   refused by name even when the signed record is present.
  * The home defaults to `os.homedir()`. A relative path, a `..` segment,
  * another account, a data directory outside that home, and a bare
- * `<dir>/elastos` are refused. A user file is refused by name even when the
- * signed record is present.
+ * `<dir>/elastos` are refused.
  */
 export function launcherOwnedDirectories(
   file: string,
