@@ -288,6 +288,12 @@ function listNames(names: string[]): string {
   return names.length > 5 ? `${shown}, and ${names.length - 5} more` : shown;
 }
 
+/**
+ * Part of the refusal for a folder with no signed install record. The failure
+ * screen (runtimeRecovery.ts) finds the refusal by these words.
+ */
+export const NO_INSTALL_RECORD = 'has no signed ElastOS install record';
+
 /** Names the path, and the entries, when a custom data directory is not one Reset may delete. */
 export function foreignRuntimeDataMessage(
   dataDir: string,
@@ -304,7 +310,7 @@ export function foreignRuntimeDataMessage(
     return `will not reset ${dataDir} because it contains files that are not part of the runtime${named}. Move those files out, then reset.`;
   }
   if (contents.kind === 'unproved') {
-    return `will not reset ${dataDir} because it has no signed ElastOS install record. ElastOS deletes only a folder it can prove it installed.`;
+    return `ElastOS did not reset ${dataDir}. This folder ${NO_INSTALL_RECORD}, so ElastOS cannot prove that it made the folder. An older ElastOS can cause this. Click Fix it to install ElastOS again. This keeps your data. Then click Reset again. Nothing was deleted.`;
   }
   return null;
 }
