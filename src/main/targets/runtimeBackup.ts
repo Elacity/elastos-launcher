@@ -230,11 +230,13 @@ export function writeRuntimeBackup(input: {
   throw new Error('Too many backups were saved this second. Wait a moment and try again.');
 }
 
-function backupWorkerScript(): string {
-  const bundled = path.join(__dirname, '..', 'runtimeBackupWorker.js');
-  const unpacked = bundled.replace(`${path.sep}app.asar${path.sep}`, `${path.sep}app.asar.unpacked${path.sep}`);
-  if (unpacked !== bundled && fs.existsSync(unpacked)) return unpacked;
-  return bundled;
+/**
+ * The worker loads from inside app.asar. Electron reads asar in worker
+ * threads. An unpacked copy could not require its imports, which stay in
+ * app.asar.
+ */
+export function backupWorkerScript(): string {
+  return path.join(__dirname, '..', 'runtimeBackupWorker.js');
 }
 
 export interface BackupWorkerJob {
