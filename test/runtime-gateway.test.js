@@ -643,7 +643,19 @@ test('signalProcessGroup kills the leader and a child in that group', async () =
         resolve();
       });
     });
-    await new Promise((resolve) => setTimeout(resolve, 200));
+    // The orphaned child is reaped by init, which can take longer than a
+    // fixed wait on a busy machine. Poll instead of sleeping once.
+    const gone = () => {
+      try {
+        process.kill(grandchild, 0);
+        return false;
+      } catch {
+        return true;
+      }
+    };
+    for (let waited = 0; waited < 5000 && !gone(); waited += 50) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
     assert.throws(() => process.kill(grandchild, 0));
   } finally {
     try { process.kill(-(child.pid), 'SIGKILL'); } catch { /* already gone */ }
