@@ -174,6 +174,8 @@ export interface BackupDescription {
   freeBytes: number | null;
   enough: boolean;
   folder: string;
+  /** A plain reason Reset cannot run yet. The dialog shows it and keeps Reset off. */
+  blocked?: string;
 }
 
 /** The closest existing folder at or above `dir`, for a free-space read before the folder exists. */

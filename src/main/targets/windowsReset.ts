@@ -135,7 +135,12 @@ export async function distroPythonPresent(): Promise<boolean | null> {
  * Install adds python3 to the ElastOS Linux environment when it is missing
  * (ensureElastosDistro in windowsRuntime.ts), so that is the next click.
  */
-export const DISTRO_PYTHON_MISSING_MESSAGE = 'ElastOS was not reset, because the program python3 is missing from its Linux environment, and Reset needs it. Nothing was deleted. Click Install to add python3 again, then click Reset.';
+const PYTHON_MISSING_REASON = 'the program python3 is missing from its Linux environment, and Reset needs it';
+const PYTHON_MISSING_NEXT = 'Click Install to add python3 again, then click Reset.';
+/** The refusal when Reset was clicked. */
+export const DISTRO_PYTHON_MISSING_MESSAGE = `ElastOS was not reset, because ${PYTHON_MISSING_REASON}. Nothing was deleted. ${PYTHON_MISSING_NEXT}`;
+/** The same reason and next click, in the Reset dialog before Reset is clicked. */
+export const DISTRO_PYTHON_MISSING_DIALOG = `ElastOS cannot reset yet, because ${PYTHON_MISSING_REASON}. ${PYTHON_MISSING_NEXT}`;
 
 /** Spawn a helper process with no shell. Exported so tests can run the same helper with a local python3. */
 export function spawnHelper(
@@ -647,10 +652,16 @@ export async function describeDistroBackup(input: {
   home: string;
   paths?: DistroResetPaths;
   distroPresent?: () => Promise<boolean | null>;
+  /** The same probe Reset runs first. False when python3 is missing in the distro. */
+  pythonPresent?: () => Promise<boolean | null>;
   freeBytes?: (dir: string) => number | null;
 }): Promise<BackupDescription> {
   const present = await (input.distroPresent ?? (() => elastosDistroPresent()))();
   if (present === false) return describeMeasuredBackup(null, input.home, input.freeBytes);
+  // Without python3 the measure below fails too, and the dialog would only say it could not measure.
+  if ((await (input.pythonPresent ?? distroPythonPresent)()) === false) {
+    return { ...describeMeasuredBackup(null, input.home, input.freeBytes), blocked: DISTRO_PYTHON_MISSING_DIALOG };
+  }
   const measured = await measureDistroBackup(input.run, input.paths ?? distroResetPaths());
   return describeMeasuredBackup(measured, input.home, input.freeBytes);
 }

@@ -8,6 +8,7 @@ const test = require('node:test');
 const { DISTRO_RESET_HELPER } = require('../dist/main/targets/distroResetHelper');
 const {
   describeDistroBackup,
+  DISTRO_PYTHON_MISSING_DIALOG,
   DISTRO_PYTHON_MISSING_MESSAGE,
   distroInstallRecordProved,
   distroHelperArgs,
@@ -128,7 +129,7 @@ function resetDeps(fx, calls, extra = {}) {
     inspect: () => inspectDistro(run, fx.paths),
     maintainerDid: DID,
     checkBackupSpace: async () => {
-      const seen = await describeDistroBackup({ run, home: fx.winHome, paths: fx.paths, distroPresent: async () => true, freeBytes: extra.freeBytes ?? PLENTY });
+      const seen = await describeDistroBackup({ run, home: fx.winHome, paths: fx.paths, distroPresent: async () => true, pythonPresent: async () => true, freeBytes: extra.freeBytes ?? PLENTY });
       if (seen.present && !seen.enough) throw new Error('There is not enough free space for a copy of your data');
     },
     saveBackup: () => writeDistroBackup({
@@ -1104,3 +1105,41 @@ test('Fix it on the pinned version with no, a tampered, or a linked record in th
   }
 });
 
+test('python3 missing in the distro: the Reset dialog says so in plain words and keeps Reset off', POSIX, async () => {
+  const flow = require('../src/renderer/flow.js');
+  const fx = distroFixture();
+  try {
+    const calls = [];
+    const seen = await describeDistroBackup({
+      run: localRun(calls),
+      home: fx.winHome,
+      paths: fx.paths,
+      distroPresent: async () => true,
+      pythonPresent: async () => false,
+      freeBytes: PLENTY,
+    });
+    assert.deepEqual(calls, []);
+    assert.equal(seen.blocked, DISTRO_PYTHON_MISSING_DIALOG);
+    assert.equal(DISTRO_PYTHON_MISSING_DIALOG, 'ElastOS cannot reset yet, because the program python3 is missing from its Linux environment, and Reset needs it. Click Install to add python3 again, then click Reset.');
+    // The dialog and the refusal give the same reason and the same next click.
+    for (const part of ['python3 is missing from its Linux environment, and Reset needs it', 'Click Install to add python3 again, then click Reset.']) {
+      assert.ok(DISTRO_PYTHON_MISSING_DIALOG.includes(part));
+      assert.ok(DISTRO_PYTHON_MISSING_MESSAGE.includes(part));
+    }
+    const offer = flow.resetBackupCopy(seen);
+    assert.equal(offer.text, DISTRO_PYTHON_MISSING_DIALOG);
+    assert.equal(offer.blocked, true);
+    assert.equal(offer.canSave, false);
+    assert.equal(offer.needsChoice, false);
+    assert.doesNotMatch(offer.text, /could not measure/);
+    const app = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'app.js'), 'utf8');
+    assert.match(app, /confirmDelete\.disabled = Boolean\(resetOffer\.blocked\)/);
+    assert.match(app, /if \(!resetOffer \|\| resetOffer\.blocked\) return;/);
+    // With python3 there, the dialog measures as before.
+    const ok = await describeDistroBackup({ run: localRun([]), home: fx.winHome, paths: fx.paths, distroPresent: async () => true, pythonPresent: async () => true, freeBytes: PLENTY });
+    assert.equal(ok.blocked, undefined);
+    assert.equal(ok.present, true);
+  } finally {
+    fx.cleanup();
+  }
+});

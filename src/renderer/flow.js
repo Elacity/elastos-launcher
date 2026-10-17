@@ -83,6 +83,11 @@ function resetBackupCopy(description) {
       space: '',
     };
   }
+  // The main process found a reason Reset cannot run yet, such as python3
+  // missing in the Windows Linux environment. Say it, and keep Reset off.
+  if (typeof description.blocked === 'string' && description.blocked) {
+    return { ...base, needsChoice: false, canSave: false, blocked: true, text: description.blocked, space: '' };
+  }
   if (!description.present) {
     return { ...base, needsChoice: false, canSave: false, text: 'There is no ElastOS data on this computer to save.', space: '' };
   }
