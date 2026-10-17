@@ -11,6 +11,10 @@ const path = require('node:path');
 const root = path.join(__dirname, '..');
 const electronPath = require('electron');
 const { _electron: electron } = require('playwright');
+const { HOME_URL, isHealthOk, probeGatewayHealth } = require('../dist/main/targets/runtimeGateway');
+
+// Passkeys need a localhost origin. Browsers refuse them on 127.0.0.1.
+const EXPECTED_HOME = 'http://localhost:8090/home/';
 
 const REQUIRED_LOGS = [
   'Release head signature matches the pinned maintainer',
@@ -178,17 +182,39 @@ async function main() {
             throw new Error(`Install log is missing: ${line}`);
           }
         }
+        if (HOME_URL !== EXPECTED_HOME) {
+          throw new Error(`The launcher opens ${HOME_URL}, not ${EXPECTED_HOME}`);
+        }
+        const shown = (await page.locator('#url-value').innerText()).trim();
+        if (shown !== 'localhost:8090/home') {
+          throw new Error(`The window shows ${shown}, not localhost:8090/home`);
+        }
+        const health = await probeGatewayHealth();
+        if (!isHealthOk(health)) {
+          throw new Error(`/healthz on localhost was not OK (${health ? `HTTP ${health.status}` : 'no answer'})`);
+        }
+        console.log(`Home is ${HOME_URL}; /healthz is OK on ${health.addresses.join(', ')}`);
+        const browserRowHidden = await page.locator('#browser-row').evaluate((node) => node.classList.contains('hidden'));
+        const browserText = (await page.locator('#browser-note').innerText()).trim();
+        if (process.platform === 'win32') {
+          if (browserRowHidden || browserText !== 'Browser is not available on this computer yet.') {
+            throw new Error(`Windows must say the Browser is not available yet (shown: ${browserRowHidden ? 'hidden' : browserText})`);
+          }
+          console.log(`Browser note: ${browserText}`);
+        } else if (!browserRowHidden) {
+          throw new Error(`Only Windows shows a Browser note (shown: ${browserText})`);
+        }
         console.log('Install reached Open my computer');
         return;
       }
       if (errorVisible && errorText && /Set up ElastOS on Windows|Windows needs Linux support|Windows needs one step/.test(errorText)) {
         const fixHidden = await page.locator('#fix-btn').evaluate((node) => node.classList.contains('hidden'));
         const fixDisabled = await page.locator('#fix-btn').isDisabled();
-        if (windowsFix === 'pending' && !fixHidden && !fixDisabled) {
+        if (process.platform === 'win32' && windowsFix === 'pending' && !fixHidden && !fixDisabled) {
           await page.click('#fix-btn');
           windowsFix = 'running';
           console.log('Clicked Fix it to add the ElastOS Linux environment');
-        } else if (windowsFix === 'running' && !fixHidden && !fixDisabled) {
+        } else if (process.platform === 'win32' && windowsFix === 'running' && !fixHidden && !fixDisabled) {
           // Fix it imports the distro and leaves the gateway down, so the
           // screen can say it still needs attention. Install is the next click.
           if ((label === 'Install' || label === 'Try again') && !openDisabled) {
@@ -209,7 +235,7 @@ async function main() {
         ? await page.locator('#fix-btn').evaluate((node) => node.classList.contains('hidden'))
         : true;
       const fixDisabled = await page.locator('#fix-btn').isDisabled();
-      if (windowsFix === 'running' && (label === 'Install' || label === 'Try again') && !openDisabled && fixHidden && !fixDisabled) {
+      if (process.platform === 'win32' && windowsFix === 'running' && (label === 'Install' || label === 'Try again') && !openDisabled && fixHidden && !fixDisabled) {
         await page.click('#open-btn');
         windowsFix = 'installing';
         console.log('Clicked Install after Windows setup');
@@ -220,7 +246,8 @@ async function main() {
         await page.waitForTimeout(1000);
         continue;
       }
-      if (errorVisible && errorText && errorText !== 'That still needs attention.') {
+      const windowsSetupRunning = process.platform === 'win32' && windowsFix === 'running';
+      if (errorVisible && errorText && !(windowsSetupRunning && errorText === 'That still needs attention.')) {
         console.log('----- install log -----');
         console.log(logs);
         throw new Error(errorText);

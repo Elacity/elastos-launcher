@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Install a pinned ElastOS runtime, start `elastos gateway` on 127.0.0.1:8090,
+# Install a pinned ElastOS runtime, start `elastos gateway` on localhost:8090,
 # require /healthz to be OK and /home/ to return 200, then stop the process group.
 #
 # Reads resources/runtime-pin.json. "active" selects canary or stable.
@@ -185,8 +185,8 @@ if [[ "${installed_head}" != "${head_cid}" ]]; then
 fi
 echo "Installed head CID matches the pin"
 
-echo "Starting elastos gateway --addr 127.0.0.1:8090"
-"${runtime_bin}" gateway --addr 127.0.0.1:8090 >"${gw_log}" 2>&1 &
+echo "Starting elastos gateway --addr localhost:8090"
+"${runtime_bin}" gateway --addr localhost:8090 >"${gw_log}" 2>&1 &
 gw_pid=$!
 
 healthy=0
@@ -195,7 +195,7 @@ for _ in $(seq 1 90); do
     echo "Gateway exited before /healthz" >&2
     exit 1
   fi
-  body="$(curl -fsS --max-time 2 http://127.0.0.1:8090/healthz 2>/dev/null || true)"
+  body="$(curl -fsS --max-time 2 http://localhost:8090/healthz 2>/dev/null || true)"
   if [[ "${body}" == "OK" ]]; then
     healthy=1
     break
@@ -208,7 +208,7 @@ if [[ "${healthy}" -ne 1 ]]; then
 fi
 echo "/healthz is OK"
 
-home_code="$(curl -sS -o "${work}/home.body" -w '%{http_code}' --max-time 15 http://127.0.0.1:8090/home/ || true)"
+home_code="$(curl -sS -o "${work}/home.body" -w '%{http_code}' --max-time 15 http://localhost:8090/home/ || true)"
 echo "/home/ HTTP ${home_code}"
 if [[ "${home_code}" != "200" ]]; then
   echo "Expected /home/ to return 200" >&2
@@ -230,7 +230,7 @@ wait "${gw_pid}" 2>/dev/null || true
 stopped_pid="${gw_pid}"
 gw_pid=""
 
-if curl -fsS --max-time 2 http://127.0.0.1:8090/healthz >/dev/null 2>&1; then
+if curl -fsS --max-time 2 http://localhost:8090/healthz >/dev/null 2>&1; then
   echo "Gateway still answering /healthz after stop (pid ${stopped_pid})" >&2
   exit 1
 fi

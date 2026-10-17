@@ -1,3 +1,4 @@
+import { GATEWAY_ADDR, HEALTH_URL, HOME_URL } from './gatewayAddress';
 import { LaunchTargetDescriptor } from './types';
 
 /**
@@ -14,12 +15,12 @@ export const RUNTIME_TARGET: LaunchTargetDescriptor = {
   implemented: true,
   installDir: '~/.local/share/elastos',
   binary: '~/.local/bin/elastos',
-  startArgs: ['gateway', '--addr', '127.0.0.1:8090'],
+  startArgs: ['gateway', '--addr', GATEWAY_ADDR],
   health: {
-    url: 'http://127.0.0.1:8090/healthz',
+    url: HEALTH_URL,
     expectBodyIncludes: 'OK',
   },
-  openUrl: 'http://127.0.0.1:8090/home/',
+  openUrl: HOME_URL,
   platforms: [
     { platform: 'darwin', arch: 'arm64' },
     { platform: 'darwin', arch: 'x64' },

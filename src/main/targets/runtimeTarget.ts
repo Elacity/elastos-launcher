@@ -6,9 +6,9 @@ import {
   createDefaultGatewaySupervisor,
   ForeignGatewayError,
   GatewaySupervisor,
-  HEALTH_URL,
   isHealthOk,
   openRuntimeHome,
+  probeGatewayHealth,
 } from './runtimeGateway';
 import * as runtimeInstall from './runtimeInstall';
 import { runtimeBinaryPath, runtimeComponentsPath, runtimeDataDir } from './runtimePaths';
@@ -168,12 +168,7 @@ function readRuntimeVersion(): string {
 }
 
 async function readHealth(): Promise<{ status: number; body: string } | null> {
-  try {
-    const response = await fetch(HEALTH_URL, { signal: AbortSignal.timeout(500) });
-    return { status: response.status, body: await response.text() };
-  } catch {
-    return null;
-  }
+  return probeGatewayHealth({ timeoutMs: 500 });
 }
 
 async function runtimeUninstall(stop: () => Promise<void>): Promise<void> {

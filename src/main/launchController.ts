@@ -1,16 +1,18 @@
 import * as os from 'os';
 import { applyOpenAtLogin, readOpenAtLogin } from './targets/openAtLogin';
 import { buildDiagnostics, collectPreflight, PreflightReport, saveCollectedSupportBundle } from './targets/preflight';
-import { confirmInstalledGateway, HEALTH_URL, isForeignGatewayError, isHealthOk, STOP_GRACE_MS } from './targets/runtimeGateway';
+import { confirmInstalledGateway, isForeignGatewayError, isHealthOk, probeGatewayHealth, STOP_GRACE_MS } from './targets/runtimeGateway';
 import { collectFailureFacts, failureScreen, FailureScreen, fixCollectedFailure, windowsFixResult } from './targets/runtimeRecovery';
 import { resolveLaunchTargetId } from './targets/preferences';
 import { LAUNCH_TARGET_ENV, retiredPc2Notice } from './targets/registry';
 import { createLaunchTarget } from './targets';
 import { setRuntimeLogSink } from './targets/runtimeGateway';
 import { loadActiveRuntimePin } from './targets/runtimePin';
+import { browserNote } from './targets/runtimeSupport';
 import { runtimeHeadStore } from './targets/runtimeUpdate';
 import { rollbackRuntimeUpdate } from './targets/runtimeTarget';
-import { resetRuntimeOnThisComputer } from './targets/runtimeUninstall';
+import { BackupDescription, describeRuntimeBackupOnThisComputer } from './targets/runtimeBackup';
+import { resetRuntimeOnThisComputer, ResetResult } from './targets/runtimeUninstall';
 import { finishResumeInstall as clearResumeInstall, fixWindowsOnThisComputer, resumeInstallPlanOnThisComputer, ResumeInstallPlan } from './targets/windowsHost';
 import { LaunchTarget, LaunchTargetId, TargetStatus, UpdateCheck } from './targets/types';
 
@@ -32,7 +34,9 @@ export interface LaunchController {
   install(onProgress: (message: string) => void): Promise<void>;
   update(onProgress: (message: string) => void): Promise<void>;
   uninstall(): Promise<void>;
-  resetRuntime(): Promise<void>;
+  /** `choice.backup` must be true or false. Anything else resets nothing. */
+  resetRuntime(choice?: { backup?: unknown }): Promise<ResetResult>;
+  describeResetBackup(): Promise<BackupDescription>;
   rollback(onProgress?: (message: string) => void): Promise<void>;
   getVersion(): string;
   checkForUpdate(): Promise<UpdateCheck>;
@@ -115,6 +119,8 @@ export interface LaunchInfo {
   openUrl: string;
   status: TargetStatus;
   platformNote: string | null;
+  /** Shown in the info panel. Windows only: its Browser is not available yet. */
+  browserNote: string | null;
   preflight: PreflightReport;
   openAtLogin: boolean;
   canRollback: boolean;
@@ -202,14 +208,8 @@ export function createLaunchController(options: LaunchControllerOptions = {}): L
     } catch {
       runtimeVersion = 'unknown';
     }
-    let health = 'unknown';
-    try {
-      const response = await fetch(HEALTH_URL, { signal: AbortSignal.timeout(800) });
-      const body = await response.text();
-      health = isHealthOk({ status: response.status, body }) ? 'OK' : 'not answering';
-    } catch {
-      health = 'not answering';
-    }
+    const probed = await probeGatewayHealth({ timeoutMs: 800 });
+    const health = isHealthOk(probed) ? 'OK' : 'not answering';
     return buildDiagnostics({
       launcherVersion: '1.4.0',
       runtimeVersion,
@@ -243,7 +243,8 @@ export function createLaunchController(options: LaunchControllerOptions = {}): L
     install: (onProgress) => runRuntime(() => active.install(onProgress)),
     update: (onProgress) => runRuntime(() => active.update(onProgress)),
     uninstall: () => runRuntime(() => active.uninstall()),
-    resetRuntime: () => runRuntime(() => resetRuntimeOnThisComputer(() => active.stopForRemoval())),
+    resetRuntime: (choice) => runRuntime(() => resetRuntimeOnThisComputer(() => active.stopForRemoval(), choice ?? {})),
+    describeResetBackup: () => describeRuntimeBackupOnThisComputer(),
     rollback: (onProgress) => runRuntime(() => rollbackRuntimeUpdate(onProgress)),
     getVersion: () => runRuntimeSync(() => active.getVersion()),
     checkForUpdate: () => runRuntime(() => active.checkForUpdate()),
@@ -270,6 +271,7 @@ export function createLaunchController(options: LaunchControllerOptions = {}): L
         openUrl: active.descriptor.openUrl,
         status,
         platformNote: platform?.message ?? null,
+        browserNote: browserNote(process.platform),
         preflight,
         openAtLogin: readOpenAtLogin(),
         canRollback: Boolean(runtimeHeadStore().get()),
@@ -286,14 +288,7 @@ export function createLaunchController(options: LaunchControllerOptions = {}): L
       if (failureScreen(facts).kind === 'windows') {
         return windowsFixResult(
           () => fixWindowsOnThisComputer(),
-          async () => {
-            try {
-              const response = await fetch(HEALTH_URL, { signal: AbortSignal.timeout(800) });
-              return { status: response.status, body: await response.text() };
-            } catch {
-              return null;
-            }
-          },
+          () => probeGatewayHealth({ timeoutMs: 800 }),
           () => confirmInstalledGateway(),
         );
       }

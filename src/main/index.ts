@@ -178,7 +178,11 @@ ipcMain.handle('elastos:install', async (event) => {
 });
 
 ipcMain.handle('elastos:uninstall', () => launch.uninstall());
-ipcMain.handle('elastos:resetRuntime', () => launch.resetRuntime());
+ipcMain.handle('elastos:resetRuntime', (_event, choice: unknown) => {
+  const backup = choice && typeof choice === 'object' ? (choice as { backup?: unknown }).backup : undefined;
+  return launch.resetRuntime({ backup });
+});
+ipcMain.handle('elastos:describeResetBackup', () => launch.describeResetBackup());
 
 // Version and updates
 ipcMain.handle('elastos:getVersion', () => launch.getVersion());

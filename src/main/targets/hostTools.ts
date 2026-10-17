@@ -117,6 +117,8 @@ export async function prepareInstallerEnvironment(input: {
   download?: (url: string) => Promise<Buffer>;
   listLib?: (dir: string) => string[];
   canExec?: (file: string) => boolean;
+  /** Use the app's Python even when python3 runs. The caller reads ELASTOS_HIDE_HOST_TOOLS. */
+  hideHostTools?: boolean;
 }): Promise<PreparedInstaller> {
   const env: NodeJS.ProcessEnv = { ...(input.env ?? process.env) };
   if (detectLinuxLibc(input.platform, input.listLib) === 'musl') throw new Error(MUSL_MESSAGE);
@@ -131,7 +133,7 @@ export async function prepareInstallerEnvironment(input: {
   writeShim(path.join(tools, 'curl'), toolShimScript(execPath, modulePath, 'curl'));
   writeShim(path.join(tools, 'sha256sum'), toolShimScript(execPath, modulePath, 'sha256sum'));
 
-  const hide = env.ELASTOS_HIDE_HOST_TOOLS === '1';
+  const hide = input.hideHostTools ?? env.ELASTOS_HIDE_HOST_TOOLS === '1';
   const runs = input.pythonRuns ?? pythonRuns;
   let pythonBin: string | null = null;
   if (!hide && runs('python3', env)) {

@@ -26,9 +26,9 @@ const {
 
 const HOME = '/home/tester';
 const COMPONENTS = `${HOME}/.local/share/elastos/components.json`;
-const VERSION = '0.8.0-alpha.21';
-const CID = 'QmXuy56RTFzXaifTuyCbMb6Ky1p5wuM9iP8eFbMghHxWij';
-const RELEASE_CID = 'QmYPKgK1iPySu7A4QwwXNN7gjwA28Khr4X7XLoNzK2k1M1';
+const VERSION = '0.8.0-alpha.22';
+const CID = 'QmXnA5ao7PMfwdj7pGaxpWs14gfgD15FtmhVQPj1EphFXm';
+const RELEASE_CID = 'QmQg4qrKis51vBGZmoYrpnms8fGmN6CHcyaQdX9Juktqpu';
 const DID = 'did:key:z6MkgwHd2BCWe1jHMXPiR6H1q1RFPcv1YzhMbK5G1kBarbfe';
 const FIXTURE_DID = 'did:key:z6MkvDqGT54cXesYGvABpF1UapVNwjCqRcafi4Px6Thv5T3Z';
 const FIXTURE_VERSION = '0.7.1';
@@ -38,6 +38,8 @@ const SCRIPT = '#!/bin/bash\necho stamped-installer\n';
 const SCRIPT_SHA = crypto.createHash('sha256').update(SCRIPT).digest('hex');
 const FIXTURE_HEAD_CID = releaseHeadCid(SIGNED_HEAD);
 const SOURCES = `${HOME}/.local/share/elastos/sources.json`;
+const RECORD = `${HOME}/.local/share/elastos/installation/release-head.json`;
+const { installRecordTextProves } = require('../dist/main/targets/runtimePaths');
 
 function canaryPin(overrides = {}) {
   return {
@@ -93,6 +95,8 @@ function harness(overrides = {}) {
         default_source: 'default',
         sources: [{ name: 'default', head_cid: env.ELASTOS_HEAD_CID }],
       }));
+      // install-release writes the verified head as the install record.
+      files.set(RECORD, SIGNED_HEAD);
       return { stdout: '', stderr: '' };
     },
     runSetup: async (binary) => {
@@ -105,6 +109,11 @@ function harness(overrides = {}) {
     exists: (file) => files.has(file),
     statMtimeMs: (file) => (mtimes.has(file) ? mtimes.get(file) : null),
     mkdirp: () => {},
+    // The same check Reset uses, on the in-memory record.
+    installRecordProved: (dataDir) => {
+      const text = files.get(`${dataDir}/installation/release-head.json`);
+      return typeof text === 'string' && installRecordTextProves(text, deps.pin.maintainerDid);
+    },
     ...overrides,
   };
   return { deps, files, mtimes, calls };
@@ -256,6 +265,7 @@ test('an interrupted install rechecks the signed head and does not download the 
     default_source: 'default',
     sources: [{ name: 'default', head_cid: FIXTURE_HEAD_CID }],
   }));
+  files.set(RECORD, SIGNED_HEAD);
   await installRuntime(deps, () => {});
   const headFetches = calls.filter((call) => call[0] === 'fetch' && String(call[1]).endsWith('/release-head.json'));
   assert.equal(headFetches.length, 1);
@@ -276,11 +286,91 @@ test('a finished install rechecks the signed head and does not download again', 
     default_source: 'default',
     sources: [{ name: 'default', head_cid: FIXTURE_HEAD_CID }],
   }));
+  files.set(RECORD, SIGNED_HEAD);
   await installRuntime(deps, () => {});
   const headFetches = calls.filter((call) => call[0] === 'fetch' && String(call[1]).endsWith('/release-head.json'));
   assert.equal(headFetches.length, 1);
   assert.equal(calls.some((call) => call[0] === 'installer'), false);
   assert.equal(calls.some((call) => call[0] === 'setup'), false);
+});
+
+function installedWithoutProof(record) {
+  const { deps, calls, files } = harness({
+    probe: async () => ({
+      kind: 'version',
+      version: `ElastOS Runtime v${FIXTURE_VERSION}`,
+      binaryPath: `${HOME}/.local/bin/elastos`,
+    }),
+  });
+  files.set(COMPONENTS, '{}');
+  files.set(SOURCES, JSON.stringify({
+    default_source: 'default',
+    sources: [{ name: 'default', head_cid: FIXTURE_HEAD_CID }],
+  }));
+  if (record != null) files.set(RECORD, record);
+  return { deps, calls, files };
+}
+
+test('the pinned version with no signed install record is not installed: Install runs install.sh again', async () => {
+  const { deps, calls, files } = installedWithoutProof(null);
+  await installRuntime(deps, () => {});
+  assert.equal(calls.filter((call) => call[0] === 'installer').length, 1);
+  assert.equal(files.get(RECORD), SIGNED_HEAD);
+  // components.json is there, so setup does not run again.
+  assert.equal(calls.some((call) => call[0] === 'setup'), false);
+  // Now the record proves the install, and a second Install changes nothing.
+  calls.length = 0;
+  await installRuntime(deps, () => {});
+  assert.equal(calls.some((call) => call[0] === 'installer'), false);
+});
+
+test('a tampered or foreign-signed install record is not proof: Install runs install.sh again', async () => {
+  const tampered = SIGNED_HEAD.replace('"version":"0.7.1"', '"version":"0.7.9"');
+  for (const record of [tampered, '{}', '', SIGNED_HEAD.replace(FIXTURE_DID, DID)]) {
+    const { deps, calls, files } = installedWithoutProof(record);
+    await installRuntime(deps, () => {});
+    assert.equal(calls.filter((call) => call[0] === 'installer').length, 1, record);
+    assert.equal(files.get(RECORD), SIGNED_HEAD);
+  }
+  // A record check that throws (an unreadable file) is not proof either.
+  const { deps, calls } = installedWithoutProof(SIGNED_HEAD);
+  deps.installRecordProved = () => { throw new Error('unreadable'); };
+  await assert.rejects(() => installRuntime(deps, () => {}), /did not save its signed install record/);
+  assert.equal(calls.filter((call) => call[0] === 'installer').length, 1);
+});
+
+test('an install.sh run that leaves no valid record fails in plain words', async () => {
+  const { deps, calls } = harness({
+    runInstaller: async (script, args, env) => {
+      calls.push(['installer', script, [...args], env]);
+      deps.writeFile(SOURCES, JSON.stringify({
+        default_source: 'default',
+        sources: [{ name: 'default', head_cid: env.ELASTOS_HEAD_CID }],
+      }));
+      return { stdout: '', stderr: '' };
+    },
+  });
+  await assert.rejects(() => installRuntime(deps, () => {}), {
+    message: 'ElastOS was installed, but it did not save its signed install record, so ElastOS cannot prove this install. Click Install to try again.',
+  });
+  assert.equal(calls.some((call) => call[0] === 'setup'), false);
+});
+
+test('the plan needs version, head CID and the signed record before it says already installed', () => {
+  const base = {
+    platform: 'linux',
+    arch: 'x64',
+    installedVersion: `ElastOS Runtime v${FIXTURE_VERSION}`,
+    installedHeadCid: FIXTURE_HEAD_CID,
+    installRecordProved: true,
+    componentsPresent: true,
+    pin: canaryPin(),
+    publisher: { ...verifyReleaseHead(SIGNED_HEAD, FIXTURE_DID) },
+  };
+  assert.equal(planRuntimeInstall(base).action, 'already-installed');
+  assert.equal(planRuntimeInstall({ ...base, componentsPresent: false }).action, 'resume-setup');
+  assert.equal(planRuntimeInstall({ ...base, installRecordProved: false }).action, 'pinned');
+  assert.equal(planRuntimeInstall({ ...base, installRecordProved: false, componentsPresent: false }).action, 'pinned');
 });
 
 test('a local install that matches the pin is refused when the signed head does not', async () => {
@@ -317,7 +407,7 @@ test('Intel Mac gets a friendly message and does not download', async () => {
       return '';
     },
   });
-  await assert.rejects(() => installRuntime(deps, () => {}), /not yet supported on Intel Macs/);
+  await assert.rejects(() => installRuntime(deps, () => {}), /Error: Intel Mac is not supported yet\.$/);
   assert.equal(fetched, false);
   const plan = planRuntimeInstall({
     platform: 'darwin',
@@ -327,6 +417,7 @@ test('Intel Mac gets a friendly message and does not download', async () => {
     pin: canaryPin(),
     publisher: null,
     installedHeadCid: null,
+    installRecordProved: false,
   });
   assert.equal(plan.action, 'blocked');
   assert.equal(plan.message, INTEL_MAC_MESSAGE);
@@ -428,4 +519,71 @@ test('WSL without /dev/kvm explains the local Browser', () => {
   assert.equal(wslKvmMessage(true, false), KVM_MESSAGE);
   assert.equal(wslKvmMessage(true, true), null);
   assert.equal(wslKvmMessage(false, false), null);
+});
+
+const TRUST_OVERRIDES = {
+  ELASTOS_MAINTAINER_DID: 'did:key:zevil',
+  ELASTOS_HEAD_CID: 'QmEvilEvilEvilEvilEvilEvilEvilEvilEvilEvilEvil',
+  ELASTOS_PUBLISHER_GATEWAY: 'https://evil.example',
+  ELASTOS_PUBLISHER_NODE_ID: 'evil-node',
+  ELASTOS_SOURCE_CONNECT_TICKET: 'evil-ticket',
+  ELASTOS_IPNS_NAME: 'evil-name',
+  ELASTOS_DATA_DIR: '/tmp/evil-data',
+  elastos_components_manifest: '/tmp/evil.json',
+};
+
+async function withEnv(values, run) {
+  const saved = {};
+  for (const key of Object.keys(values)) {
+    saved[key] = process.env[key];
+    process.env[key] = values[key];
+  }
+  try {
+    return await run();
+  } finally {
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+}
+
+test('a real install.sh run gets the pinned head and no inherited ELASTOS_* override', async (t) => {
+  if (process.platform === 'win32') return t.skip('POSIX shell');
+  if (spawnSync('python3', ['-c', ''], { stdio: 'ignore' }).status !== 0) return t.skip('needs python3, or the app downloads one');
+  const { defaultRuntimeInstallDeps, pinnedInstallerLaunch } = require('../dist/main/targets/runtimeInstall');
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'elastos-env-scrub-'));
+  try {
+    const script = path.join(home, 'install.sh');
+    fs.writeFileSync(script, 'env | grep -i "^ELASTOS_" | sort\n');
+    const out = await withEnv({ ...TRUST_OVERRIDES, HOME: home }, async () => {
+      const pin = canaryPin();
+      const deps = defaultRuntimeInstallDeps(pin);
+      const launch = pinnedInstallerLaunch(pin, deps.env);
+      return deps.runInstaller(script, launch.args, launch.env);
+    });
+    assert.equal(out.stdout.trim(), `ELASTOS_HEAD_CID=${FIXTURE_HEAD_CID}`);
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('the gateway process gets no inherited ELASTOS_* variable', async (t) => {
+  if (process.platform === 'win32') return t.skip('POSIX env');
+  const { spawnGatewayProcess } = require('../dist/main/targets/runtimeGateway');
+  const output = await withEnv(TRUST_OVERRIDES, () => new Promise((resolve) => {
+    const proc = spawnGatewayProcess('/usr/bin/env', []);
+    let text = '';
+    proc.onOutput((chunk) => { text += chunk; });
+    proc.onExit(() => resolve(text));
+  }));
+  assert.match(output, /^PATH=/m);
+  assert.equal(/^ELASTOS_/im.test(output), false, output.split('\n').filter((line) => /^ELASTOS_/i.test(line)).join('\n'));
+});
+
+test('runtimeChildEnv drops every ELASTOS_ name, in any case, and keeps the rest', () => {
+  const { INSTALLER_ENV_NAMES, runtimeChildEnv } = require('../dist/main/targets/releaseHead');
+  assert.deepEqual(runtimeChildEnv({ ...TRUST_OVERRIDES, PATH: '/bin', HOME: '/h', XDG_DATA_HOME: '/x' }), { PATH: '/bin', HOME: '/h', XDG_DATA_HOME: '/x' });
+  for (const name of INSTALLER_ENV_NAMES) assert.match(name, /^ELASTOS_/);
+  assert.equal(INSTALLER_ENV_NAMES.length, 12);
 });

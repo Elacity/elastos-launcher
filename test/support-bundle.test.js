@@ -82,7 +82,8 @@ test('the support bundle has versions, health, and platform, and no secrets', ()
     '«kept0»',
     token,
   ].join('\n'));
-  assert.match(kept, new RegExp(hash));
+  assert.equal(kept.includes(hash), false);
+  assert.match(kept, /\[removed\]/);
   assert.match(kept, new RegExp(cidv1));
   assert.match(kept, /ELASTOS_LAUNCH_TARGET=pc2 is retired/);
   assert.match(kept, /\/usr\/local\/bin\/elastos/);
@@ -109,14 +110,86 @@ test('the support bundle has versions, health, and platform, and no secrets', ()
   assert.equal(labeled.includes(hash), false);
   assert.match(labeled, /seed=\[removed\]/);
   assert.equal(query.includes(hash), false);
-  assert.match(scrubSupportText(hash), new RegExp(hash));
+  assert.equal(scrubSupportText(hash).includes(hash), false);
+  assert.match(scrubSupportText(hash), /\[removed\]/);
   assert.match(scrubSupportText(`sha256 ${hash}`), new RegExp(hash));
+  assert.match(scrubSupportText(`hash: ${hash}`), new RegExp(hash));
+  assert.equal(scrubSupportText(`commit ${hash}`).includes(hash), false);
+  const commit = '0123456789abcdef0123456789abcdef01234567';
+  assert.match(scrubSupportText(`elastos 0.8.0 (commit ${commit})`), new RegExp(commit));
+  const phrase = 'abandon ability able about above absent absorb abstract absurd abuse access accident';
+  const longer = `${phrase} account accuse achieve acid acoustic acquire across act action actor actress actual`;
+  assert.equal(scrubSupportText(phrase).includes('abandon'), false);
+  assert.match(scrubSupportText(phrase), /\[removed\]/);
+  assert.equal(scrubSupportText(longer).includes('abandon'), false);
+  assert.equal(scrubSupportText(longer).includes('actual'), false);
+  assert.equal(scrubSupportText(`seed: ${phrase}`).includes('ability'), false);
+  assert.match(scrubSupportText(`seed: ${phrase}`), /seed: \[removed\]/);
+  assert.equal(scrubSupportText(`mnemonic=${phrase}`).includes('abstract'), false);
+  assert.equal(scrubSupportText(`private_key=${hash}`).includes(hash), false);
+  assert.match(scrubSupportText(`private_key=${hash}`), /private_key=\[removed\]/);
+  assert.equal(scrubSupportText(`secret=${phrase} leftover`).includes('leftover'), false);
   assert.match(scrubSupportText('secret-line'), /secret-line/);
   assert.match(scrubSupportText('ELASTOS_LAUNCH_TARGET=pc2'), /ELASTOS_LAUNCH_TARGET/);
   const doc = fs.readFileSync(path.join(__dirname, '../docs/RUNTIME_MIGRATION.md'), 'utf8');
   assert.match(doc, /unlabeled secret shorter than that, or with low entropy/);
   assert.match(doc, /secret-line/);
   assert.match(doc, /ghp_/);
+});
+
+test('a seed or a key is removed in any case, layout, or line wrap', () => {
+  const words = 'abandon ability able about above absent absorb abstract absurd abuse access accident'.split(' ');
+  const more = 'account accuse achieve acid acoustic acquire across act action actor actress actual'.split(' ');
+  const key = 'e58b50401f53c4a882cb78c253c78e42015713cc7a48f2f91964c55a22ad3846';
+  const leaks = (out) => words.filter((word) => out.toLowerCase().includes(word)).length;
+  const seeds = {
+    newlines: words.join('\n'),
+    crlf: words.join('\r\n'),
+    commas: words.join(','),
+    commaSpace: words.join(', '),
+    hyphens: words.join('-'),
+    capitalized: words.map((word) => word[0].toUpperCase() + word.slice(1)).join(' '),
+    upper: words.join(' ').toUpperCase(),
+    numbered: words.map((word, index) => `${index + 1}. ${word}`).join(' '),
+    numberedColon: words.map((word, index) => `${index + 1}: ${word}`).join('\n'),
+    json: JSON.stringify(words),
+    twoLines: `${words.slice(0, 6).join(' ')}\n${words.slice(6).join(' ')}`,
+    twentyFour: [...words, ...more].join('\n'),
+    labeled: `seed: ${words.join(' ')}`,
+  };
+  for (const [name, text] of Object.entries(seeds)) {
+    const out = scrubSupportText(text);
+    assert.equal(leaks(out), 0, `${name}: ${out}`);
+    assert.match(out, /\[removed\]/, name);
+  }
+  assert.match(scrubSupportText(seeds.labeled), /^seed: \[removed\]$/);
+  assert.equal(scrubSupportText([...words, ...more].join(' ')).includes('actual'), false);
+  const keys = {
+    upper: `key ${key.toUpperCase()}`,
+    prefixed: `0x${key}`,
+    prefixedUpper: `0X${key.toUpperCase()}`,
+    halves: `${key.slice(0, 32)}\n${key.slice(32)}`,
+    thirds: `${key.slice(0, 20)}\n${key.slice(20, 44)}\n${key.slice(44)}`,
+    hashThenRest: `${key.slice(0, 40)}\n${key.slice(40)}`,
+    prefixedWrap: `0x${key.slice(0, 16)}\n${key.slice(16, 40)}\n${key.slice(40)}`,
+  };
+  for (const [name, text] of Object.entries(keys)) {
+    const out = scrubSupportText(text).toLowerCase().replace(/\s/g, '');
+    for (let at = 0; at + 12 <= key.length; at += 12) {
+      assert.equal(out.includes(key.slice(at, at + 12)), false, `${name}: ${out}`);
+    }
+  }
+  // Ordinary log lines, a list of commit hashes, and a short hex line stay.
+  const commitA = '0123456789abcdef0123456789abcdef01234567';
+  const commitB = '89abcdef0123456789abcdef0123456789abcdef';
+  const plain = [
+    'deadbeef',
+    'Checking this computer (about 10 seconds)',
+    'You can also add an account, access your wallet, or use the actual action menu above',
+    commitA,
+    commitB,
+  ].join('\n');
+  assert.equal(scrubSupportText(plain), plain);
 });
 
 test('save support bundle writes only ElastOS-support.txt outside the data dirs', () => {

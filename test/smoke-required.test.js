@@ -74,10 +74,10 @@ test('the smoke passes the pinned head the way the pinned installer accepts it',
   assert.equal(/--head-cid/.test(script), false);
 });
 
-test('rollback uses the real binary between alpha.20 and alpha.21', () => {
+test('rollback uses the real binary between alpha.21 and alpha.22', () => {
   const script = fs.readFileSync(path.join(root, 'scripts/runtime-rollback.sh'), 'utf8');
-  assert.match(script, /0\.8\.0-alpha\.20/);
   assert.match(script, /0\.8\.0-alpha\.21/);
+  assert.match(script, /0\.8\.0-alpha\.22/);
   assert.match(script, /update --rollback-to "\$\{PREV_CID\}" --yes/);
   assert.match(script, /update --yes/);
   assert.match(script, /\/healthz is OK/);
@@ -100,6 +100,8 @@ test('the electron e2e clicks Install and waits for Open my computer', () => {
   assert.match(script, /LOCALAPPDATA/);
   assert.match(script, /#fix-btn/);
   assert.match(script, /Set up ElastOS on Windows/);
+  assert.match(script, /process\.platform === 'win32' && windowsFix === 'running'/);
+  assert.equal(script.includes("errorText !== 'That still needs attention.'"), false);
 });
 
 test('the flattened smoke pin keeps the installer hash', () => {

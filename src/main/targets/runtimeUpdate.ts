@@ -3,7 +3,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { findRuntimeBinary } from './runtimeProbe';
-import { verifyReleaseHead } from './releaseHead';
+import { runtimeChildEnv, verifyReleaseHead } from './releaseHead';
 import { UpdateCheck } from './types';
 
 export const UPDATE_CURRENT_LINE = 'Installed release is up to date.';
@@ -166,7 +166,7 @@ export function runRuntimeCommand(args: readonly string[]): Promise<RuntimeComma
     return Promise.reject(new Error('ElastOS is not installed yet. Click Install.'));
   }
   return new Promise((resolve) => {
-    execFileCb(binary, [...args], { timeout: 15 * 60 * 1000 }, (err, stdout, stderr) => {
+    execFileCb(binary, [...args], { timeout: 15 * 60 * 1000, env: runtimeChildEnv(process.env) }, (err, stdout, stderr) => {
       const code = err && typeof err.code === 'number' ? err.code : err ? 1 : 0;
       resolve({ code, stdout: stdout ?? '', stderr: stderr ?? '' });
     });

@@ -7,6 +7,9 @@ const {
   buildDiagnostics,
   evaluatePreflight,
   DISK_FLOOR_BYTES,
+  LOCALHOST_MESSAGE,
+  portBusy,
+  tryListen,
   publisherHost,
   publisherOffline,
 } = require('../dist/main/targets/preflight');
@@ -41,7 +44,7 @@ test('preflight blocks disk, offline, a busy port, and Intel Mac', () => {
   assert.equal(already.checks.find((check) => check.id === 'port').level, 'pass');
 
   const intel = evaluatePreflight({ ...base, platform: 'darwin', arch: 'x64' });
-  assert.match(intel.checks.find((check) => check.id === 'platform').message, /Intel Macs/);
+  assert.equal(intel.checks.find((check) => check.id === 'platform').message, 'Intel Mac is not supported yet.');
 
   const kvm = evaluatePreflight({ ...base, wsl: true, kvm: false });
   assert.equal(kvm.ok, true);
@@ -116,5 +119,56 @@ test('the install button is the primary action until the computer is healthy', (
   const steps = flow.stepStates('Downloading ElastOS (about 1 minute)');
   assert.equal(steps[1].state, 'active');
   assert.equal(steps[0].state, 'done');
-  assert.equal(flow.urlLabel('http://127.0.0.1:8090/home/'), '127.0.0.1:8090/home');
+  assert.equal(flow.urlLabel('http://localhost:8090/home/'), 'localhost:8090/home');
+});
+
+test('the port check covers 127.0.0.1 and ::1, and a host without IPv6 checks 127.0.0.1 only', async () => {
+  const asked = [];
+  const answer = (map) => async (port, host) => { asked.push(host); return map[host]; };
+  assert.equal(await portBusy(8090, undefined, answer({ '127.0.0.1': 'free', '::1': 'free' })), false);
+  assert.deepEqual(asked, ['127.0.0.1', '::1']);
+  // Tamper: another program holds ::1:8090 only. The browser can land there for localhost.
+  assert.equal(await portBusy(8090, undefined, answer({ '127.0.0.1': 'free', '::1': 'busy' })), true);
+  assert.equal(await portBusy(8090, undefined, answer({ '127.0.0.1': 'busy', '::1': 'free' })), true);
+  assert.equal(await portBusy(8090, undefined, answer({ '127.0.0.1': 'free', '::1': 'no-address' })), false);
+});
+
+test('a real listener on 127.0.0.1 makes the port busy', async () => {
+  const net = require('node:net');
+  const server = net.createServer();
+  await new Promise((resolve) => server.listen({ port: 0, host: '127.0.0.1' }, resolve));
+  try {
+    const port = server.address().port;
+    assert.equal(await tryListen(port, '127.0.0.1'), 'busy');
+    assert.equal(await portBusy(port), true);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test('preflight blocks when localhost does not point to this computer', () => {
+  const good = evaluatePreflight({ ...base, localhostAddresses: ['::1', '127.0.0.1'] });
+  assert.equal(good.checks.find((check) => check.id === 'localhost').level, 'pass');
+  for (const bad of [['127.0.0.1', '192.168.1.9'], [], null]) {
+    const report = evaluatePreflight({ ...base, localhostAddresses: bad });
+    assert.equal(report.ok, false);
+    assert.equal(report.checks.find((check) => check.id === 'localhost').message, LOCALHOST_MESSAGE);
+  }
+  assert.equal(evaluatePreflight(base).checks.some((check) => check.id === 'localhost'), false);
+});
+
+test('Windows shows that its Browser is not available yet, and only Windows', () => {
+  const { browserNote, WINDOWS_BROWSER_MESSAGE } = require('../dist/main/targets/runtimeSupport');
+  assert.equal(WINDOWS_BROWSER_MESSAGE, 'Browser is not available on this computer yet.');
+  assert.equal(browserNote('win32'), WINDOWS_BROWSER_MESSAGE);
+  for (const platform of ['darwin', 'linux']) assert.equal(browserNote(platform), null);
+  assert.equal(flow.browserNoteText({ browserNote: WINDOWS_BROWSER_MESSAGE }), WINDOWS_BROWSER_MESSAGE);
+  assert.equal(flow.browserNoteText({ browserNote: null }), '');
+  assert.equal(flow.browserNoteText(undefined), '');
+  const html = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'index.html'), 'utf8');
+  assert.match(html, /<div class="info-row single hidden" id="browser-row">/);
+  const app = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'app.js'), 'utf8');
+  assert.match(app, /browserRow\.classList\.toggle\('hidden', !browserText\)/);
+  const controller = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'launchController.ts'), 'utf8');
+  assert.match(controller, /browserNote: browserNote\(process\.platform\)/);
 });

@@ -240,7 +240,7 @@ export function selectWslPc2Pids(psText: string): number[] {
   return pids;
 }
 
-function backupStamp(now: Date): string {
+export function backupStamp(now: Date): string {
   return now.toISOString().replace(/\.\d{3}Z$/, 'Z').replace(/[-:]/g, '').replace('T', '-');
 }
 
@@ -936,11 +936,18 @@ function verifyStoredZip(file: string, entries: Array<{ dataOffset: number; size
   }
 }
 
+export interface ZipOptions {
+  /** Leave out a path, given relative to its directory with `/` separators. A left-out folder is not read. */
+  exclude?: (relative: string) => boolean;
+  /** Create `dest` only when nothing has that name yet (O_EXCL). An existing file is never replaced. */
+  exclusive?: boolean;
+}
+
 /** Store-method zip of regular files under each directory. Symlinks are not followed. */
-export function zipDirectories(dirs: string[], dest: string): void {
+export function zipDirectories(dirs: string[], dest: string, options: ZipOptions = {}): void {
   const when = dosTime(new Date());
   fs.mkdirSync(path.dirname(dest), { recursive: true });
-  const out = fs.openSync(dest, 'w', 0o600);
+  const out = fs.openSync(dest, options.exclusive ? 'wx' : 'w', 0o600);
   const centrals: Buffer[] = [];
   const written: Array<{ dataOffset: number; size: number; crc: number }> = [];
   let offset = 0;
@@ -948,7 +955,7 @@ export function zipDirectories(dirs: string[], dest: string): void {
   try {
     for (const dir of dirs) {
       const rootName = path.basename(dir);
-      for (const file of walkRegularFiles(dir)) {
+      for (const file of walkRegularFiles(dir, options.exclude)) {
         const relative = path.relative(dir, file).split(path.sep).join('/');
         const name = Buffer.from(`${rootName}/${relative}`, 'utf8');
         if (name.length > 0xffff) throw new Error('The backup could not be saved.');
@@ -1027,12 +1034,13 @@ export function zipDirectories(dirs: string[], dest: string): void {
   }
 }
 
-function walkRegularFiles(dir: string): string[] {
+function walkRegularFiles(dir: string, exclude?: (relative: string) => boolean): string[] {
   const files: string[] = [];
   const stack = [dir];
   while (stack.length) {
     const current = stack.pop();
     if (!current) continue;
+    if (exclude && current !== dir && exclude(path.relative(dir, current).split(path.sep).join('/'))) continue;
     const st = fs.lstatSync(current);
     if (st.isSymbolicLink()) continue;
     if (st.isDirectory()) {
@@ -1137,11 +1145,13 @@ export function legacyPc2DescribeRuns(): number {
   return describeRuns;
 }
 
-function legacyPc2WorkerScript(): string {
-  const bundled = path.join(__dirname, 'legacyPc2Worker.js');
-  const unpacked = bundled.replace(`${path.sep}app.asar${path.sep}`, `${path.sep}app.asar.unpacked${path.sep}`);
-  if (unpacked !== bundled && fs.existsSync(unpacked)) return unpacked;
-  return bundled;
+/**
+ * The worker loads from inside app.asar. Electron reads asar in worker
+ * threads. An unpacked copy could not require ./legacyPc2Removal, which
+ * stays in app.asar, so Remove PC2 never appeared in a packaged build.
+ */
+export function legacyPc2WorkerScript(): string {
+  return path.join(__dirname, 'legacyPc2Worker.js');
 }
 
 function runPc2Worker<T>(

@@ -22,14 +22,14 @@ The pinned `install.sh` is not changed. It still requires `bash`, `curl`, a `pyt
 | Reboot | None for Install. | None for Install. | Possible, only when Linux support was off. |
 | Disk | About 2 GB free. | About 2 GB free. | About 2 GB free. |
 
-Intel Macs stop with “not yet supported on Intel Macs”. Nothing is downloaded.
+Intel Macs stop with “Intel Mac is not supported yet.” Nothing is downloaded.
 
 ## macOS
 
 1. Download the app and open it. macOS may ask whether to open an app that was downloaded from the internet. That dialog is from macOS.
 2. Click Install.
 3. The app checks the signed release, downloads the pinned installer, and downloads a pinned Python only when the Mac cannot already run `python3 -c ''`.
-4. The button becomes Open my computer. The page is `http://127.0.0.1:8090/home/` in the system browser.
+4. The button becomes Open my computer. The page is `http://localhost:8090/home/` in the system browser.
 5. There is no Terminal window, no `xcode-select --install` prompt, and no administrator password for Install.
 
 The macOS test hides Command Line Tools, curl, and python3 from the installer and clicks Install on a `macos-14` runner. It is not a freshly imaged Mac.
@@ -50,7 +50,8 @@ The Linux test is an `ubuntu:24.04` container with curl, python3, and gcc absent
 1. If Linux support is off, the screen says Windows needs Linux support. The person clicks Enable. They do not type a command.
 2. Windows asks for permission once. If Windows says a restart is required, ElastOS says: Restart Windows. When you open ElastOS again, Install continues.
 3. After the restart, if Linux support is on, opening ElastOS continues Install. The app adds its own Linux environment, installs python3 and curl there if they are missing, and installs the runtime. If Linux support is still off, Install waits.
-4. The button becomes Open my computer. The page opens in the Windows browser at `http://127.0.0.1:8090/home/`.
+4. The button becomes Open my computer. The page opens in the Windows browser at `http://localhost:8090/home/`.
+5. The info panel says: Browser is not available on this computer yet. The in-computer Browser does not run on Windows yet. Home opens in the Windows browser.
 
 The ElastOS Linux environment is not removed by Remove PC2.
 

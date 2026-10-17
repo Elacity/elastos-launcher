@@ -3,7 +3,9 @@ import * as fs from 'fs';
 import * as net from 'net';
 import * as os from 'os';
 import * as path from 'path';
-import { HEALTH_URL } from './runtimeGateway';
+import { GATEWAY_ADDR, GATEWAY_PORT, LOOPBACK_ADDRESSES } from './gatewayAddress';
+import { isHealthOk, localhostIsLoopback, probeGatewayHealth, resolveLocalhost } from './runtimeGateway';
+import { BIP39_ENGLISH } from './bip39English';
 import { launcherOwnedDirectories } from './runtimePaths';
 import { BASH_MESSAGE, detectLinuxLibc, MUSL_MESSAGE, resolveBash } from './hostTools';
 import { runtimeInstallBlock, wslKvmMessage, detectWsl } from './runtimeSupport';
@@ -37,7 +39,12 @@ export interface PreflightInput {
   distroReady?: boolean;
   libc?: 'glibc' | 'musl' | 'unknown';
   bashPresent?: boolean;
+  /** What `localhost` resolves to. Absent when it was not checked. */
+  localhostAddresses?: string[] | null;
 }
+
+export const LOCALHOST_MESSAGE =
+  'On this computer, the name localhost does not point to this computer. ElastOS needs it to. Ask the person who looks after this computer to fix the hosts file, then try again.';
 
 export function evaluatePreflight(input: PreflightInput): PreflightReport {
   const checks: PreflightCheck[] = [];
@@ -78,9 +85,15 @@ export function evaluatePreflight(input: PreflightInput): PreflightReport {
   if (input.healthOk) {
     checks.push({ id: 'port', level: 'pass', message: 'Your computer is already running.' });
   } else if (input.portBusy) {
-    checks.push({ id: 'port', level: 'block', message: 'Port 8090 is being used by another program. Quit that program and try again.' });
+    checks.push({ id: 'port', level: 'block', message: `Port ${GATEWAY_PORT} is being used by another program. Quit that program and try again.` });
   } else {
-    checks.push({ id: 'port', level: 'pass', message: 'Port 8090 is free.' });
+    checks.push({ id: 'port', level: 'pass', message: `Port ${GATEWAY_PORT} is free.` });
+  }
+
+  if (input.localhostAddresses !== undefined) {
+    checks.push(input.localhostAddresses && localhostIsLoopback(input.localhostAddresses)
+      ? { id: 'localhost', level: 'pass', message: `${GATEWAY_ADDR} points to this computer.` }
+      : { id: 'localhost', level: 'block', message: LOCALHOST_MESSAGE });
   }
 
   if (input.networkChecked === false) {
@@ -190,11 +203,79 @@ function restoreKeptTokens(text: string, held: string[], nonce: string): string 
 
 const KNOWN_SECRET = /^(?:AKIA|ASIA)[0-9A-Z]{16}$|^gh[pousr]_[A-Za-z0-9]{16,}$|^github_pat_[A-Za-z0-9_]{16,}$|^sk-[A-Za-z0-9_-]{16,}$/;
 
-/** A 40- or 64-character hex hash kept on its own or beside a hash label. Other hex of 32 or more is a secret. */
+/** A 40-character hash, or a 64-character hex string on a sha256 or hash line. */
 function isDiagnosticHex(token: string, line: string): boolean {
-  if (token.length !== 40 && token.length !== 64) return false;
+  if (token.length === 64) return /\b(sha-?256|hash)\b/i.test(line);
+  if (token.length !== 40) return false;
   if (line.trim() === token) return true;
   return /\b(sha-?256|sha-?1|checksum|hash|cid|commit|installer)\b/i.test(line);
+}
+
+/**
+ * Separators a person or a tool puts between seed words: spaces, line breaks,
+ * commas, hyphens, quotes, brackets, and numbering such as `1.`, `2:` or `(3)`.
+ * Other letters, and a colon after a word (`seed: ...`), end the run.
+ */
+const MNEMONIC_GAP = /^(?:[\s,;'"`\[\](){}<>|\/.\-\u2013\u2014*#]|\d+:?){1,16}$/;
+
+/**
+ * Remove a run of 12 or more BIP39 words. Case does not matter, and the words
+ * may be split over lines or joined by commas, hyphens, quotes, or numbers.
+ * Shorter text, including `secret-line`, stays.
+ */
+function redactMnemonicRuns(text: string): string {
+  const words = [...text.matchAll(/[A-Za-z]+/g)].map((match) => ({
+    start: match.index ?? 0,
+    end: (match.index ?? 0) + match[0].length,
+    bip39: BIP39_ENGLISH.has(match[0].toLowerCase()),
+  }));
+  const runs: Array<[number, number]> = [];
+  let first = -1;
+  const close = (last: number) => {
+    if (first >= 0 && last - first + 1 >= 12) runs.push([words[first].start, words[last].end]);
+    first = -1;
+  };
+  for (let index = 0; index < words.length; index += 1) {
+    const word = words[index];
+    if (!word.bip39) {
+      close(index - 1);
+      continue;
+    }
+    if (first >= 0 && !MNEMONIC_GAP.test(text.slice(words[index - 1].end, word.start))) close(index - 1);
+    if (first < 0) first = index;
+  }
+  close(words.length - 1);
+  let out = text;
+  for (const [start, end] of runs.reverse()) out = `${out.slice(0, start)}[removed]${out.slice(end)}`;
+  return out;
+}
+
+const HEX_LINE = /^\s*(?:0[xX])?([0-9a-fA-F]+)\s*$/;
+
+/**
+ * A key wrapped over several lines. Two or more lines in a row that hold only
+ * hex, with 32 or more hex characters together, are removed unless every line
+ * is a whole 40- or 64-character hash.
+ */
+function redactWrappedHex(lines: string[]): string[] {
+  const out = [...lines];
+  let index = 0;
+  while (index < lines.length) {
+    if (!HEX_LINE.test(lines[index])) {
+      index += 1;
+      continue;
+    }
+    let end = index;
+    while (end + 1 < lines.length && HEX_LINE.test(lines[end + 1])) end += 1;
+    const pieces = lines.slice(index, end + 1).map((line) => (HEX_LINE.exec(line) as RegExpExecArray)[1]);
+    const total = pieces.reduce((sum, piece) => sum + piece.length, 0);
+    const wholeHashes = pieces.every((piece) => piece.length === 40 || piece.length === 64);
+    if (pieces.length >= 2 && total >= 32 && !wholeHashes) {
+      for (let at = index; at <= end; at += 1) out[at] = '[removed]';
+    }
+    index = end + 1;
+  }
+  return out;
 }
 
 /** Paths, hashes, ids, and names a support bundle needs. A mixed-case secret is not one of these. */
@@ -217,6 +298,8 @@ function keepDiagnosticToken(token: string, line: string): boolean {
 function redactHighEntropy(line: string): string {
   return line.replace(HIGH_ENTROPY, (token) => {
     if (KNOWN_SECRET.test(token)) return '[removed]';
+    const bare = token.replace(/^0[xX]/, '');
+    if (bare !== token && /^[0-9a-fA-F]{32,}$/.test(bare) && !isDiagnosticHex(bare, line)) return '[removed]';
     if (keepDiagnosticToken(token, line)) return token;
     if (/^[0-9a-fA-F]{32,}$/.test(token)) return '[removed]';
     if (/^[A-Z][A-Z0-9]{15,}$/.test(token) && /\d/.test(token)) return '[removed]';
@@ -228,29 +311,34 @@ function redactHighEntropy(line: string): string {
 }
 
 /**
- * Drop PEM and coordinate-file lines. Redact labeled secrets, known secret
- * prefixes (AWS keys, ghp_ tokens, sk- keys), hex of 32 or more characters
- * that is not a 40- or 64-character hash, and an unlabeled mixed-case token
- * of 20 or more characters with high entropy. Keep paths, those hashes, CIDs,
- * did:key values, versions, UUIDs, and UPPER_SNAKE names. An unlabeled secret
- * shorter than that, or with low entropy, is not redacted.
+ * Drop PEM and coordinate-file lines. Redact labeled secrets, the rest of a
+ * seed, mnemonic, private_key, or secret line, a run of 12 or more BIP39 words
+ * in any case and split by spaces, lines, commas, or numbering, hex wrapped
+ * over several lines,
+ * known secret prefixes (AWS keys, ghp_ tokens, sk- keys), hex of 32 or more
+ * characters including a 64-character hex string that is not on a sha256 or
+ * hash line, and an unlabeled mixed-case token of 20 or more characters with
+ * high entropy. Keep paths, a 40-character hash, a 64-character hex string on
+ * a sha256 or hash line, CIDs, did:key values, versions, UUIDs, and
+ * UPPER_SNAKE names. An unlabeled secret shorter than that, or with low
+ * entropy, is not redacted.
  */
 export function scrubSupportText(text: string): string {
   const shielded = shieldKeptTokens(text);
-  const scrubbed = shielded.text
+  const scrubbed = redactWrappedHex(redactMnemonicRuns(shielded.text)
     .split('\n')
-    .filter((line) => !DROP_SUPPORT_LINE.test(line))
-    .map((line) => redactHighEntropy(line
+    .filter((line) => !DROP_SUPPORT_LINE.test(line)))
+    .map((line) => redactHighEntropy((line
       .replace(/\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b/g, '[removed]')
       .replace(/(\battach_secret\s*[:=]\s*)\S+/gi, '$1[removed]')
       .replace(/(\bapi[_-]?key\s*[:=]\s*)\S+/gi, '$1[removed]')
       .replace(/(\baccess_token\s*[:=]\s*)\S+/gi, '$1[removed]')
       .replace(/(\btoken\s*[:=]\s*)\S+/gi, '$1[removed]')
-      .replace(/(\bseed\s*[:=]\s*)\S+/gi, '$1[removed]')
+      .replace(/(\b(?:seed|mnemonic|private[\s_-]?key|secret)\s*[:=]\s*).*/gi, '$1[removed]')
       .replace(/(\bcookie\s*[:=]\s*)\S+/gi, '$1[removed]')
       .replace(/(\bauthorization\s*=\s*)\S+/gi, '$1[removed]')
       .replace(/bearer\s+\S+/gi, 'bearer [removed]')
-      .replace(/password\s*[:=]\s*\S+/gi, 'password [removed]')))
+      .replace(/password\s*[:=]\s*\S+/gi, 'password [removed]'))))
     .join('\n');
   return restoreKeptTokens(scrubbed, shielded.held, shielded.nonce);
 }
@@ -304,23 +392,48 @@ export function freeBytes(dir: string): number | null {
   }
 }
 
-export function portBusy(port: number, host = '127.0.0.1'): Promise<boolean> {
+export type ListenResult = 'free' | 'busy' | 'no-address';
+
+/** Try to listen on one address. An address this computer does not have (IPv6 off) is `no-address`. */
+export function tryListen(port: number, host: string): Promise<ListenResult> {
   return new Promise((resolve) => {
     const server = net.createServer();
-    server.once('error', () => resolve(true));
-    server.once('listening', () => {
-      server.close(() => resolve(false));
+    server.once('error', (err: NodeJS.ErrnoException) => {
+      const code = err && err.code;
+      resolve(code === 'EADDRNOTAVAIL' || code === 'EAFNOSUPPORT' ? 'no-address' : 'busy');
     });
-    server.listen(port, host);
+    server.once('listening', () => {
+      server.close(() => resolve('free'));
+    });
+    server.listen({ port, host, ipv6Only: host.includes(':') });
   });
 }
 
+/**
+ * True when anything holds `port` on 127.0.0.1 or ::1, the addresses
+ * `localhost` names. A host without IPv6 checks 127.0.0.1 only. An
+ * unexpected error counts as busy.
+ */
+export async function portBusy(
+  port: number,
+  hosts: readonly string[] = LOOPBACK_ADDRESSES,
+  listen: (port: number, host: string) => Promise<ListenResult> = tryListen,
+): Promise<boolean> {
+  for (const host of hosts) {
+    if ((await listen(port, host)) === 'busy') return true;
+  }
+  return false;
+}
+
 async function healthOk(): Promise<boolean> {
+  return isHealthOk(await probeGatewayHealth({ timeoutMs: 800 }));
+}
+
+async function localhostAddresses(): Promise<string[] | null> {
   try {
-    const response = await fetch(HEALTH_URL, { signal: AbortSignal.timeout(800) });
-    return response.ok && (await response.text()).trim() === 'OK';
+    return await resolveLocalhost();
   } catch {
-    return false;
+    return null;
   }
 }
 
@@ -373,7 +486,7 @@ export async function collectPreflight(
   platform = process.platform,
   arch = process.arch,
 ): Promise<PreflightReport> {
-  const busy = platform === 'win32' ? false : await portBusy(8090);
+  const busy = platform === 'win32' ? false : await portBusy(GATEWAY_PORT);
   const healthy = busy ? await healthOk() : false;
   let procVersion = '';
   try {
@@ -402,5 +515,6 @@ export async function collectPreflight(
     distroReady,
     libc: platform === 'linux' ? detectLinuxLibc(platform) : 'unknown',
     bashPresent: platform === 'win32' ? true : resolveBash() !== null,
+    localhostAddresses: await localhostAddresses(),
   });
 }

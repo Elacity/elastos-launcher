@@ -1,13 +1,21 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import { GATEWAY_PORT } from './gatewayAddress';
 import { confirmInstalledGateway, isHealthOk } from './runtimeGateway';
 import { installRuntimeOnThisComputer } from './runtimeInstall';
-import { launcherOwnedDirectories, runtimeBinaryPath, runtimeComponentsPath, runtimeDataDir, runtimeHostLockPath } from './runtimePaths';
+import {
+  NO_INSTALL_RECORD,
+  launcherOwnedDirectories,
+  runtimeBinaryPath,
+  runtimeComponentsPath,
+  runtimeDataDir,
+  runtimeHostLockPath,
+} from './runtimePaths';
 import { loadActiveRuntimePin } from './runtimePin';
 import { portBusy } from './preflight';
 
-export type FailureKind = 'port' | 'interrupted' | 'stale-lock' | 'offline' | 'windows' | 'other';
+export type FailureKind = 'port' | 'interrupted' | 'stale-lock' | 'offline' | 'windows' | 'no-record' | 'other';
 
 export interface FailureCheck {
   id: string;
@@ -120,6 +128,16 @@ export function failureScreen(facts: FailureFacts): FailureScreen {
       fixLabel: 'Fix it',
     };
   }
+  if (kind === 'no-record') {
+    // The refusal names the folder and the next clicks (foreignRuntimeDataMessage).
+    return {
+      kind,
+      title: 'Install ElastOS again, then reset',
+      message: plainError(facts.error, facts.checks),
+      retryLabel: 'Try again',
+      fixLabel: 'Fix it',
+    };
+  }
   const copy = kind === 'other'
     ? { title: 'ElastOS needs attention', message: plainError(facts.error, facts.checks) }
     : COPY[kind];
@@ -139,6 +157,14 @@ export async function applyFix(facts: FailureFacts, deps: RecoveryDeps): Promise
     await deps.enableWindows();
     if (!(await deps.healthOk())) return 'still-blocked';
     return (await deps.gatewayIdentity()) ? 'ready' : 'still-blocked';
+  }
+  if (kind === 'no-record') {
+    // Nothing is deleted or changed here. On 'ready' the window runs Install.
+    // With no valid record Install does not count ElastOS as installed
+    // (planRuntimeInstall), so it runs the pinned install.sh, which writes the
+    // signed record in installation/ (runtime install-release). Then Reset
+    // can prove the folder.
+    return 'ready';
   }
   if (kind === 'offline') {
     return (await deps.recheckOnline()) ? 'ready' : 'still-blocked';
@@ -225,6 +251,7 @@ export async function fixCollectedFailure(facts: FailureFacts): Promise<'ready' 
 }
 
 function classify(facts: FailureFacts): FailureKind {
+  if (facts.error.includes(NO_INSTALL_RECORD)) return 'no-record';
   if (blocked(facts, 'windows')) return 'windows';
   if (blocked(facts, 'network') || /offline|not reachable|ENOTFOUND|getaddrinfo/i.test(facts.error)) {
     return 'offline';
@@ -251,7 +278,7 @@ function plainError(error: string, checks: FailureCheck[]): string {
   return block?.message || GENERIC;
 }
 
-const COPY: Record<Exclude<FailureKind, 'other' | 'windows'>, { title: string; message: string }> = {
+const COPY: Record<Exclude<FailureKind, 'other' | 'windows' | 'no-record'>, { title: string; message: string }> = {
   offline: {
     title: 'You are offline',
     message: 'ElastOS could not reach the internet, so nothing was installed. Connect, then click Fix it to check again.',
@@ -293,7 +320,7 @@ export async function recheckPortWith(deps: {
 
 async function recheckPort(): Promise<'free' | 'ours' | 'busy'> {
   return recheckPortWith({
-    portBusy: () => portBusy(8090),
+    portBusy: () => portBusy(GATEWAY_PORT),
     confirm: () => confirmInstalledGateway(),
   });
 }

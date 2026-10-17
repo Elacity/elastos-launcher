@@ -63,6 +63,44 @@ function resetCopy() {
   };
 }
 
+/**
+ * The Reset dialog's backup offer. `description` comes from the main
+ * process (describeResetBackup). `needsChoice` keeps Reset off until the
+ * person picks one answer.
+ */
+function resetBackupCopy(description) {
+  const base = {
+    yes: 'Save a copy of your ElastOS data first',
+    no: 'Do not save a copy',
+    warning: 'The copy holds your keys and your sign-in identity. Anyone who has the file can use them. Keep it private.',
+  };
+  if (!description || typeof description !== 'object') {
+    return {
+      ...base,
+      needsChoice: true,
+      canSave: false,
+      text: 'ElastOS could not measure your data, so it cannot save a copy now. You can still reset without a copy.',
+      space: '',
+    };
+  }
+  if (!description.present) {
+    return { ...base, needsChoice: false, canSave: false, text: 'There is no ElastOS data on this computer to save.', space: '' };
+  }
+  let space = '';
+  if (!description.enough) {
+    space = description.freeBytes == null
+      ? 'ElastOS could not check the free space, so it cannot save a copy.'
+      : `There is not enough free space for a copy. It needs about ${formatBytes(description.neededBytes)}, and ${formatBytes(description.freeBytes)} is free.`;
+  }
+  return {
+    ...base,
+    needsChoice: true,
+    canSave: Boolean(description.enough),
+    text: `Your ElastOS data is about ${formatBytes(description.bytes)}. A copy goes in ${description.folder}. Program files, caches, and downloaded models are left out, because Install gets them again.`,
+    space,
+  };
+}
+
 function firstRunCopy(_targetId, status) {
   if (status !== 'not-installed') return '';
   return 'Install ElastOS on this computer. One button downloads it, sets it up, and starts it. Then you open your computer in the browser.';
@@ -89,6 +127,11 @@ function legacyPc2Copy(items) {
   };
 }
 
+/** The info-panel Browser line. The main process sends it on Windows only. */
+function browserNoteText(info) {
+  return info && typeof info.browserNote === 'string' ? info.browserNote : '';
+}
+
 function urlLabel(openUrl) {
   return String(openUrl || '').replace(/^https?:\/\//, '').replace(/\/$/, '');
 }
@@ -100,9 +143,11 @@ const api = {
   primaryAction,
   confirmCopy,
   resetCopy,
+  resetBackupCopy,
   firstRunCopy,
   formatBytes,
   legacyPc2Copy,
+  browserNoteText,
   urlLabel,
 };
 

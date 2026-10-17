@@ -9,7 +9,10 @@ contextBridge.exposeInMainWorld('elastos', {
   openBrowser: () => ipcRenderer.invoke('elastos:openBrowser'),
   install: () => ipcRenderer.invoke('elastos:install'),
   uninstall: () => ipcRenderer.invoke('elastos:uninstall'),
-  resetRuntime: () => ipcRenderer.invoke('elastos:resetRuntime'),
+  resetRuntime: (choice: { backup?: unknown }) => ipcRenderer.invoke('elastos:resetRuntime', {
+    backup: choice && (choice.backup === true || choice.backup === false) ? choice.backup : undefined,
+  }),
+  describeResetBackup: () => ipcRenderer.invoke('elastos:describeResetBackup'),
 
   getStatus: () => ipcRenderer.invoke('elastos:getStatus'),
   getLogs: (lines: number) => ipcRenderer.invoke('elastos:getLogs', lines),
@@ -69,7 +72,15 @@ declare global {
       openBrowser: () => void;
       install: () => Promise<void>;
       uninstall: () => Promise<void>;
-      resetRuntime: () => Promise<void>;
+      resetRuntime: (choice: { backup: boolean }) => Promise<{ backupPath: string | null }>;
+      describeResetBackup: () => Promise<{
+        present: boolean;
+        bytes: number;
+        neededBytes: number;
+        freeBytes: number | null;
+        enough: boolean;
+        folder: string;
+      }>;
       getStatus: () => Promise<RuntimeStatus>;
       getLogs: (lines: number) => Promise<string>;
       isInstalled: () => Promise<boolean>;
@@ -83,6 +94,7 @@ declare global {
         openUrl: string;
         status: RuntimeStatus;
         platformNote: string | null;
+        browserNote: string | null;
         preflight: { ok: boolean; checks: Array<{ id: string; level: string; message: string }> };
         openAtLogin: boolean;
         canRollback: boolean;

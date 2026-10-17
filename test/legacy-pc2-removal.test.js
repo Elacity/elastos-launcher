@@ -787,3 +787,11 @@ test('describing PC2 does not block the main thread and is cached', async () => 
   assert.equal(legacyPc2DescribeRuns(), runs + 1);
   clearLegacyPc2DescribeCache();
 });
+
+test('the packaged app loads the Remove PC2 worker from app.asar, where its imports are', () => {
+  const { legacyPc2WorkerScript } = require('../dist/main/legacyPc2Removal');
+  assert.equal(legacyPc2WorkerScript(), path.join(__dirname, '..', 'dist', 'main', 'legacyPc2Worker.js'));
+  const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8'));
+  // An unpacked worker cannot require ./legacyPc2Removal, which stays in app.asar.
+  assert.equal((pkg.build.asarUnpack || []).includes('dist/main/legacyPc2Worker.js'), false);
+});

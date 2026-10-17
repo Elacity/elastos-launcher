@@ -1,11 +1,14 @@
 import { RUNTIME_TARGET } from './descriptors';
 import { targetSupportsHost } from './registry';
 
-export const INTEL_MAC_MESSAGE =
-  'ElastOS is not yet supported on Intel Macs. A signed release for this Mac is not published yet.';
+/** The words the team chose. It does not point to a developer build. */
+export const INTEL_MAC_MESSAGE = 'Intel Mac is not supported yet.';
 
 export const WINDOWS_NATIVE_MESSAGE =
   'ElastOS on Windows runs in its own Linux environment. Click Enable. Windows will ask for permission once. You do not type any commands.';
+
+/** Windows (WSL2) has no in-computer Browser yet. Shown only on Windows. */
+export const WINDOWS_BROWSER_MESSAGE = 'Browser is not available on this computer yet.';
 
 export const KVM_MESSAGE =
   'The local Browser needs /dev/kvm, and this WSL2 distro does not have it. ElastOS can still install, and you can open your computer in the Windows browser. The in-computer browser stays off until /dev/kvm is available.';
@@ -22,6 +25,11 @@ export function runtimeInstallBlock(platform: string, arch: string): string | nu
     return `ElastOS is not supported on ${platform}/${arch}.`;
   }
   return null;
+}
+
+/** The Browser note for this platform. Only Windows has one. */
+export function browserNote(platform: string): string | null {
+  return platform === 'win32' ? WINDOWS_BROWSER_MESSAGE : null;
 }
 
 export function wslKvmMessage(wsl: boolean, kvmAvailable: boolean): string | null {
