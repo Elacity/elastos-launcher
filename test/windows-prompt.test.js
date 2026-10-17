@@ -1,5 +1,5 @@
 const assert = require('node:assert/strict');
-const { spawn } = require('node:child_process');
+const { spawn, spawnSync } = require('node:child_process');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -22,6 +22,7 @@ const {
   finishResumeInstall,
   prepareWindowsImportDir,
   RESUME_LOCK_STALE_MS,
+  RESUME_TOKEN_STALE_MS,
   markInstallResumeAfterReboot,
   planAfterWindowsRestart,
   resumeInstallPlanOnThisComputer,
@@ -506,6 +507,157 @@ test('a reused pid does not hold the resume lock forever', () => {
   } finally {
     child.kill();
     finishResumeInstall(home, false);
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+const WINDOWS_HOST = path.join(__dirname, '../dist/main/targets/windowsHost.js');
+const DEAD_PID = 2147483646;
+
+function sleepSync(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+function waitForFile(file, ms = 10000) {
+  const until = Date.now() + ms;
+  while (!fs.existsSync(file)) {
+    if (Date.now() > until) throw new Error(`timed out waiting for ${file}`);
+    sleepSync(10);
+  }
+}
+
+/** Another launcher process. It claims once, prints yes or no, and exits. */
+function claimInChild(home) {
+  const result = spawnSync(process.execPath, ['-e', `
+    const { claimResumeInstall } = require(${JSON.stringify(WINDOWS_HOST)});
+    process.stdout.write(claimResumeInstall(process.argv[1]) ? 'yes' : 'no');
+  `, home], { encoding: 'utf8', timeout: 10000 });
+  if (result.status !== 0) throw new Error(result.stderr || `claim exited ${result.status}`);
+  return result.stdout;
+}
+
+function resumeLockFixture(prefix) {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+  const dir = path.join(home, '.elastos-launcher');
+  fs.mkdirSync(dir, { recursive: true });
+  return { home, lock: path.join(dir, 'resume-install.json.lock'), token: path.join(dir, 'resume-install.json.lock.reclaim') };
+}
+
+test('three launchers reclaim one stale resume lock and exactly one wins', () => {
+  const { home, lock, token } = resumeLockFixture('elastos-resume-three-');
+  try {
+    fs.writeFileSync(lock, JSON.stringify({ pid: DEAD_PID, uptime: os.uptime() }));
+    const others = [];
+    // This process holds the token and has judged the lock stale. Two more
+    // launchers try now: both see the same stale lock and must stop.
+    assert.equal(claimResumeInstall(home, {
+      beforeRename() {
+        assert.equal(JSON.parse(fs.readFileSync(token, 'utf8')).pid, process.pid);
+        others.push(claimInChild(home), claimInChild(home));
+      },
+    }), true);
+    assert.deepEqual(others, ['no', 'no']);
+    assert.equal(JSON.parse(fs.readFileSync(lock, 'utf8')).pid, process.pid);
+    assert.equal(fs.existsSync(token), false);
+    // A fourth launcher after the claim sees a live, fresh lock.
+    assert.equal(claimInChild(home), 'no');
+    assert.equal(JSON.parse(fs.readFileSync(lock, 'utf8')).pid, process.pid);
+  } finally {
+    finishResumeInstall(home, false);
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('a reclaimer that moved a live reclaim token puts it back and stops', async () => {
+  const { home, lock, token } = resumeLockFixture('elastos-resume-token-');
+  const ready = path.join(home, 'c-ready');
+  const go = path.join(home, 'go');
+  let racer = null;
+  try {
+    fs.writeFileSync(lock, JSON.stringify({ pid: DEAD_PID, uptime: os.uptime() }));
+    // A reclaimer crashed while it held the token.
+    fs.writeFileSync(token, JSON.stringify({ pid: DEAD_PID - 1, uptime: os.uptime() }));
+    let out = '';
+    let err = '';
+    const racerDone = new Promise((resolve) => {
+      // This process read the dead token. Before it moves that name, launcher C
+      // takes the token the normal way and stops just before it moves the lock.
+      const mine = claimResumeInstall(home, {
+        beforeTokenRename() {
+          racer = spawn(process.execPath, ['-e', `
+            const fs = require('fs');
+            const { claimResumeInstall } = require(${JSON.stringify(WINDOWS_HOST)});
+            const wait = () => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
+            const ok = claimResumeInstall(process.argv[1], {
+              beforeRename() {
+                fs.writeFileSync(process.argv[2], 'ready');
+                const until = Date.now() + 10000;
+                while (!fs.existsSync(process.argv[3]) && Date.now() < until) wait();
+              },
+            });
+            process.stdout.write(ok ? 'yes' : 'no');
+          `, home, ready, go], { stdio: ['ignore', 'pipe', 'pipe'] });
+          racer.stdout.on('data', (chunk) => { out += chunk; });
+          racer.stderr.on('data', (chunk) => { err += chunk; });
+          racer.on('exit', (code) => resolve({ code }));
+          waitForFile(ready);
+          assert.equal(JSON.parse(fs.readFileSync(token, 'utf8')).pid, racer.pid);
+        },
+      });
+      // This process moved C's live token, saw it was not the dead one, put it
+      // back, and stopped. Only C may reclaim.
+      assert.equal(mine, false);
+      assert.equal(JSON.parse(fs.readFileSync(token, 'utf8')).pid, racer.pid);
+      assert.equal(JSON.parse(fs.readFileSync(lock, 'utf8')).pid, DEAD_PID);
+      fs.writeFileSync(go, 'go');
+    });
+    const { code } = await racerDone;
+    assert.equal(code, 0, err);
+    assert.equal(out, 'yes');
+    assert.equal(JSON.parse(fs.readFileSync(lock, 'utf8')).pid, racer.pid);
+    assert.equal(fs.existsSync(token), false);
+  } finally {
+    if (racer && racer.exitCode == null) racer.kill();
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('a reclaim token with a reused pid does not block resume forever', () => {
+  const { home, lock, token } = resumeLockFixture('elastos-resume-token-age-');
+  const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+  try {
+    fs.writeFileSync(lock, JSON.stringify({ pid: DEAD_PID, uptime: os.uptime() }));
+    fs.writeFileSync(token, JSON.stringify({ pid: child.pid, uptime: os.uptime() }));
+    // A live, fresh token holder is mid-reclaim. Wait for it.
+    assert.equal(claimResumeInstall(home), false);
+    assert.equal(JSON.parse(fs.readFileSync(lock, 'utf8')).pid, DEAD_PID);
+    // The same pid, silent past the token bound, is a crashed reclaimer whose pid was reused.
+    const old = new Date(Date.now() - RESUME_TOKEN_STALE_MS - 1000);
+    fs.utimesSync(token, old, old);
+    assert.equal(claimResumeInstall(home), true);
+    assert.equal(JSON.parse(fs.readFileSync(lock, 'utf8')).pid, process.pid);
+    assert.equal(fs.existsSync(token), false);
+  } finally {
+    child.kill();
+    finishResumeInstall(home, false);
+    fs.rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test('finishing a resume does not remove a lock another launcher claimed', () => {
+  const { home, lock } = resumeLockFixture('elastos-resume-finish-');
+  try {
+    markInstallResumeAfterReboot(home);
+    const other = JSON.stringify({ pid: DEAD_PID, uptime: os.uptime() });
+    fs.writeFileSync(lock, other);
+    finishResumeInstall(home, false);
+    assert.equal(fs.readFileSync(lock, 'utf8'), other);
+    fs.rmSync(lock);
+    assert.equal(claimResumeInstall(home), true);
+    finishResumeInstall(home, true);
+    assert.equal(fs.existsSync(lock), false);
+    assert.equal(fs.existsSync(path.join(home, '.elastos-launcher', 'resume-install.json')), false);
+  } finally {
     fs.rmSync(home, { recursive: true, force: true });
   }
 });

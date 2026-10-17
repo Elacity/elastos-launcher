@@ -345,6 +345,11 @@ function resumeLockPath(homeDir: string): string {
 /** A silent lock is reclaimable after this. A live holder refreshes the timestamp sooner. */
 export const RESUME_LOCK_STALE_MS = 2 * 60 * 1000;
 const RESUME_LOCK_BEAT_MS = 30 * 1000;
+/**
+ * A reclaim token is held for a few file operations. One older than this
+ * belongs to a reclaimer that crashed or whose pid was reused.
+ */
+export const RESUME_TOKEN_STALE_MS = 30 * 1000;
 
 function pidIsAlive(pid: number): boolean {
   try {
@@ -376,7 +381,7 @@ function processStartToken(pid: number): string | null {
  * A live pid whose lock has not been refreshed within the bound is stale too,
  * so a reused pid cannot block Install until the next boot.
  */
-function resumeLockBytesAreStale(bytes: Buffer, mtimeMs: number): boolean {
+function resumeLockBytesAreStale(bytes: Buffer, mtimeMs: number, boundMs = RESUME_LOCK_STALE_MS): boolean {
   let parsed: { pid?: unknown; uptime?: unknown; start?: unknown } | null = null;
   try {
     parsed = JSON.parse(bytes.toString('utf8')) as { pid?: unknown; uptime?: unknown; start?: unknown };
@@ -389,7 +394,7 @@ function resumeLockBytesAreStale(bytes: Buffer, mtimeMs: number): boolean {
   const currentStart = processStartToken(parsed.pid);
   if (typeof parsed.start === 'string' && currentStart && parsed.start !== currentStart) return true;
   if (!pidIsAlive(parsed.pid)) return true;
-  return Number.isFinite(mtimeMs) && Date.now() - mtimeMs > RESUME_LOCK_STALE_MS;
+  return Number.isFinite(mtimeMs) && Date.now() - mtimeMs > boundMs;
 }
 
 const resumeBeats = new Map<string, NodeJS.Timeout>();
@@ -444,34 +449,57 @@ function tryCreateResumeLock(lock: string, payload: string): boolean {
   }
 }
 
+/** Test seams. Each runs at one step of a reclaim so a test can put another claim there. */
 type ResumeReclaimHook = (() => void) | {
   beforeReclaim?: () => void;
+  beforeTokenRename?: () => void;
+  beforeRename?: () => void;
   afterRename?: (junk: string) => void;
 };
 
-function claimReclaimToken(lock: string): string | null {
-  const token = `${lock}.reclaim`;
-  const payload = JSON.stringify({ pid: process.pid, uptime: os.uptime() });
-  if (tryCreateResumeLock(token, payload)) return token;
-  let text = '';
+function readWithMtime(file: string): { bytes: Buffer; mtimeMs: number } | null {
   try {
-    text = fs.readFileSync(token, 'utf8');
+    const stat = fs.statSync(file);
+    return { bytes: fs.readFileSync(file), mtimeMs: stat.mtimeMs };
   } catch {
     return null;
   }
-  let pid = 0;
+}
+
+/**
+ * Take the one reclaim token. A token left by a reclaimer that died, rebooted,
+ * or went silent past RESUME_TOKEN_STALE_MS is moved aside. The moved bytes
+ * must be the dead token that was judged. A live token moved by a race is
+ * linked back while its name is free, and this claim stops.
+ */
+function claimReclaimToken(lock: string, hooks: Exclude<ResumeReclaimHook, () => void>): string | null {
+  const token = `${lock}.reclaim`;
+  const payload = JSON.stringify({ pid: process.pid, uptime: os.uptime(), start: processStartToken(process.pid) });
+  if (tryCreateResumeLock(token, payload)) return token;
+  const seen = readWithMtime(token);
+  if (!seen) return null;
   try {
-    const parsed = JSON.parse(text) as { pid?: unknown };
-    pid = typeof parsed.pid === 'number' ? parsed.pid : 0;
+    const parsed = JSON.parse(seen.bytes.toString('utf8')) as { pid?: unknown };
+    if (parsed.pid === process.pid) return token;
   } catch {
-    pid = 0;
+    // Unreadable bytes are judged below.
   }
-  if (pid === process.pid) return token;
-  if (pid > 0 && pidIsAlive(pid)) return null;
+  if (!resumeLockBytesAreStale(seen.bytes, seen.mtimeMs, RESUME_TOKEN_STALE_MS)) return null;
+  if (hooks.beforeTokenRename) hooks.beforeTokenRename();
   const junk = `${token}.dead-${process.pid}-${crypto.randomBytes(4).toString('hex')}`;
   try {
     fs.renameSync(token, junk);
   } catch {
+    return null;
+  }
+  let moved: Buffer;
+  try {
+    moved = fs.readFileSync(junk);
+  } catch {
+    return null;
+  }
+  if (!moved.equals(seen.bytes)) {
+    restoreResumeLock(junk, token);
     return null;
   }
   try {
@@ -539,7 +567,7 @@ export function claimResumeInstall(homeDir: string, hook?: ResumeReclaimHook): b
   }
   if (!resumeLockBytesAreStale(judged, mtime)) return false;
   if (hooks.beforeReclaim) hooks.beforeReclaim();
-  const token = claimReclaimToken(lock);
+  const token = claimReclaimToken(lock, hooks);
   if (!token) return false;
   try {
     let again: Buffer;
@@ -552,6 +580,7 @@ export function claimResumeInstall(homeDir: string, hook?: ResumeReclaimHook): b
       return false;
     }
     if (!again.equals(judged) || !resumeLockBytesAreStale(again, againMtime)) return false;
+    if (hooks.beforeRename) hooks.beforeRename();
     const junk = `${lock}.stale-${process.pid}-${crypto.randomBytes(4).toString('hex')}`;
     try {
       fs.renameSync(lock, junk);
@@ -628,14 +657,27 @@ export async function resumeInstallPlanOnThisComputer(deps: {
   return 'install';
 }
 
-/** Drop the resume lock. Remove the marker only after Install succeeded. */
+/**
+ * Drop this process's resume lock. A lock that another open has since claimed
+ * stays. Remove the marker only after Install succeeded.
+ */
 export function finishResumeInstall(homeDir: string, ok: boolean): void {
   stopResumeHeartbeat(homeDir);
   const lock = resumeLockPath(homeDir);
+  let mine = false;
   try {
-    fs.rmSync(lock, { force: true });
-  } catch {
-    // The next open can reclaim a lock whose process is gone.
+    const parsed = JSON.parse(fs.readFileSync(lock, 'utf8')) as { pid?: unknown };
+    mine = parsed.pid === process.pid;
+  } catch (err) {
+    // An empty or unreadable lock is no one's claim. A missing one needs nothing.
+    mine = !(err && typeof err === 'object' && 'code' in err && (err as { code?: string }).code === 'ENOENT');
+  }
+  if (mine) {
+    try {
+      fs.rmSync(lock, { force: true });
+    } catch {
+      // The next open can reclaim a lock whose process is gone.
+    }
   }
   const dir = path.dirname(lock);
   const base = path.basename(lock);
