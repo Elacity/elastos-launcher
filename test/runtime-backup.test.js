@@ -86,6 +86,8 @@ test('a backup leaves out only rebuildable runtime data', () => {
   assert.equal(backupExcluded('browser-vm/image-set'), true);
   assert.equal(backupExcluded('browser-vm/profile-state/cookies'), false);
   assert.equal(backupExcluded('binder/file'), false);
+  // No runtime code writes `Image`, so a file of that name is the user's.
+  assert.equal(backupExcluded('Image'), false);
   for (const kept of ['Users/a', 'signing_key', 'identity', 'did', 'ca.key', 'tls.key', 'capability_store/x', 'namespaces/x', 'audit.log', 'storage/x', 'shares/x', 'config.toml']) {
     assert.equal(backupExcluded(kept), false, kept);
   }

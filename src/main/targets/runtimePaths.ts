@@ -124,7 +124,7 @@ const RUNTIME_DATA_NAMES = new Set([
   'config', 'config.toml', 'providers', 'protected-content', 'model-preparation',
   'services-model-runs.json', 'services-model-remote-runs.json', 'operator-control.json',
   'backups', 'logs', 'policy', 'shares', 'storage', 'time_counter', 'audit.log', '.audit',
-  'crosvm', 'crosvm-empty', 'vz', 'vz-browser', 'rootfs-cache', 'Image', 'Runtime',
+  'crosvm', 'crosvm-empty', 'vz', 'vz-browser', 'rootfs-cache', 'Runtime',
   // Community, which first setup joins (collaboration_release_network.rs:30-36,
   // collaboration_startup.rs:34, collaboration_core.rs:2732).
   '.collaboration-network-choice.lock', 'collaboration', 'collaboration-network-v1.json',

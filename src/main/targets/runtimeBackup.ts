@@ -21,7 +21,7 @@ export const RUNTIME_BACKUP_EXCLUDES: readonly string[] = [
   'bin', 'capsules', 'libexec', 'tools', 'scripts', 'browser-vm/image-set',
   'model-catalog.json', 'components.json', 'sources.json', 'installation', 'update-controller',
   'browser-vm/vmlinux', 'browser-vm/rootfs.ext4', 'browser-vm/initrd', 'rootfs-cache',
-  'crosvm', 'crosvm-empty', 'Image', 'cache', 'gateway-cache', 'content_cache', 'model-preparation',
+  'crosvm', 'crosvm-empty', 'cache', 'gateway-cache', 'content_cache', 'model-preparation',
   'host-process.lock', 'gateway-runtime-ownership.lock', 'managed-runtime-start.lock',
   'runtime-coords.json', 'gateway-runtime-coords.json', 'home-runtime-coords.json', '.components.upgrade.tmp',
 ];

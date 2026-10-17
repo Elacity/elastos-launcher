@@ -391,6 +391,8 @@ test('a foreign name beside a real setup is still refused by name', async () => 
     fs.writeFileSync(path.join(data, 'holiday-photos', 'beach.jpg'), 'keep');
     fs.mkdirSync(path.join(data, 'ipfs-repo.old'));
     fs.writeFileSync(path.join(data, 'collaboration-network-v2.json'), 'keep');
+    // Only a runtime unit test writes `Image` in a data folder (setup.rs tests).
+    assert.equal(isRuntimeDataName('Image'), false);
     assert.equal(launcherOwnedDirectories(data, home, 'linux', env), false);
     const refused = [];
     await assert.rejects(
