@@ -9,6 +9,7 @@ const { runtimeInstallBlock } = require('../dist/main/targets/runtimeSupport');
 const {
   adoptDistroGatewayProcess,
   adoptInstalledDistroGateway,
+  distroListenerIdentity,
   distroListenerKind,
   assertDistroPath,
   distroGatewayArgs,
@@ -228,34 +229,39 @@ test('an adopted distro gateway uses the lock pid and does not report a live pid
   assert.equal(argv[0][3], 'TERM');
   assert.equal(String(argv[0][2]).includes('host-process.lock'), false);
   const adoptedCalls = [];
+  const adoptAny = (label) => (pid) => {
+    adoptedCalls.push(`${label}:${pid}`);
+    return signaled;
+  };
   assert.equal(await adoptInstalledDistroGateway({
-    kind: async () => 'other',
-    adopt: () => {
-      adoptedCalls.push('other');
-      return signaled;
-    },
+    identify: async () => ({ kind: 'other', pid: null }),
+    adopt: adoptAny('other'),
   }), null);
   assert.equal(await adoptInstalledDistroGateway({
-    kind: async () => 'unknown',
-    adopt: () => {
-      adoptedCalls.push('unknown');
-      return signaled;
-    },
+    identify: async () => ({ kind: 'unknown', pid: null }),
+    adopt: adoptAny('unknown'),
   }), null);
   assert.equal(await adoptInstalledDistroGateway({
-    kind: async () => { throw new Error('facts timed out'); },
-    adopt: () => {
-      adoptedCalls.push('throw');
-      return signaled;
-    },
+    identify: async () => { throw new Error('facts timed out'); },
+    adopt: adoptAny('throw'),
+  }), null);
+  assert.equal(await adoptInstalledDistroGateway({
+    identify: async () => ({ kind: 'elastos', pid: null }),
+    adopt: adoptAny('no-pid'),
+  }), null);
+  assert.equal(await adoptInstalledDistroGateway({
+    identify: async () => ({ kind: 'elastos', pid: 1 }),
+    adopt: adoptAny('pid-1'),
   }), null);
   assert.equal(await distroListenerKind(async () => { throw new Error('timeout'); }), 'unknown');
   assert.equal(await distroListenerKind(async () => ({ code: 1, stdout: '', stderr: 'closed' })), 'unknown');
+  assert.deepEqual(await distroListenerIdentity(async () => ({ code: 0, stdout: 'not json', stderr: '' })), { kind: 'other', pid: null });
   assert.deepEqual(adoptedCalls, []);
   assert.equal(await adoptInstalledDistroGateway({
-    kind: async () => 'elastos',
-    adopt: () => signaled,
+    identify: async () => ({ kind: 'elastos', pid: 77 }),
+    adopt: adoptAny('elastos'),
   }), signaled);
+  assert.deepEqual(adoptedCalls, ['elastos:77']);
 
   let clock = 0;
   let health = { status: 200, body: 'OK' };
@@ -341,4 +347,38 @@ test('an adopted distro gateway uses the lock pid and does not report a live pid
   } finally {
     try { process.kill(-sleeper.pid, 'SIGKILL'); } catch { /* already gone */ }
   }
+});
+
+test('Reset adopts the distro pid the identity facts proved, not a second lock read', async () => {
+  const tcp = [
+    '  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode',
+    '   0: 0100007F:1F9A 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 4242 1 0000000000000000 100 0 0 10 0',
+  ].join('\n');
+  const facts = {
+    lock: JSON.stringify({ pid: 7, role: 'gateway', addr: '127.0.0.1:8090' }),
+    command: '/root/.local/bin/elastos gateway --addr 127.0.0.1:8090',
+    tcp,
+    links: ['socket:[4242]'],
+    alive: true,
+  };
+  const reply = (stdout) => async () => ({ code: 0, stdout, stderr: '' });
+  assert.deepEqual(await distroListenerIdentity(reply(JSON.stringify(facts))), { kind: 'elastos', pid: 7 });
+  assert.deepEqual(
+    await distroListenerIdentity(reply(JSON.stringify({ ...facts, links: ['socket:[9999]'] }))),
+    { kind: 'other', pid: null },
+  );
+  // The default adopt uses the proved pid. A second lock read would need wsl.exe,
+  // which is absent here, and would return no process.
+  const adopted = await adoptInstalledDistroGateway({ identify: async () => ({ kind: 'elastos', pid: 7 }) });
+  assert.equal(adopted && adopted.pid, 7);
+  const rewritten = [];
+  const later = await adoptInstalledDistroGateway({
+    identify: () => distroListenerIdentity(reply(JSON.stringify(facts))),
+    adopt: (pid) => {
+      rewritten.push(pid);
+      return null;
+    },
+  });
+  assert.equal(later, null);
+  assert.deepEqual(rewritten, [7]);
 });

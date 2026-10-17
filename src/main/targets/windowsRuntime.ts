@@ -543,17 +543,48 @@ export async function distroPidAlive(
 
 export type DistroListenerKind = 'elastos' | 'other' | 'unknown';
 
+export interface DistroListenerIdentity {
+  kind: DistroListenerKind;
+  /** The lock pid the facts proved is the gateway. Null unless kind is `elastos`. */
+  pid: number | null;
+}
+
+/** The pid from the lock text the facts read. Null when it is not a usable pid. */
+function factsLockPid(raw: string): number | null {
+  try {
+    const facts = JSON.parse(raw) as { lock?: unknown };
+    if (typeof facts.lock !== 'string') return null;
+    const lock = JSON.parse(facts.lock) as { pid?: unknown };
+    const pid = lock.pid;
+    return typeof pid === 'number' && Number.isInteger(pid) && pid > 1 ? pid : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Identify the listener and keep the pid that one facts read proved. A failed
+ * read is `unknown`. A listener that is not ElastOS is `other`.
+ */
+export async function distroListenerIdentity(
+  run: (args: readonly string[], timeoutMs: number) => Promise<WslResult> = runWsl,
+): Promise<DistroListenerIdentity> {
+  try {
+    const result = await run(['python3', '-c', FACTS_HELPER], 8000);
+    if (result.code !== 0) return { kind: 'unknown', pid: null };
+    if (!factsAreElastos(result.stdout)) return { kind: 'other', pid: null };
+    const pid = factsLockPid(result.stdout);
+    return pid == null ? { kind: 'unknown', pid: null } : { kind: 'elastos', pid };
+  } catch {
+    return { kind: 'unknown', pid: null };
+  }
+}
+
 /** `other` is a listener that is not ElastOS. A failed read is `unknown`. */
 export async function distroListenerKind(
   run: (args: readonly string[], timeoutMs: number) => Promise<WslResult> = runWsl,
 ): Promise<DistroListenerKind> {
-  try {
-    const result = await run(['python3', '-c', FACTS_HELPER], 8000);
-    if (result.code !== 0) return 'unknown';
-    return factsAreElastos(result.stdout) ? 'elastos' : 'other';
-  } catch {
-    return 'unknown';
-  }
+  return (await distroListenerIdentity(run)).kind;
 }
 
 /**
@@ -603,22 +634,24 @@ export function adoptDistroGatewayProcess(deps: {
  * Reset and Uninstall adopt the lock pid only when the distro facts say it
  * is the ElastOS gateway. A different listener, and a facts read that fails,
  * are left running. The confirm dialog is not a license to signal an
- * unidentified pid.
+ * unidentified pid. The adopted pid is the one those facts proved, not a
+ * second read of the lock, so a lock rewritten between the two reads is not
+ * signaled.
  */
 export async function adoptInstalledDistroGateway(deps: {
-  kind?: () => Promise<DistroListenerKind>;
-  adopt?: () => GatewayProcess | null;
+  identify?: () => Promise<DistroListenerIdentity>;
+  adopt?: (pid: number) => GatewayProcess | null;
 } = {}): Promise<GatewayProcess | null> {
-  const kind = deps.kind ?? (() => distroListenerKind());
-  const adopt = deps.adopt ?? (() => adoptDistroGatewayProcess());
-  let seen: DistroListenerKind;
+  const identify = deps.identify ?? (() => distroListenerIdentity());
+  const adopt = deps.adopt ?? ((pid: number) => adoptDistroGatewayProcess({ readPid: () => pid }));
+  let seen: DistroListenerIdentity;
   try {
-    seen = await kind();
+    seen = await identify();
   } catch {
     return null;
   }
-  if (seen !== 'elastos') return null;
-  return adopt();
+  if (seen.kind !== 'elastos' || seen.pid == null || !Number.isInteger(seen.pid) || seen.pid <= 1) return null;
+  return adopt(seen.pid);
 }
 
 export function distroIsInstalled(): boolean {
