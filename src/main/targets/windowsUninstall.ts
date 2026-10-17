@@ -5,6 +5,7 @@ import { BackupSpaceError, describeMeasuredBackup, runBackupWorker } from './run
 import { isForeignGatewayError } from './runtimeGateway';
 import { listNames, pinnedMaintainerDid, RuntimeDataEntry } from './runtimePaths';
 import { RemovalStat, removeVerifiedTarget } from './runtimeUninstall';
+import { RootfsFile, ROOTFS_MANIFEST } from './rootfsManifest';
 import { listDistros, lookupCommand } from './windowsHost';
 import { DISTRO_NAME, wslSpawnEnv } from './windowsRuntime';
 import {
@@ -33,11 +34,15 @@ import {
  *   exactly ElastOS, and its data folder passes the Reset ownership rule
  *   with a signed install record (the marker). A partial or missing data
  *   folder is not enough, because unregister removes everything.
- * - Nothing a person keeps may be outside the data folder: /root holds only
- *   the names the rootfs, Install, and the runtime write, and /home is
- *   empty. The copy that Uninstall offers holds only the data folder, so a
- *   file anywhere else would be lost with no copy. It is refused by name,
- *   whatever the person chose for the copy (fail closed).
+ * - Nothing a person keeps may be outside the data folder. /root holds
+ *   only the names the rootfs, Install, the runtime, and a shell write, and
+ *   the rootfs files in it are unchanged. /home holds only the home that
+ *   the rootfs's cloud-init makes on first boot, with the /etc/skel files
+ *   unchanged. Each .ssh folder is empty or holds only an empty
+ *   authorized_keys. The bytes come from the pinned rootfs
+ *   (rootfsManifest.ts). The copy that Uninstall offers holds only the data
+ *   folder, so a file anywhere else would be lost with no copy. It is
+ *   refused by name, whatever the person chose for the copy (fail closed).
  *
  * Then, after Stop and the copy, a second, separate confirmation in plain
  * words. Only a yes to that runs unregister, once, with a fixed argv.
@@ -78,28 +83,39 @@ export interface DistroOutsideDirs {
   local: string;
   bin: string;
   share: string;
+  rootSsh: string;
   homes: string;
+  /** The home cloud-init makes for the rootfs's default user. */
+  userHome: string;
+  userSsh: string;
 }
 
 export function distroOutsideDirs(paths: DistroResetPaths, homes = '/home'): DistroOutsideDirs {
+  const userHome = `${homes}/${ROOTFS_MANIFEST.defaultUser}`;
   return {
     root: paths.root,
     local: `${paths.root}/.local`,
     bin: `${paths.root}/.local/bin`,
     share: `${paths.root}/.local/share`,
+    rootSsh: `${paths.root}/.ssh`,
     homes,
+    userHome,
+    userSsh: `${userHome}/.ssh`,
   };
 }
 
 /**
- * Names in /root that the pinned Ubuntu rootfs, Install, the launcher, the
- * runtime (its cache in ~/.cache), and a shell write. `.cache` and
- * `.local/state` are caches and history, never files a person keeps.
+ * Other names in /root that Install, the launcher, the runtime (its cache
+ * in ~/.cache), and a shell write. `.cache` and `.local/state` are caches
+ * and history, never files a person keeps. `.motd_shown` and
+ * `.cloud-locale-test.skip` are empty marks the rootfs's login scripts
+ * write (etc/profile.d/update-motd.sh, Z99-cloud-locale-test.sh).
  */
 const ROOT_NAMES = new Set([
-  '.bashrc', '.profile', '.local', '.cache', '.elastos-launcher',
+  '.local', '.cache', '.elastos-launcher',
   '.bash_history', '.lesshst', '.wget-hsts', '.hushlogin', '.python_history',
   '.sudo_as_admin_successful', '.viminfo', '.selected_editor', '.motd_shown',
+  '.cloud-locale-test.skip',
 ]);
 const LOCAL_NAMES = new Set(['bin', 'share', 'state']);
 /** install.sh and the install writer put only `elastos` and `.elastos.*` scratch here (install_transaction.rs:22-26). */
@@ -107,31 +123,75 @@ const BIN_NAME = (name: string) => name === 'elastos' || name.startsWith('.elast
 /** The data folder, and a folder Reset moved aside and has not finished deleting (`.elastos-removing-`). */
 const SHARE_NAME = (name: string) => name === 'elastos' || name.startsWith('.elastos-removing-');
 
-type Listing = Record<string, Array<[string, RuntimeDataEntry['kind']]> | 'absent' | 'unknown'>;
+/** [name, kind, size, sha256]: size for a regular file, sha256 when it is at most 64 KiB. */
+export type ListedEntry = [string, RuntimeDataEntry['kind'], number | null, string | null];
+export type Listing = Record<string, ListedEntry[] | 'absent' | 'unknown'>;
+
+type Rule = (entry: ListedEntry) => boolean;
+
+const isFileOrDir: Rule = ([, kind]) => kind === 'file' || kind === 'dir';
+const isDir: Rule = ([, kind]) => kind === 'dir';
+/** The same bytes as the rootfs file. A changed, missing-hash, or other-kind entry fails. */
+const sameAs = (want: RootfsFile): Rule => ([, kind, size, sha256]) => kind === 'file' && size === want.size && sha256 === want.sha256;
+/**
+ * cloud-init's ssh module writes ~/.ssh/authorized_keys for the default user
+ * and root on first boot. With no keys given, the file is empty
+ * (cloudinit/config/cc_ssh.py apply_credentials, ssh_util.py
+ * setup_user_keys and update_authorized_keys in the rootfs). A key in it
+ * came from someone, so it is refused.
+ */
+const sshRules: Record<string, Rule> = { authorized_keys: ([, kind, size]) => kind === 'file' && size === 0 };
+
+function rulesOf(names: Iterable<string>, rule: Rule): Record<string, Rule> {
+  return Object.fromEntries([...names].map((name) => [name, rule]));
+}
 
 /**
- * Full paths of entries outside the data folder that ElastOS did not make.
- * Null when a folder could not be read, so nothing can be proven.
+ * Full paths of entries outside the data folder that ElastOS did not make,
+ * or that changed since the rootfs put them there. Null when a folder
+ * could not be read, so nothing can be proven.
  */
 export function foreignOutsideData(listing: Listing, dirs: DistroOutsideDirs): string[] | null {
   const foreign: string[] = [];
-  const check = (dir: string, allowed: (name: string) => boolean, mustExist: boolean) => {
+  const m = ROOTFS_MANIFEST;
+  /** A folder is read only when its parent listed it as a folder; otherwise there is nothing in it to lose. */
+  const check = (dir: string, rules: Record<string, Rule>, pattern?: (name: string) => boolean): boolean => {
     const seen = listing[dir];
-    if (seen === 'absent') {
-      if (mustExist) foreign.push(dir);
-      return true;
-    }
+    if (seen === 'absent') return true;
     if (!Array.isArray(seen)) return false;
-    for (const [name, kind] of seen) {
-      if (!allowed(name) || (kind !== 'file' && kind !== 'dir')) foreign.push(`${dir}/${name}`);
+    for (const entry of seen) {
+      const name = entry[0];
+      const rule = Object.prototype.hasOwnProperty.call(rules, name) ? rules[name] : pattern?.(name) ? isFileOrDir : null;
+      if (!rule || !rule(entry)) foreign.push(`${dir}/${name}`);
     }
     return true;
   };
-  if (!check(dirs.root, (name) => ROOT_NAMES.has(name), true)) return null;
-  if (!check(dirs.local, (name) => LOCAL_NAMES.has(name), false)) return null;
-  if (!check(dirs.bin, BIN_NAME, false)) return null;
-  if (!check(dirs.share, SHARE_NAME, false)) return null;
-  if (!check(dirs.homes, () => false, false)) return null;
+  const listedDir = (dir: string, name: string) => {
+    const seen = listing[dir];
+    return Array.isArray(seen) && seen.some((entry) => entry[0] === name && entry[1] === 'dir');
+  };
+  // /root is where Install puts ElastOS. Without it, this is not the environment ElastOS made.
+  if (listing[dirs.root] === 'absent') foreign.push(dirs.root);
+  const rootRules = {
+    ...rulesOf(ROOT_NAMES, isFileOrDir),
+    ...Object.fromEntries(Object.entries(m.rootFiles).map(([name, want]) => [name, sameAs(want)])),
+    ...rulesOf(m.rootDirs, isDir),
+  };
+  if (!check(dirs.root, rootRules)) return null;
+  if (listedDir(dirs.root, '.local') && !check(dirs.local, rulesOf(LOCAL_NAMES, isFileOrDir))) return null;
+  if (listedDir(dirs.local, 'bin') && !check(dirs.bin, {}, BIN_NAME)) return null;
+  if (listedDir(dirs.local, 'share') && !check(dirs.share, {}, SHARE_NAME)) return null;
+  if (listedDir(dirs.root, '.ssh') && !check(dirs.rootSsh, sshRules)) return null;
+  if (!check(dirs.homes, rulesOf([...m.homeEntries, m.defaultUser], isDir))) return null;
+  const userHome = dirs.userHome.slice(dirs.homes.length + 1);
+  if (listedDir(dirs.homes, userHome)) {
+    const homeRules = {
+      ...Object.fromEntries(Object.entries(m.skel).map(([name, want]) => [name, sameAs(want)])),
+      '.ssh': isDir,
+    };
+    if (!check(dirs.userHome, homeRules)) return null;
+    if (listedDir(dirs.userHome, '.ssh') && !check(dirs.userSsh, sshRules)) return null;
+  }
   return foreign;
 }
 
@@ -167,7 +227,7 @@ export function assertDistroIsElastosOnly(
   const foreign = foreignOutsideData(outside, dirs);
   if (foreign == null) throw new Error(UNCHECKED);
   if (foreign.length) {
-    throw new Error(`ElastOS did not uninstall, because the Linux environment named ${DISTRO_NAME} holds files that ElastOS did not make: ${listNames(foreign)}. Uninstall would delete them, and the copy holds only your ElastOS data. Move those files out, then click Uninstall. Nothing was removed. To see them, open ${explorerPath(paths.root)} in File Explorer.`);
+    throw new Error(`ElastOS did not uninstall, because the Linux environment named ${DISTRO_NAME} holds files that ElastOS did not make, or that were changed: ${listNames(foreign)}. Uninstall would delete them, and the copy holds only your ElastOS data. Move those files out, then click Uninstall. Nothing was removed. To see them, open ${explorerPath(foreign[0].slice(0, foreign[0].lastIndexOf('/')) || '/')} in File Explorer.`);
   }
 }
 

@@ -25,9 +25,13 @@ const { removeVerifiedTarget } = require('../dist/main/targets/runtimeUninstall'
 const { failureScreen } = require('../dist/main/targets/runtimeRecovery');
 const { readStoredZipEntries } = require('../dist/main/targets/runtimeBackup');
 const { loadActiveRuntimePin } = require('../dist/main/targets/runtimePin');
+const { ROOTFS_MANIFEST } = require('../dist/main/targets/rootfsManifest');
+const { ELASTOS_ROOTFS_SHA256 } = require('../dist/main/targets/windowsHost');
 const flow = require('../src/renderer/flow.js');
 
 const SIGNED_HEAD = fs.readFileSync(path.join(__dirname, 'fixtures', 'release-head-0.8.0-alpha.22.json'));
+/** Files copied unchanged out of the pinned rootfs (scripts/rootfs-manifest.js checks the hashes). */
+const ROOTFS = (name) => fs.readFileSync(path.join(__dirname, 'fixtures', 'rootfs-noble-20240423', name));
 const DID = loadActiveRuntimePin().maintainerDid;
 // The helper runs inside Linux. Here it runs with this machine's python3, so these tests need POSIX.
 const POSIX = { skip: process.platform === 'win32' };
@@ -44,9 +48,10 @@ function localRun(calls) {
 }
 
 /**
- * A Linux environment holding only what the rootfs, Install, setup, and
- * the launcher write. The folder is a real path (no link on the way), as
- * /root is inside the distro.
+ * A Linux environment holding only what the rootfs, its first boot,
+ * Install, setup, and the launcher write: the tree that run 39034483759
+ * (job 117401445187) listed before Uninstall. The folder is a real path
+ * (no link on the way), as /root is inside the distro.
  */
 function cleanDistro() {
   const top = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'elastos-distro-uninstall-')));
@@ -58,9 +63,17 @@ function cleanDistro() {
     fs.mkdirSync(path.dirname(file), { recursive: true });
     fs.writeFileSync(file, text);
   };
-  put('.bashrc', 'rc');
-  put('.profile', 'profile');
+  put('.bashrc', ROOTFS('root.bashrc'));
+  put('.profile', ROOTFS('root.profile'));
+  put('.motd_shown', '');
+  put('.cache/motd.legal-displayed', '');
   put('.cache/elastos/rootfs-cache/index.json', '{}');
+  // cloud-init on first boot: an empty authorized_keys for root, and the default user's home from /etc/skel.
+  put('.ssh/authorized_keys', '');
+  const userHome = path.join(top, 'home', 'ubuntu');
+  fs.mkdirSync(path.join(userHome, '.ssh'), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(path.join(userHome, '.ssh', 'authorized_keys'), '');
+  for (const name of ['.bash_logout', '.bashrc', '.profile']) fs.writeFileSync(path.join(userHome, name), ROOTFS(`skel${name}`));
   put('.local/bin/elastos', 'program');
   put('.local/bin/.elastos.install.lock', '');
   put('.elastos-launcher/install-stage.json', '{"stage":"done"}');
@@ -71,11 +84,10 @@ function cleanDistro() {
   put('.local/share/elastos/sources.json', '{}');
   put('.local/share/elastos/signing_key', 'secret key bytes');
   put('.local/share/elastos/Users/alice/notes.txt', 'my notes');
-  fs.mkdirSync(path.join(top, 'home'));
   fs.mkdirSync(path.join(winHome, '.elastos-launcher'), { recursive: true });
   fs.writeFileSync(path.join(winHome, '.elastos-launcher', 'install-stage.json'), '{"stage":"done"}');
   const dirs = distroOutsideDirs(paths, path.join(top, 'home'));
-  return { top, root, winHome, paths, dirs, put, cleanup: () => fs.rmSync(top, { recursive: true, force: true }) };
+  return { top, root, userHome, winHome, paths, dirs, put, cleanup: () => fs.rmSync(top, { recursive: true, force: true }) };
 }
 
 function deps(fx, calls, extra = {}) {
@@ -232,6 +244,7 @@ test('files a person keeps outside the data folder are refused by name, even wit
   const cases = [
     ['notes.txt in /root', (fx) => fx.put('notes.txt', 'mine'), (fx) => `${fx.root}/notes.txt`],
     ['a home folder in /home', (fx) => fs.mkdirSync(path.join(fx.top, 'home', 'alice')), (fx) => `${fx.dirs.homes}/alice`],
+    ['a file in /home', (fx) => fs.writeFileSync(path.join(fx.top, 'home', 'notes.txt'), 'mine'), (fx) => `${fx.dirs.homes}/notes.txt`],
     ['another app in .local/share', (fx) => fx.put('.local/share/other-app/data', 'x'), (fx) => `${fx.dirs.share}/other-app`],
     ['a script in .local/bin', (fx) => fx.put('.local/bin/myscript', 'x'), (fx) => `${fx.dirs.bin}/myscript`],
     ['Documents', (fx) => fx.put('Documents/thesis.docx', 'x'), (fx) => `${fx.root}/Documents`],
@@ -245,7 +258,7 @@ test('files a person keeps outside the data folder are refused by name, even wit
         const calls = [];
         let message = '';
         await assert.rejects(() => uninstallRuntimeInDistro({ ...deps(fx, calls), backup }), (err) => { message = err.message; return true; });
-        assert.ok(message.includes(`holds files that ElastOS did not make: ${shown(fx)}`), `${name}: ${message}`);
+        assert.ok(message.includes(`holds files that ElastOS did not make, or that were changed: ${shown(fx)}`), `${name}: ${message}`);
         assert.match(message, /the copy holds only your ElastOS data\. Move those files out, then click Uninstall\. Nothing was removed\./);
         assert.deepEqual(unregisterCalls(calls), [], name);
         assert.equal(calls.includes('stop'), false, name);
@@ -261,6 +274,100 @@ test('files a person keeps outside the data folder are refused by name, even wit
   const absent = Object.fromEntries(Object.values(dirs).map((dir) => [dir, 'absent']));
   assert.deepEqual(foreignOutsideData(absent, dirs), ['/root']);
   assert.equal(foreignOutsideData({ ...absent, [dirs.homes]: 'unknown' }, dirs), null);
+});
+
+test('the tree the pinned rootfs and its first boot make is not a person\'s files: Uninstall proceeds', POSIX, async () => {
+  // As listed in run 39034483759: /root/.ssh, /home/ubuntu (drwxr-x---), .cache, .motd_shown, rootfs .bashrc/.profile.
+  const variants = [
+    ['with the empty authorized_keys cloud-init writes', () => {}],
+    ['with /root/.ssh empty, as in the rootfs', (fx) => fs.rmSync(path.join(fx.root, '.ssh', 'authorized_keys'))],
+    ['with no ubuntu home', (fx) => fs.rmSync(fx.userHome, { recursive: true })],
+    ['with no .ssh in the ubuntu home', (fx) => fs.rmSync(path.join(fx.userHome, '.ssh'), { recursive: true })],
+    ['with a skeleton file deleted', (fx) => fs.rmSync(path.join(fx.userHome, '.bash_logout'))],
+  ];
+  for (const [name, change] of variants) {
+    const fx = cleanDistro();
+    try {
+      change(fx);
+      if (fs.existsSync(fx.userHome)) fs.chmodSync(fx.userHome, 0o750);
+      const calls = [];
+      const result = await uninstallRuntimeInDistro({ ...deps(fx, calls), backup: false });
+      assert.equal(result.removedLinux, true, name);
+      assert.deepEqual(unregisterCalls(calls), [['wsl', ['--unregister', 'ElastOS']]], name);
+    } finally {
+      fx.cleanup();
+    }
+  }
+});
+
+test('a key, a changed skeleton file, or any extra file in /root/.ssh or /home/ubuntu is refused by name', POSIX, async () => {
+  const KEY = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGg alice@laptop\n';
+  const cases = [
+    ['a key in /root/.ssh/authorized_keys', (fx) => fx.put('.ssh/authorized_keys', KEY), (fx) => `${fx.root}/.ssh/authorized_keys`],
+    ['a private key in /root/.ssh', (fx) => fx.put('.ssh/id_ed25519', 'key'), (fx) => `${fx.root}/.ssh/id_ed25519`],
+    ['an empty other file in /root/.ssh', (fx) => fx.put('.ssh/known_hosts', ''), (fx) => `${fx.root}/.ssh/known_hosts`],
+    ['/root/.ssh as a file', (fx) => { fs.rmSync(path.join(fx.root, '.ssh'), { recursive: true }); fx.put('.ssh', ''); }, (fx) => `${fx.root}/.ssh`],
+    ['a changed /root/.bashrc', (fx) => fs.appendFileSync(path.join(fx.root, '.bashrc'), 'alias ll="ls -l"\n'), (fx) => `${fx.root}/.bashrc`],
+    ['a changed /root/.profile of the same size', (fx) => {
+      const file = path.join(fx.root, '.profile');
+      const bytes = fs.readFileSync(file);
+      bytes[0] = bytes[0] === 0x23 ? 0x20 : 0x23;
+      fs.writeFileSync(file, bytes);
+    }, (fx) => `${fx.root}/.profile`],
+    ['an extra file in /home/ubuntu', (fx) => fs.writeFileSync(path.join(fx.userHome, 'notes.txt'), 'mine'), (fx) => `${fx.userHome}/notes.txt`],
+    ['a folder in /home/ubuntu', (fx) => fs.mkdirSync(path.join(fx.userHome, 'Documents')), (fx) => `${fx.userHome}/Documents`],
+    ['a shell history in /home/ubuntu', (fx) => fs.writeFileSync(path.join(fx.userHome, '.bash_history'), 'ls\n'), (fx) => `${fx.userHome}/.bash_history`],
+    ['a changed /home/ubuntu/.bashrc', (fx) => fs.appendFileSync(path.join(fx.userHome, '.bashrc'), 'export A=1\n'), (fx) => `${fx.userHome}/.bashrc`],
+    ['/home/ubuntu/.profile replaced by root\'s .profile', (fx) => fs.writeFileSync(path.join(fx.userHome, '.profile'), ROOTFS('root.profile')), (fx) => `${fx.userHome}/.profile`],
+    ['a link for /home/ubuntu/.bashrc', (fx) => {
+      const file = path.join(fx.userHome, '.bashrc');
+      fs.rmSync(file);
+      fs.symlinkSync('/etc/skel/.bashrc', file);
+    }, (fx) => `${fx.userHome}/.bashrc`],
+    ['a key in /home/ubuntu/.ssh/authorized_keys', (fx) => fs.writeFileSync(path.join(fx.userHome, '.ssh', 'authorized_keys'), KEY), (fx) => `${fx.userHome}/.ssh/authorized_keys`],
+    ['a private key in /home/ubuntu/.ssh', (fx) => fs.writeFileSync(path.join(fx.userHome, '.ssh', 'id_rsa'), 'key'), (fx) => `${fx.userHome}/.ssh/id_rsa`],
+    ['/home/ubuntu as a link', (fx) => {
+      fs.rmSync(fx.userHome, { recursive: true });
+      fs.mkdirSync(path.join(fx.top, 'elsewhere'));
+      fs.symlinkSync(path.join(fx.top, 'elsewhere'), fx.userHome);
+    }, (fx) => fx.userHome],
+    ['a second user home', (fx) => fs.mkdirSync(path.join(fx.top, 'home', 'alice')), (fx) => `${fx.dirs.homes}/alice`],
+  ];
+  for (const [name, add, shown] of cases) {
+    const fx = cleanDistro();
+    try {
+      add(fx);
+      const calls = [];
+      let message = '';
+      await assert.rejects(() => uninstallRuntimeInDistro({ ...deps(fx, calls), backup: true }), (err) => { message = err.message; return true; }, `not refused: ${name}`);
+      assert.ok(message.includes(`holds files that ElastOS did not make, or that were changed: ${shown(fx)}`), `${name}: ${message}`);
+      const folder = shown(fx).slice(0, shown(fx).lastIndexOf('/')).replace(/\//g, '\\');
+      assert.ok(message.endsWith(`To see them, open \\\\wsl$\\ElastOS${folder} in File Explorer.`), `${name}: ${message}`);
+      assert.deepEqual(unregisterCalls(calls), [], name);
+      assert.equal(calls.includes('stop'), false, name);
+      assertDataKept(fx);
+    } finally {
+      fx.cleanup();
+    }
+  }
+});
+
+test('the rootfs manifest is for the pinned rootfs, and its hashes are the bytes of the rootfs files', () => {
+  // A new pin needs a new manifest: node scripts/rootfs-manifest.js <rootfs.tar.gz>.
+  assert.equal(ROOTFS_MANIFEST.rootfsSha256, ELASTOS_ROOTFS_SHA256);
+  const sha = (bytes) => require('node:crypto').createHash('sha256').update(bytes).digest('hex');
+  const files = { 'root.bashrc': ROOTFS_MANIFEST.rootFiles['.bashrc'], 'root.profile': ROOTFS_MANIFEST.rootFiles['.profile'] };
+  for (const [name, want] of Object.entries(ROOTFS_MANIFEST.skel)) files[`skel${name}`] = want;
+  assert.equal(Object.keys(files).length, 5);
+  for (const [fixture, want] of Object.entries(files)) {
+    const bytes = ROOTFS(fixture);
+    assert.deepEqual({ size: bytes.length, sha256: sha(bytes) }, want, fixture);
+  }
+  assert.deepEqual(ROOTFS_MANIFEST.rootDirs, ['.ssh']);
+  assert.deepEqual(ROOTFS_MANIFEST.homeEntries, []);
+  assert.equal(ROOTFS_MANIFEST.defaultUser, 'ubuntu');
+  const dirs = distroOutsideDirs(distroResetPaths('/root'));
+  assert.deepEqual([dirs.rootSsh, dirs.userHome, dirs.userSsh], ['/root/.ssh', '/home/ubuntu', '/home/ubuntu/.ssh']);
 });
 
 test('a user file in the data folder is refused with the Reset rule and Uninstall words', POSIX, async () => {
