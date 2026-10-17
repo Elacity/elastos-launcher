@@ -5,7 +5,7 @@ const path = require('node:path');
 const test = require('node:test');
 
 const { removeVerifiedTarget, resetRuntime, sweepRemovalHoldings } = require('../dist/main/targets/runtimeUninstall');
-const { foreignRuntimeDataMessage, launcherOwnedDirectories, signedInstallRecord } = require('../dist/main/targets/runtimePaths');
+const { foreignRuntimeDataMessage, isRuntimeDataName, launcherOwnedDirectories, signedInstallRecord } = require('../dist/main/targets/runtimePaths');
 const { ForeignGatewayError } = require('../dist/main/targets/runtimeGateway');
 const flow = require('../src/renderer/flow.js');
 
@@ -399,6 +399,39 @@ test('a foreign name beside a real setup is still refused by name', async () => 
     );
     assert.deepEqual(refused, []);
     assert.equal(fs.readFileSync(path.join(data, 'holiday-photos', 'beach.jpg'), 'utf8'), 'keep');
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('a temporary file a crashed runtime write leaves is matched only by its exact name', () => {
+  const hex = '0123456789abcdef0123456789abcdef';
+  const runtimeTemps = [
+    '.components.json.tmp-4242', '.model-catalog.json.tmp-7',
+    `.gateway-runtime-coords.json.${hex}.tmp`, `.community-membership.${hex}.tmp`,
+    '.collaboration-network-v1.json.release.tmp', 'ipfs-coords.tmp',
+    'services-model-runs.json.tmp', 'services-model-remote-runs.json.tmp', '.tmpAb12Cd',
+  ];
+  for (const name of runtimeTemps) assert.equal(isRuntimeDataName(name), true, name);
+  const lookalikes = [
+    'notes.tmp', '.tmp', '.tmpAb12C', '.tmpAb12Cde', '.tmp-ab12cd', '.components.json.tmp-',
+    '.components.json.tmp-12a', '.sources.json.tmp-12', `.runtime-coords.json.${hex}.tmp`,
+    `.gateway-runtime-coords.json.${hex.toUpperCase()}.tmp`, `.community-membership.${hex}0.tmp`,
+    'ipfs-coords.json.tmp', 'services-model-runs.tmp', 'collaboration.tmp',
+  ];
+  for (const name of lookalikes) assert.equal(isRuntimeDataName(name), false, name);
+
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'elastos-xdg-temp-'));
+  try {
+    const home = path.join(root, 'home');
+    const data = path.join(home, 'custom', 'elastos');
+    const env = { XDG_DATA_HOME: path.join(home, 'custom') };
+    realSetupWithCommunity(data);
+    fs.writeFileSync(path.join(data, '.components.json.tmp-4242'), '{}');
+    fs.mkdirSync(path.join(data, '.tmpAb12Cd'));
+    assert.equal(launcherOwnedDirectories(data, home, 'linux', env), true);
+    fs.writeFileSync(path.join(data, 'notes.tmp'), 'keep');
+    assert.match(foreignRuntimeDataMessage(data, home, 'linux', env), /not part of the runtime: notes\.tmp\./);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

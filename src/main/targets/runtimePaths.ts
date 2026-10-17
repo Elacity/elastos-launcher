@@ -146,10 +146,34 @@ const RUNTIME_DATA_NAMES = new Set([
   '.elastos.installation-migrate', '.elastos.update-stage', '.elastos.update-rollback', '.elastos.update-support',
 ]);
 
+/**
+ * Temporary names the runtime writes beside a top-level file, then renames.
+ * A crash between the write and the rename leaves one behind. Each pattern is
+ * the exact name one writer uses, never a general `*.tmp`.
+ */
+const RUNTIME_DATA_TEMP_NAMES: readonly RegExp[] = [
+  // setup.rs:4552 sibling_scratch `.<name>.tmp-<pid>`, for components.json
+  // (setup.rs:707, 2933) and model-catalog.json (setup.rs:3014).
+  /^\.(components|model-catalog)\.json\.tmp-\d+$/,
+  // runtime_control.rs:692, 16 random bytes in hex, for gateway-runtime-coords.json only.
+  /^\.gateway-runtime-coords\.json\.[0-9a-f]{32}\.tmp$/,
+  // collaboration_release_network.rs:101 and :463.
+  /^\.community-membership\.[0-9a-f]{32}\.tmp$/,
+  /^\.collaboration-network-v1\.json\.release\.tmp$/,
+  // with_extension("tmp") on ipfs-coords.json (capsules/ipfs-provider/src/main.rs:2026,
+  // capsules/content-block-graph-provider/src/main.rs:473).
+  /^ipfs-coords\.tmp$/,
+  // with_extension("json.tmp") (api/gateway_model_service.rs:283, api/gateway_model_remote.rs:171).
+  /^services-model-(remote-)?runs\.json\.tmp$/,
+  // setup.rs:3872 tempfile::tempdir_in(data_dir): tempfile 3 names it `.tmp` and 6 letters or digits.
+  /^\.tmp[A-Za-z0-9]{6}$/,
+];
+
 /** True when `name` is a top-level name the runtime writes in its data directory. */
 export function isRuntimeDataName(name: string): boolean {
-  return RUNTIME_DATA_NAMES.has(name);
+  return RUNTIME_DATA_NAMES.has(name) || RUNTIME_DATA_TEMP_NAMES.some((pattern) => pattern.test(name));
 }
+
 /** What a half-finished install leaves. These alone need no signed record. */
 const RUNTIME_PARTIAL_FILES = new Set(['components.json', 'host-process.lock', 'sources.json']);
 /** install.sh writes the verified release head here before anything else runs. */
