@@ -79,7 +79,8 @@ const KEPT = [
 ];
 
 test('a backup leaves out only rebuildable runtime data', () => {
-  for (const name of ['bin', 'capsules', 'libexec', 'tools', 'scripts', 'browser-vm/image-set', 'installation', 'cache', 'runtime-coords.json']) {
+  for (const name of ['bin', 'capsules', 'libexec', 'tools', 'scripts', 'browser-vm/image-set', 'installation', 'cache', 'runtime-coords.json',
+    'ipfs-startup.lock', 'ipfs-coords.json', '.collaboration-network-choice.lock', 'gateway-owned-runtimes', 'run']) {
     assert.ok(RUNTIME_BACKUP_EXCLUDES.includes(name), name);
   }
   assert.equal(backupExcluded('capsules/qwen/weights.gguf'), true);
@@ -88,6 +89,11 @@ test('a backup leaves out only rebuildable runtime data', () => {
   assert.equal(backupExcluded('binder/file'), false);
   // No runtime code writes `Image`, so a file of that name is the user's.
   assert.equal(backupExcluded('Image'), false);
+  // Community history, the network choice, and the Kubo repo are kept.
+  for (const kept of ['collaboration/history/room.jsonl', 'collaboration-network-v1.json', 'collaboration-community-membership-v1.json',
+    'ipfs-repo/config', 'ipfs-repo/blocks/AB/block.data', 'managed-runtimes/home/x', 'runtime-turn/turn-credentials.env']) {
+    assert.equal(backupExcluded(kept), false, kept);
+  }
   for (const kept of ['Users/a', 'signing_key', 'identity', 'did', 'ca.key', 'tls.key', 'capability_store/x', 'namespaces/x', 'audit.log', 'storage/x', 'shares/x', 'config.toml']) {
     assert.equal(backupExcluded(kept), false, kept);
   }

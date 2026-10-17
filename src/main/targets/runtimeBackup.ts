@@ -14,8 +14,15 @@ import { launcherOwnedDirectories, runtimeDataDir } from './runtimePaths';
  *   elastos-vz, browser-vz-engine-supervisor, gateway cache_dir,
  *   content_cache, model-preparation).
  * - Live process state that the next start writes again. The coords files
- *   hold a local attach secret.
- * Everything else is kept, including names this list does not know.
+ *   hold a local attach secret. This includes the Kubo start lock and coords
+ *   (capsules/ipfs-provider), the Community network-choice lock, the
+ *   gateway's child-process records (`gateway-owned-runtimes`), and the
+ *   `elastos run` ready receipt (`run`).
+ * Everything else is kept, including names this list does not know. The
+ * Community history and network choice (`collaboration*`) are the user's.
+ * `ipfs-repo` is kept too: it holds the Kubo node key and blocks pinned on
+ * this computer, which can be the only copy of content the user published
+ * or imported. It can be large; the size check before the copy counts it.
  */
 export const RUNTIME_BACKUP_EXCLUDES: readonly string[] = [
   'bin', 'capsules', 'libexec', 'tools', 'scripts', 'browser-vm/image-set',
@@ -24,6 +31,7 @@ export const RUNTIME_BACKUP_EXCLUDES: readonly string[] = [
   'crosvm', 'crosvm-empty', 'cache', 'gateway-cache', 'content_cache', 'model-preparation',
   'host-process.lock', 'gateway-runtime-ownership.lock', 'managed-runtime-start.lock',
   'runtime-coords.json', 'gateway-runtime-coords.json', 'home-runtime-coords.json', '.components.upgrade.tmp',
+  'ipfs-startup.lock', 'ipfs-coords.json', '.collaboration-network-choice.lock', 'gateway-owned-runtimes', 'run',
 ];
 
 export const BACKUP_FOLDER_NAME = 'ElastOS-backups';
