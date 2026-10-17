@@ -132,7 +132,8 @@ export function failureScreen(facts: FailureFacts): FailureScreen {
     // The refusal names the folder and the next clicks (foreignRuntimeDataMessage).
     return {
       kind,
-      title: 'Install ElastOS again, then reset',
+      // Windows Uninstall needs the same record (windowsUninstall.ts).
+      title: /click Uninstall/.test(facts.error) ? 'Install ElastOS again, then uninstall' : 'Install ElastOS again, then reset',
       message: plainError(facts.error, facts.checks),
       retryLabel: 'Try again',
       fixLabel: 'Fix it',

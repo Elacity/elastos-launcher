@@ -8,11 +8,13 @@ contextBridge.exposeInMainWorld('elastos', {
   restart: () => ipcRenderer.invoke('elastos:restart'),
   openBrowser: () => ipcRenderer.invoke('elastos:openBrowser'),
   install: () => ipcRenderer.invoke('elastos:install'),
-  uninstall: () => ipcRenderer.invoke('elastos:uninstall'),
+  uninstall: (choice?: { backup?: unknown }) => ipcRenderer.invoke('elastos:uninstall', {
+    backup: choice?.backup,
+  }),
   resetRuntime: (choice: { backup?: unknown }) => ipcRenderer.invoke('elastos:resetRuntime', {
     backup: choice && (choice.backup === true || choice.backup === false) ? choice.backup : undefined,
   }),
-  describeResetBackup: () => ipcRenderer.invoke('elastos:describeResetBackup'),
+  describeResetBackup: (action?: 'reset' | 'uninstall') => ipcRenderer.invoke('elastos:describeResetBackup', action),
 
   getStatus: () => ipcRenderer.invoke('elastos:getStatus'),
   getLogs: (lines: number) => ipcRenderer.invoke('elastos:getLogs', lines),
@@ -71,9 +73,9 @@ declare global {
       restart: () => Promise<void>;
       openBrowser: () => void;
       install: () => Promise<void>;
-      uninstall: () => Promise<void>;
+      uninstall: (choice?: { backup: boolean }) => Promise<{ backupPath: string | null; removedLinux: boolean } | void>;
       resetRuntime: (choice: { backup: boolean }) => Promise<{ backupPath: string | null }>;
-      describeResetBackup: () => Promise<{
+      describeResetBackup: (action?: 'reset' | 'uninstall') => Promise<{
         present: boolean;
         bytes: number;
         neededBytes: number;
@@ -95,6 +97,7 @@ declare global {
         status: RuntimeStatus;
         platformNote: string | null;
         browserNote: string | null;
+        uninstallOffersCopy: boolean;
         preflight: { ok: boolean; checks: Array<{ id: string; level: string; message: string }> };
         openAtLogin: boolean;
         canRollback: boolean;

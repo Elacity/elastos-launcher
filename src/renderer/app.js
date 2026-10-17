@@ -52,6 +52,8 @@ let legacyItems = [];
 let legacyConfirmPaths = [];
 let pc2Busy = false;
 let resetOffer = null;
+/** Windows: Uninstall offers the same copy as Reset (launch info). */
+let uninstallOffersCopy = false;
 let targetId = 'runtime';
 // The main process sends the Home address (src/main/targets/gatewayAddress.ts).
 let openUrl = '';
@@ -102,8 +104,13 @@ function hideResetBackup() {
 }
 
 /** Reset stays off until the person answers the backup offer. */
+/** The Reset dialog, and the Uninstall dialog when it offers a copy. */
+function offersBackup() {
+  return confirmMode === 'reset' || (confirmMode === 'uninstall' && uninstallOffersCopy);
+}
+
 function syncResetButton() {
-  if (confirmMode !== 'reset') return;
+  if (!offersBackup()) return;
   if (!resetOffer) {
     confirmDelete.disabled = true;
     return;
@@ -327,6 +334,12 @@ resetBtn.addEventListener('click', async () => {
   confirmBody.textContent = copy.body;
   confirmPath.textContent = 'The ElastOS program and its data folder';
   confirmDelete.textContent = 'Reset';
+  confirmModal.classList.remove('hidden');
+  await loadBackupOffer('reset');
+});
+
+/** Show "Checking the size", then the offer. Nothing can be confirmed until it is answered. */
+async function loadBackupOffer(mode) {
   resetBackupText.textContent = 'Checking the size of your ElastOS data...';
   resetBackupWarning.textContent = '';
   resetBackupSpace.classList.add('hidden');
@@ -334,16 +347,15 @@ resetBtn.addEventListener('click', async () => {
   resetBackupNo.parentElement.classList.add('hidden');
   resetBackup.classList.remove('hidden');
   confirmDelete.disabled = true;
-  confirmModal.classList.remove('hidden');
   let description = null;
   try {
-    description = await window.elastos.describeResetBackup();
+    description = await window.elastos.describeResetBackup(mode);
   } catch {
     description = null;
   }
-  if (confirmMode !== 'reset' || confirmModal.classList.contains('hidden')) return;
+  if (confirmMode !== mode || confirmModal.classList.contains('hidden')) return;
   showResetBackup(description);
-});
+}
 
 resetBackupYes.addEventListener('change', syncResetButton);
 resetBackupNo.addEventListener('change', syncResetButton);
@@ -352,12 +364,15 @@ uninstallBtn.addEventListener('click', async () => {
   confirmMode = 'uninstall';
   hidePc2Backup();
   hideResetBackup();
-  confirmDelete.textContent = 'Delete';
-  const copy = flow.confirmCopy(targetId, []);
+  confirmDelete.textContent = uninstallOffersCopy ? 'Uninstall' : 'Delete';
+  const copy = flow.confirmCopy(targetId, [], uninstallOffersCopy);
   confirmTitle.textContent = copy.title;
   confirmBody.textContent = copy.body;
-  confirmPath.textContent = 'The ElastOS program and its data folder';
+  confirmPath.textContent = uninstallOffersCopy
+    ? 'The Linux environment named ElastOS, with everything in it'
+    : 'The ElastOS program and its data folder';
   confirmModal.classList.remove('hidden');
+  if (uninstallOffersCopy) await loadBackupOffer('uninstall');
 });
 
 removePc2Btn.addEventListener('click', () => {
@@ -383,8 +398,8 @@ confirmCancel.addEventListener('click', () => {
 
 confirmDelete.addEventListener('click', async () => {
   let resetChoice = null;
-  if (confirmMode === 'reset') {
-    // No answer to the backup offer means no Reset.
+  if (offersBackup()) {
+    // No answer to the backup offer means no Reset and no Windows Uninstall.
     if (!resetOffer || resetOffer.blocked) return;
     if (resetOffer.needsChoice && !resetBackupYes.checked && !resetBackupNo.checked) return;
     resetChoice = { backup: Boolean(resetOffer.canSave && resetBackupYes.checked) };
@@ -411,9 +426,10 @@ confirmDelete.addEventListener('click', async () => {
     return;
   }
   const resetting = confirmMode === 'reset';
+  const saving = Boolean(resetChoice && resetChoice.backup);
   statusText.textContent = resetting
-    ? (resetChoice && resetChoice.backup ? 'Saving a copy of your data, then resetting...' : 'Resetting...')
-    : 'Removing...';
+    ? (saving ? 'Saving a copy of your data, then resetting...' : 'Resetting...')
+    : (saving ? 'Saving a copy of your data...' : 'Removing...');
   hideResetBackup();
   try {
     if (resetting) {
@@ -421,8 +437,9 @@ confirmDelete.addEventListener('click', async () => {
       if (result && result.backupPath) addLog(`A copy of your ElastOS data is in ${result.backupPath}. Keep it private.`);
       addLog('ElastOS was reset. Click Install to set it up again.');
     } else {
-      await window.elastos.uninstall();
-      addLog('ElastOS was removed.');
+      const result = await window.elastos.uninstall(resetChoice || undefined);
+      if (result && result.backupPath) addLog(`A copy of your ElastOS data is in ${result.backupPath}. Keep it private.`);
+      addLog(result && result.removedLinux ? 'ElastOS was removed, with its Linux environment.' : 'ElastOS was removed.');
     }
     stepsEl.classList.add('hidden');
     clearError();
@@ -509,6 +526,7 @@ async function refreshLaunch() {
   const info = await window.elastos.getLaunchInfo();
   targetId = 'runtime';
   openUrl = info.openUrl;
+  uninstallOffersCopy = Boolean(info.uninstallOffersCopy);
   if (rollbackBtn) rollbackBtn.classList.toggle('hidden', !info.canRollback);
   loginCheckbox.checked = Boolean(info.openAtLogin);
   const browserText = flow.browserNoteText(info);

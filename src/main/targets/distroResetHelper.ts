@@ -13,6 +13,8 @@
  * - `zip`: writes a stored zip of the data folder to stdout, with ZIP64 when
  *   needed, and the entry count to stderr. Each file is read twice and must
  *   not change between the reads.
+ * - `list`: the names and kinds in each folder asked for (Uninstall uses it
+ *   to look for files outside the data folder). Prints JSON.
  * - `remove`: checks that nothing changed since `inspect`, then moves the
  *   data folder aside, deletes the program and the stage file, and then
  *   deletes the moved folder. Prints JSON. Exit 3 means it refused before
@@ -561,9 +563,46 @@ def do_remove():
         raise partial('delete', removed, False, left[0], left)
     print(json.dumps({'removed': removed}))
 
+def open_from_top(p):
+    # Open the folder p one name at a time from /, never through a link.
+    if type(p) is not str or not p.startswith('/') or os.path.normpath(p) != p:
+        raise Refused('bad path')
+    fd = os.open('/', os.O_RDONLY | os.O_DIRECTORY | CLOEXEC)
+    try:
+        for part in [x for x in p.split('/') if x]:
+            nfd = os.open(part, DIR_FLAGS, dir_fd=fd)
+            os.close(fd)
+            fd = nfd
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+def do_list():
+    # The names in each folder asked for, or absent, or unknown (a link or an error on the way).
+    out = {}
+    for p in req['dirs']:
+        try:
+            fd = open_from_top(p)
+        except FileNotFoundError:
+            out[p] = 'absent'
+            continue
+        except OSError:
+            out[p] = 'unknown'
+            continue
+        try:
+            out[p] = entries_at(fd)
+        except OSError:
+            out[p] = 'unknown'
+        finally:
+            os.close(fd)
+    print(json.dumps(out))
+
 try:
     if op == 'inspect':
         do_inspect()
+    elif op == 'list':
+        do_list()
     elif op == 'measure':
         do_measure()
     elif op == 'zip':
