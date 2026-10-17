@@ -352,6 +352,63 @@ test('a user file in the distro data folder is refused by name, and nothing is s
   }
 });
 
+/**
+ * What a real alpha.22 install and `elastos setup` (which joins
+ * elastos.community) left in the distro in Windows CI job 117369675723. Its
+ * refusal named the first five and "1 more"; the sixth is the one runtime name
+ * that sorts after `ipfs-repo` and is written on every Kubo start.
+ */
+function putCommunitySetup(fx) {
+  fx.put('.local/share/elastos/.collaboration-network-choice.lock', '');
+  fx.put('.local/share/elastos/collaboration/config/accepted-profile-head-v1.json', '{}');
+  fx.put('.local/share/elastos/collaboration/history/room.jsonl', 'hello community');
+  fx.put('.local/share/elastos/collaboration-network-v1.json', '{"network":"elastos.community"}');
+  fx.put('.local/share/elastos/ipfs-coords.json', '{"kubo_pid":1}');
+  fx.put('.local/share/elastos/ipfs-repo/config', '{"Identity":{}}');
+  fx.put('.local/share/elastos/ipfs-startup.lock', '');
+}
+
+test('Windows Reset after a setup that joined elastos.community saves a copy and deletes the distro data', POSIX, async () => {
+  const fx = distroFixture();
+  try {
+    putCommunitySetup(fx);
+    const calls = [];
+    const result = await resetRuntimeInDistro(resetDeps(fx, calls));
+    assert.equal(exists(fx.paths.dataDir), false);
+    assert.equal(exists(fx.paths.binary), false);
+    assert.equal(fs.readFileSync(path.join(fx.root, 'Documents', 'thesis.docx'), 'utf8'), 'keep');
+    // Community history, the network choice, and the Kubo repo are kept; locks and coords are not.
+    const names = readStoredZipEntries(result.backupPath).map((entry) => entry.name).sort();
+    assert.deepEqual(names, [
+      ...KEPT,
+      'elastos/collaboration-network-v1.json',
+      'elastos/collaboration/config/accepted-profile-head-v1.json',
+      'elastos/collaboration/history/room.jsonl',
+      'elastos/ipfs-repo/config',
+    ].sort());
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test('a foreign name beside a real Community setup in the distro is still refused by name', POSIX, async () => {
+  const fx = distroFixture();
+  try {
+    putCommunitySetup(fx);
+    fx.put('.local/share/elastos/holiday-photos/beach.jpg', 'keep');
+    const calls = [];
+    await assert.rejects(
+      () => resetRuntimeInDistro(resetDeps(fx, calls)),
+      /contains files that are not part of the runtime: holiday-photos\. Move those files out, then reset\. Nothing was deleted\./,
+    );
+    assert.deepEqual(calls, ['inspect']);
+    assertUntouched(fx);
+    assert.equal(fs.readFileSync(path.join(fx.root, '.local', 'share', 'elastos', 'holiday-photos', 'beach.jpg'), 'utf8'), 'keep');
+  } finally {
+    fx.cleanup();
+  }
+});
+
 test('a forged, missing, foreign-signed, or linked install record in the distro is refused', POSIX, async () => {
   const fx = distroFixture();
   try {
