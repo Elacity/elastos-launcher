@@ -26,7 +26,7 @@ const {
   writeDistroBackup,
 } = require('../dist/main/targets/windowsReset');
 const { RESET_CHOICE_MESSAGE, removeVerifiedTarget } = require('../dist/main/targets/runtimeUninstall');
-const { BACKUP_FOLDER_NAME, readStoredZipEntries } = require('../dist/main/targets/runtimeBackup');
+const { BACKUP_FOLDER_NAME, backupExcluded, readStoredZipEntries } = require('../dist/main/targets/runtimeBackup');
 const { distroIsInstalled } = require('../dist/main/targets/windowsRuntime');
 const { installRuntime } = require('../dist/main/targets/runtimeInstall');
 const { loadActiveRuntimePin } = require('../dist/main/targets/runtimePin');
@@ -991,6 +991,51 @@ test('python3 missing in the distro gives a plain message before anything runs t
     const unsure = { ...resetDeps(fx, [], { run }), pythonPresent: async () => null };
     await assert.rejects(() => resetRuntimeInDistro(unsure), /could not check its Linux environment\. Nothing was deleted\./);
     assertUntouched(fx);
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test('the Windows copy leaves out the same files as Mac and Linux, such as a crashed write that holds the attach secret', POSIX, async () => {
+  const fx = distroFixture();
+  try {
+    const hex = 'a'.repeat(32);
+    const child = 'managed-runtimes/browser/home/.local/share/elastos';
+    const added = [
+      `.gateway-runtime-coords.json.${hex}.tmp`,
+      'ipfs-coords.tmp',
+      '.components.json.tmp-4242',
+      '.tmpAb12Cd/staged.bin',
+      `.community-membership.${hex}.tmp`,
+      'services-model-runs.json.tmp',
+      `${child}/gateway-runtime-coords.json`,
+      `${child}/.gateway-runtime-coords.json.${hex}.tmp`,
+      `${child}/notes.txt`,
+      // Close to a left-out name, but not that name: kept.
+      `.gateway-runtime-coords.json.${hex}.tmp.old`,
+      'ipfs-coords.tmp2',
+    ];
+    for (const rel of added) fx.put(`.local/share/elastos/${rel}`, `secret ${rel}`);
+    const saved = await writeDistroBackup({
+      run: localRun([]), paths: fx.paths, home: fx.winHome, platform: 'linux', restrict: () => {}, freeBytes: PLENTY,
+    });
+    const names = readStoredZipEntries(saved).map((entry) => entry.name).sort();
+    assert.equal(names.some((name) => name.includes(`coords.json.${hex}.tmp`) && !name.endsWith('.old')), false);
+    // One rule set: the copy made in the Linux environment holds exactly what backupExcluded keeps.
+    const all = [];
+    const list = (dir, rel) => {
+      for (const name of fs.readdirSync(dir)) {
+        const sub = rel ? `${rel}/${name}` : name;
+        if (fs.lstatSync(path.join(dir, name)).isDirectory()) list(path.join(dir, name), sub);
+        else all.push(sub);
+      }
+    };
+    list(fx.paths.dataDir, '');
+    const kept = all.filter((rel) => !rel.split('/').some((_, i, parts) => backupExcluded(parts.slice(0, i + 1).join('/'))));
+    assert.deepEqual(names, kept.map((rel) => `elastos/${rel}`).sort());
+    assert.ok(names.includes(`elastos/${child}/notes.txt`));
+    assert.ok(names.includes(`elastos/.community-membership.${hex}.tmp`));
+    assert.ok(names.includes('elastos/ipfs-coords.tmp2'));
   } finally {
     fx.cleanup();
   }

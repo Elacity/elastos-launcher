@@ -28,7 +28,7 @@
  * before it stops or copies anything.
  */
 export const DISTRO_RESET_HELPER = `
-import base64, hashlib, json, os, secrets, stat, struct, sys, time, zlib
+import base64, hashlib, json, os, re, secrets, stat, struct, sys, time, zlib
 op = sys.argv[1]
 req = json.loads(sys.stdin.buffer.read().decode('utf-8', 'surrogateescape') or '{}')
 root = req['root']
@@ -235,13 +235,13 @@ def remove_folder_at(pfd, name, st, base):
         return ['.']
     return []
 
-def walk(data, excludes):
+def walk(data, rules):
     dev = os.lstat(data).st_dev
     stack = ['']
     while stack:
         rel = stack.pop()
         full = os.path.join(data, rel) if rel else data
-        if rel and excluded(rel, excludes):
+        if rel and excluded(rel, rules):
             continue
         st = os.lstat(full)
         if stat.S_ISLNK(st.st_mode) or st.st_dev != dev:
@@ -253,11 +253,19 @@ def walk(data, excludes):
         if stat.S_ISREG(st.st_mode):
             yield rel, full
 
-def excluded(rel, excludes):
-    for entry in excludes:
-        if rel == entry or rel.startswith(entry + '/'):
+def whole(pattern, name):
+    m = re.match(pattern, name, re.ASCII)
+    return m is not None and m.end() == len(name)
+
+def excluded(rel, rules):
+    # The rules of backupExcluded in runtimeBackup.ts, sent by the launcher.
+    m = re.match(rules['childDataRoot'], rel, re.ASCII)
+    inner = rel[m.end():] if m else rel
+    for entry in rules['excludes']:
+        if inner == entry or inner.startswith(entry + '/'):
             return True
-    return False
+    top = inner.split('/')[0]
+    return any(whole(pattern, top) for pattern in rules['leftOutTempNames'])
 
 def arcname(rel):
     return ('elastos/' + rel).encode('utf-8', 'surrogateescape')
@@ -298,7 +306,7 @@ def do_measure():
     files = 0
     size = 0
     names = 0
-    for rel, full in walk(data, req['excludes']):
+    for rel, full in walk(data, req['rules']):
         files += 1
         size += os.lstat(full).st_size
         names += len(arcname(rel))
@@ -340,7 +348,7 @@ def do_zip():
     offset = 0
     centrals = []
     count = 0
-    for rel, full in walk(data, req['excludes']):
+    for rel, full in walk(data, req['rules']):
         name = arcname(rel)
         if len(name) > 0xffff:
             raise Refused('a name is too long')

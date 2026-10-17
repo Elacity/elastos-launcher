@@ -7,6 +7,7 @@ import {
   BackupDescription,
   BackupMeasure,
   BackupSpaceError,
+  backupExclusionRules,
   backupFileName,
   backupNeededBytes,
   describeMeasuredBackup,
@@ -15,7 +16,6 @@ import {
   prepareBackupFolder,
   readStoredZipEntries,
   runBackupWorker,
-  RUNTIME_BACKUP_EXCLUDES,
   TOO_MANY_BACKUPS,
 } from './runtimeBackup';
 import { isForeignGatewayError } from './runtimeGateway';
@@ -377,7 +377,7 @@ function partialMessage(stdout: string, paths: DistroResetPaths): string {
 
 /** The copy's size, measured inside the Linux environment with the same exclusions. Null when there is no data. */
 export async function measureDistroBackup(run: DistroHelperRun, paths: DistroResetPaths): Promise<BackupMeasure | null> {
-  const result = await run('measure', { ...helperInput(paths), excludes: RUNTIME_BACKUP_EXCLUDES }, { timeoutMs: 10 * 60 * 1000 });
+  const result = await run('measure', { ...helperInput(paths), rules: backupExclusionRules() }, { timeoutMs: 10 * 60 * 1000 });
   if (result.code !== 0) throw new Error('ElastOS could not measure its data.');
   const parsed = parseJson<{ present: boolean; files?: number; bytes?: number; nameBytes?: number }>(result.stdout);
   if (!parsed.present) return null;
@@ -470,7 +470,7 @@ export async function writeDistroBackup(input: {
       input.restrict(dest, false);
       const result = await input.run(
         'zip',
-        { ...helperInput(input.paths), excludes: RUNTIME_BACKUP_EXCLUDES },
+        { ...helperInput(input.paths), rules: backupExclusionRules() },
         { outFd: fd, timeoutMs: 6 * 60 * 60 * 1000 },
       );
       if (result.code !== 0) throw new Error('The copy could not be read from the Linux environment.');

@@ -49,6 +49,28 @@ export const BACKUP_FOLDER_NAME = 'ElastOS-backups';
  */
 const CHILD_DATA_ROOT = /^managed-runtimes\/[^/]+\/home\/(?:\.local\/share|Library\/Application Support)\/elastos\//;
 
+/**
+ * The same rules as `backupExcluded`, as data for the Reset helper that
+ * copies the data inside the ElastOS Linux environment on Windows
+ * (distroResetHelper.ts). The patterns go as their source text, and the
+ * helper matches each one against the whole name, as `^...$` does here.
+ */
+export interface BackupExclusionRules {
+  excludes: readonly string[];
+  leftOutTempNames: string[];
+  childDataRoot: string;
+}
+
+export function backupExclusionRules(): BackupExclusionRules {
+  const patterns = [...RUNTIME_LEFT_OUT_TEMP_NAMES, CHILD_DATA_ROOT];
+  if (patterns.some((pattern) => pattern.flags !== '')) throw new Error('A backup rule has flags the helper cannot read.');
+  return {
+    excludes: RUNTIME_BACKUP_EXCLUDES,
+    leftOutTempNames: RUNTIME_LEFT_OUT_TEMP_NAMES.map((pattern) => pattern.source),
+    childDataRoot: CHILD_DATA_ROOT.source,
+  };
+}
+
 /** True for a path, relative to the data directory with `/`, that a backup leaves out. */
 export function backupExcluded(relative: string): boolean {
   const inner = relative.replace(CHILD_DATA_ROOT, '');
