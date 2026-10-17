@@ -159,9 +159,11 @@ export async function applyFix(facts: FailureFacts, deps: RecoveryDeps): Promise
     return (await deps.gatewayIdentity()) ? 'ready' : 'still-blocked';
   }
   if (kind === 'no-record') {
-    // Nothing is deleted or changed here. On 'ready' the window runs Install,
-    // and install.sh writes the signed record in installation/ (runtime
-    // install-release). Then Reset can prove the folder.
+    // Nothing is deleted or changed here. On 'ready' the window runs Install.
+    // With no valid record Install does not count ElastOS as installed
+    // (planRuntimeInstall), so it runs the pinned install.sh, which writes the
+    // signed record in installation/ (runtime install-release). Then Reset
+    // can prove the folder.
     return 'ready';
   }
   if (kind === 'offline') {

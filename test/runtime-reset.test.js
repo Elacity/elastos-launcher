@@ -856,3 +856,81 @@ test('Windows removal does not open a directory and does not use O_NOFOLLOW', ()
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+/**
+ * The Fix it loop. A custom XDG install of the pinned version with no valid
+ * install record: Reset refuses and offers Fix it, Fix it runs Install, and
+ * Install must then run the pinned install.sh (which writes the record), not
+ * stop at "already installed". Otherwise Reset refuses again, for ever.
+ */
+async function fixItThenReset(breakRecord) {
+  const { installRuntime, defaultRuntimeInstallDeps } = require('../dist/main/targets/runtimeInstall');
+  const { loadActiveRuntimePin } = require('../dist/main/targets/runtimePin');
+  const crypto = require('node:crypto');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'elastos-fixit-loop-'));
+  try {
+    const home = path.join(root, 'home');
+    const data = path.join(home, 'custom', 'elastos');
+    const env = { XDG_DATA_HOME: path.join(home, 'custom') };
+    const record = path.join(data, 'installation', 'release-head.json');
+    realXdgInstall(data);
+    const pinned = loadActiveRuntimePin({});
+    const script = '#!/bin/bash\necho pinned-installer\n';
+    const pin = { ...pinned, installerSha256: crypto.createHash('sha256').update(script).digest('hex') };
+    // What install.sh writes for the pinned release: sources.json with its head CID.
+    fs.writeFileSync(path.join(data, 'sources.json'), JSON.stringify({
+      default_source: 'default',
+      sources: [{ name: 'default', head_cid: pin.headCid, installed_version: pin.version }],
+    }));
+    breakRecord(record);
+    const removed = [];
+    let message = '';
+    await assert.rejects(() => resetRuntime(resetDeps(home, data, env, removed)), (err) => {
+      message = err.message;
+      return true;
+    });
+    assert.deepEqual(removed, []);
+    const facts = { error: message, checks: [], binaryPresent: true, componentsPresent: true };
+    assert.equal(failureScreen(facts).kind, 'no-record');
+    assert.equal(await applyFix(facts, {}), 'ready');
+    // The window now runs Install with the real file checks.
+    const installs = [];
+    await installRuntime({
+      ...defaultRuntimeInstallDeps(pin),
+      platform: 'linux',
+      arch: 'x64',
+      homeDir: home,
+      env,
+      probe: async () => ({ kind: 'version', version: `ElastOS Runtime v${pin.version}`, binaryPath: path.join(home, '.local', 'bin', 'elastos') }),
+      fetchText: async (url) => (url.endsWith('/release-head.json') ? SIGNED_HEAD.toString('utf8') : script),
+      // install-release writes the verified head into installation/ (runtime update.rs install_release).
+      runInstaller: async (file, args) => {
+        installs.push([file, [...args]]);
+        fs.rmSync(record, { force: true });
+        fs.writeFileSync(record, SIGNED_HEAD, { mode: 0o600 });
+        return { stdout: '', stderr: '' };
+      },
+      runSetup: async () => { throw new Error('setup must not run: components.json is there'); },
+    }, () => {});
+    assert.equal(installs.length, 1);
+    assert.deepEqual(installs[0][1], ['--install-only', '--maintainer-did', pin.maintainerDid]);
+    assert.equal(signedInstallRecord(data), true);
+    // The user data is still there; only the record was written.
+    assert.equal(fs.readFileSync(path.join(data, 'identity', 'device.key'), 'utf8'), 'x');
+    await resetRuntime(resetDeps(home, data, env, removed));
+    assert.ok(removed.includes(data));
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+}
+
+test('Fix it after a missing install record runs install.sh, and then Reset goes ahead', async () => {
+  await fixItThenReset((record) => fs.rmSync(record));
+});
+
+test('Fix it after a tampered install record runs install.sh, and then Reset goes ahead', async () => {
+  await fixItThenReset((record) => {
+    fs.writeFileSync(record, SIGNED_HEAD.toString('utf8').replace('"version":"0.8.0-alpha.22"', '"version":"0.8.0-alpha.23"'));
+    assert.equal(signedInstallRecord(path.dirname(path.dirname(record))), false);
+  });
+});

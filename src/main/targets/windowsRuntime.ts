@@ -6,6 +6,7 @@ import { PinMismatchError } from './runtimeInstall';
 import { installRuntime, RuntimeInstallDeps } from './runtimeInstall';
 import { INSTALLER_ENV_NAMES, runtimeChildEnv } from './releaseHead';
 import { loadActiveRuntimePin } from './runtimePin';
+import { installRecordTextProves, runtimeJoin } from './runtimePaths';
 import { parseRuntimeVersion } from './runtimeProbe';
 import { WINDOWS_NATIVE_MESSAGE } from './runtimeSupport';
 import {
@@ -376,6 +377,11 @@ function distroInstallDeps(): RuntimeInstallDeps {
       const result = runWslSync(fileArgs('mkdir', dir));
       if (result.code !== 0) throw new Error(DISTRO_SETUP_FAILED);
     },
+    // The record bytes inside the distro, checked here against the pinned DID.
+    installRecordProved: (dataDir) => installRecordTextProves(
+      readDistroFile(runtimeJoin(dataDir, 'installation', 'release-head.json')),
+      pin.maintainerDid,
+    ),
   };
 }
 

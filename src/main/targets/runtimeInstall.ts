@@ -11,6 +11,7 @@ import {
   runtimeInstallStagePath,
   runtimeJoin,
   runtimeSourcesPath,
+  signedInstallRecord,
 } from './runtimePaths';
 import { probeRuntimeInstallation, RuntimeProbe, RuntimeProbeRequest } from './runtimeProbe';
 import { prepareInstallerEnvironment } from './hostTools';
@@ -88,11 +89,20 @@ export type InstallPlan =
   | { action: 'pinned' }
   | { action: 'refused'; field: string };
 
+/**
+ * ElastOS counts as installed only when the version, the head CID in
+ * sources.json, and the signed install record (installation/release-head.json,
+ * checked against the pinned maintainer DID) all match. Version and head CID
+ * are read from files this account can edit, so they say which release is
+ * there. The record is the proof that install.sh finished that release. With
+ * no valid record, Install runs the pinned install.sh again, which writes it.
+ */
 export function planRuntimeInstall(input: {
   platform: string;
   arch: string;
   installedVersion: string | null;
   installedHeadCid: string | null;
+  installRecordProved: boolean;
   componentsPresent: boolean;
   pin: ActiveRuntimePin;
   publisher: ReleaseHead | null;
@@ -108,8 +118,9 @@ export function planRuntimeInstall(input: {
   }
   const field = pinMismatchField(input.pin, input.publisher);
   if (field) return { action: 'refused', field };
-  if (versionOk && headOk && input.componentsPresent) return { action: 'already-installed' };
-  if (versionOk && headOk && !input.componentsPresent) return { action: 'resume-setup' };
+  const installed = versionOk && headOk && input.installRecordProved;
+  if (installed && input.componentsPresent) return { action: 'already-installed' };
+  if (installed && !input.componentsPresent) return { action: 'resume-setup' };
   return { action: 'pinned' };
 }
 
@@ -137,6 +148,12 @@ export interface RuntimeInstallDeps {
   exists: (file: string) => boolean;
   statMtimeMs: (file: string) => number | null;
   mkdirp: (dir: string) => void;
+  /**
+   * True when the data directory holds the signed install record. This is
+   * the same check Reset uses to prove the folder (signedInstallRecord in
+   * runtimePaths.ts), so an install Install accepts is one Reset can prove.
+   */
+  installRecordProved: (dataDir: string) => boolean | Promise<boolean>;
 }
 
 const CHECK = 'Checking this computer (about 10 seconds)';
@@ -152,7 +169,8 @@ export async function installRuntime(
     const blocked = runtimeInstallBlock(deps.platform, deps.arch);
     if (blocked) throw new Error(blocked);
 
-    const components = runtimeComponentsPath(runtimeDataDir(deps.platform, deps.homeDir, deps.env));
+    const dataDir = runtimeDataDir(deps.platform, deps.homeDir, deps.env);
+    const components = runtimeComponentsPath(dataDir);
     const probed = await probeInstalled(deps);
     let publisher: ReleaseHead | null = null;
     try {
@@ -168,6 +186,7 @@ export async function installRuntime(
       arch: deps.arch,
       installedVersion: probed,
       installedHeadCid: readInstalledHeadCid(deps),
+      installRecordProved: await recordProved(deps, dataDir),
       componentsPresent: deps.exists(components),
       pin: deps.pin,
       publisher,
@@ -198,12 +217,25 @@ export async function installRuntime(
       throw new PinMismatchError('headCid');
     }
     onProgress('Installed head CID matches the pin');
+    if (!(await recordProved(deps, dataDir))) throw new Error(NO_RECORD_AFTER_INSTALL);
+    onProgress('Signed install record matches the pinned maintainer');
 
     if (!deps.exists(components)) {
       await runSetupStep(deps, onProgress);
     }
   writeStage(deps, 'done');
   onProgress('Your computer is ready.');
+}
+
+/** Install finished, but install.sh left no valid record. Reset could not prove this install. */
+export const NO_RECORD_AFTER_INSTALL = 'ElastOS was installed, but it did not save its signed install record, so ElastOS cannot prove this install. Click Install to try again.';
+
+async function recordProved(deps: RuntimeInstallDeps, dataDir: string): Promise<boolean> {
+  try {
+    return (await deps.installRecordProved(dataDir)) === true;
+  } catch {
+    return false;
+  }
 }
 
 function readInstalledHeadCid(deps: RuntimeInstallDeps): string | null {
@@ -363,6 +395,7 @@ export function defaultRuntimeInstallDeps(pin: ActiveRuntimePin = loadActiveRunt
       }
     },
     mkdirp: (dir) => fs.mkdirSync(dir, { recursive: true }),
+    installRecordProved: (dataDir) => signedInstallRecord(dataDir, pin.maintainerDid),
   };
 }
 
