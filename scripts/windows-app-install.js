@@ -9,8 +9,9 @@ const { installRuntimeOnThisComputer } = require('../dist/main/targets/runtimeIn
 const { createRuntimeTarget } = require('../dist/main/targets/runtimeTarget');
 const { HOME_URL, getLocalPath, isHealthOk, probeGatewayHealth } = require('../dist/main/targets/runtimeGateway');
 const { readStoredZipEntries } = require('../dist/main/targets/runtimeBackup');
-const { resetRuntimeInDistroOnThisComputer } = require('../dist/main/targets/windowsReset');
-const { distroIsInstalled } = require('../dist/main/targets/windowsRuntime');
+const { distroResetPaths, resetRuntimeInDistroOnThisComputer } = require('../dist/main/targets/windowsReset');
+const { distroIsInstalled, runWslSync } = require('../dist/main/targets/windowsRuntime');
+const { isRuntimeDataName } = require('../dist/main/targets/runtimePaths');
 const { execFileSync } = require('child_process');
 const fs = require('fs');
 
@@ -43,6 +44,15 @@ async function main() {
   console.log(`Opening Home in the Windows browser: ${HOME_URL}`);
   await target.stop();
   console.log('Gateway stopped cleanly');
+
+  // Print every top-level entry of the distro data folder, so a name Reset
+  // does not know is visible in this log in full, not cut after five.
+  const { dataDir } = distroResetPaths();
+  const listing = runWslSync(['ls', '-lA', '--full-time', dataDir]);
+  console.log(`Top-level entries of ${dataDir} before Reset:\n${listing.stdout.trimEnd()}`);
+  const names = runWslSync(['ls', '-1A', dataDir]).stdout.split('\n').filter(Boolean);
+  const unknown = names.filter((name) => !isRuntimeDataName(name));
+  console.log(unknown.length ? `Names Reset does not know (${unknown.length}): ${unknown.join(', ')}` : 'Reset knows every name');
 
   // Reset with a copy, as the Reset button does on Windows.
   const reset = await resetRuntimeInDistroOnThisComputer(() => target.stopForRemoval(), { backup: true });
