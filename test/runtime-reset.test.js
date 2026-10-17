@@ -5,7 +5,7 @@ const path = require('node:path');
 const test = require('node:test');
 
 const { removeVerifiedTarget, resetRuntime, sweepRemovalHoldings } = require('../dist/main/targets/runtimeUninstall');
-const { launcherOwnedDirectories } = require('../dist/main/targets/runtimePaths');
+const { foreignRuntimeDataMessage, launcherOwnedDirectories, signedInstallRecord } = require('../dist/main/targets/runtimePaths');
 const { ForeignGatewayError } = require('../dist/main/targets/runtimeGateway');
 const flow = require('../src/renderer/flow.js');
 
@@ -251,7 +251,7 @@ test('real home names are owned and a real symlink is not followed', async () =>
   }
 });
 
-test('an XDG data directory is owned only with the ElastOS lock or marker', () => {
+test('an XDG data directory with only partial-install files is owned', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'elastos-xdg-'));
   try {
     const home = path.join(root, 'home');
@@ -274,57 +274,150 @@ test('an XDG data directory is owned only with the ElastOS lock or marker', () =
   }
 });
 
-test('a real XDG install that holds the ElastOS marker is reset', async () => {
+const SIGNED_HEAD = fs.readFileSync(path.join(__dirname, 'fixtures', 'release-head-0.8.0-alpha.22.json'));
+
+/** The layout a real 0.8.0-alpha.22 install and one gateway start left in a custom XDG folder. */
+function realXdgInstall(data) {
+  for (const dir of ['AppCapsules', 'ElastOS/System/Auth', 'Local', 'MyWebSite', 'Public', 'Users', 'UsersAI',
+    'capability_store', 'gateway-cache', 'identity', 'installation', 'namespaces', 'capsules', 'bin']) {
+    fs.mkdirSync(path.join(data, dir), { recursive: true });
+  }
+  for (const file of ['ca.key', 'ca.pem', 'tls.key', 'tls.pem', 'tls.ips', 'signing_key', 'sources.json',
+    'gateway-runtime-ownership.lock', 'identity/device.key', 'installation/release.json']) {
+    fs.writeFileSync(path.join(data, file), 'x');
+  }
+  fs.writeFileSync(path.join(data, 'host-process.lock'), JSON.stringify({ pid: 13608, role: 'gateway', addr: '127.0.0.1:8090' }));
+  fs.writeFileSync(path.join(data, 'components.json'), JSON.stringify({ components: { home: {} } }));
+  fs.writeFileSync(path.join(data, 'installation', 'release-head.json'), SIGNED_HEAD);
+}
+
+function resetDeps(home, data, env, removed) {
+  const binary = path.join(home, '.local', 'bin', 'elastos');
+  fs.mkdirSync(path.dirname(binary), { recursive: true });
+  fs.writeFileSync(binary, '');
+  return {
+    binary,
+    dataDir: data,
+    stageFile: path.join(home, '.elastos-launcher', 'install-stage.json'),
+    homeDir: home,
+    platform: 'linux',
+    env,
+    stop: async () => {},
+    remove: (target) => { removed.push(target); },
+  };
+}
+
+const quote = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+test('a real custom XDG install with a signed install record is reset', async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'elastos-xdg-real-'));
   try {
     const home = path.join(root, 'home');
     const data = path.join(home, 'custom', 'elastos');
-    fs.mkdirSync(path.join(data, 'state'), { recursive: true });
-    const lock = JSON.stringify({ pid: 42, addr: '127.0.0.1:8090' });
-    fs.writeFileSync(path.join(data, 'host-process.lock'), lock);
-    fs.writeFileSync(path.join(data, 'components.json'), '{}\n');
-    fs.writeFileSync(path.join(data, 'runtime-coords.json'), '{}\n');
     const env = { XDG_DATA_HOME: path.join(home, 'custom') };
+    realXdgInstall(data);
+    assert.equal(signedInstallRecord(data), true);
     assert.equal(launcherOwnedDirectories(data, home, 'linux', env), true);
-    fs.writeFileSync(path.join(data, 'host-process.lock'), '{}\n');
-    assert.equal(launcherOwnedDirectories(data, home, 'linux', env), false);
-    fs.writeFileSync(path.join(data, 'host-process.lock'), lock);
+    const removed = [];
+    await resetRuntime(resetDeps(home, data, env, removed));
+    assert.equal(removed.includes(data), true);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('a custom XDG reset leaves user files beside a signed install record', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'elastos-xdg-user-'));
+  try {
+    const home = path.join(root, 'home');
+    const data = path.join(home, 'custom', 'elastos');
+    const env = { XDG_DATA_HOME: path.join(home, 'custom') };
+    realXdgInstall(data);
     const thesis = path.join(data, 'Documents', 'thesis.docx');
     fs.mkdirSync(path.dirname(thesis), { recursive: true });
     fs.writeFileSync(thesis, 'keep');
     fs.writeFileSync(path.join(data, 'notes.txt'), 'keep');
     assert.equal(launcherOwnedDirectories(data, home, 'linux', env), false);
-    const binary = path.join(home, '.local', 'bin', 'elastos');
-    fs.mkdirSync(path.dirname(binary), { recursive: true });
-    fs.writeFileSync(binary, '');
     const refused = [];
-    await assert.rejects(() => resetRuntime({
-      binary,
-      dataDir: data,
-      stageFile: path.join(home, '.elastos-launcher', 'install-stage.json'),
-      homeDir: home,
-      platform: 'linux',
-      env,
-      stop: async () => {},
-      remove: (target) => { refused.push(target); },
-    }), new RegExp(`will not reset ${data.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} because it contains files`));
+    await assert.rejects(
+      () => resetRuntime(resetDeps(home, data, env, refused)),
+      new RegExp(`will not reset ${quote(data)} because it contains files that are not part of the runtime: Documents, notes\\.txt\\.`),
+    );
     assert.deepEqual(refused, []);
     assert.equal(fs.readFileSync(thesis, 'utf8'), 'keep');
     assert.equal(fs.readFileSync(path.join(data, 'notes.txt'), 'utf8'), 'keep');
-    fs.rmSync(path.join(data, 'Documents'), { recursive: true });
-    fs.rmSync(path.join(data, 'notes.txt'));
-    const removed = [];
-    await resetRuntime({
-      binary,
-      dataDir: data,
-      stageFile: path.join(home, '.elastos-launcher', 'install-stage.json'),
-      homeDir: home,
-      platform: 'linux',
-      env,
-      stop: async () => {},
-      remove: (target) => { removed.push(target); },
-    });
-    assert.equal(removed.includes(data), true);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('a lock, a components manifest, or a forged install record does not prove a custom XDG folder', async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'elastos-xdg-forged-'));
+  try {
+    const home = path.join(root, 'home');
+    const data = path.join(home, 'custom', 'elastos');
+    const env = { XDG_DATA_HOME: path.join(home, 'custom') };
+    const unproved = new RegExp(`will not reset ${quote(data)} because it has no signed ElastOS install record`);
+    // The markers that used to be enough: a gateway lock, a manifest, coordinates, and folders with runtime names.
+    fs.mkdirSync(path.join(data, 'capsules'), { recursive: true });
+    fs.mkdirSync(path.join(data, 'Users', 'me'), { recursive: true });
+    fs.writeFileSync(path.join(data, 'Users', 'me', 'photo.jpg'), 'keep');
+    fs.writeFileSync(path.join(data, 'host-process.lock'), JSON.stringify({ pid: 42, role: 'gateway', addr: '127.0.0.1:8090' }));
+    fs.writeFileSync(path.join(data, 'components.json'), JSON.stringify({ components: { home: {} } }));
+    fs.writeFileSync(path.join(data, 'runtime-coords.json'), '{}');
+    assert.equal(launcherOwnedDirectories(data, home, 'linux', env), false);
+    const refused = [];
+    await assert.rejects(() => resetRuntime(resetDeps(home, data, env, refused)), unproved);
+    // A record whose payload was edited after signing.
+    fs.mkdirSync(path.join(data, 'installation'));
+    const head = JSON.parse(SIGNED_HEAD.toString('utf8'));
+    head.payload.version = '0.8.0-alpha.99';
+    fs.writeFileSync(path.join(data, 'installation', 'release-head.json'), JSON.stringify(head));
+    assert.equal(signedInstallRecord(data), false);
+    await assert.rejects(() => resetRuntime(resetDeps(home, data, env, refused)), unproved);
+    // A record signed by a different key than the pinned maintainer.
+    fs.writeFileSync(path.join(data, 'installation', 'release-head.json'), SIGNED_HEAD);
+    assert.equal(signedInstallRecord(data, 'did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK'), false);
+    assert.equal(signedInstallRecord(data, null), false);
+    // A real record reached through a link.
+    const elsewhere = path.join(root, 'elsewhere');
+    fs.mkdirSync(elsewhere);
+    fs.writeFileSync(path.join(elsewhere, 'release-head.json'), SIGNED_HEAD);
+    fs.rmSync(path.join(data, 'installation'), { recursive: true });
+    fs.symlinkSync(elsewhere, path.join(data, 'installation'));
+    assert.equal(signedInstallRecord(data), false);
+    assert.equal(launcherOwnedDirectories(data, home, 'linux', env), false);
+    assert.deepEqual(refused, []);
+    assert.equal(fs.readFileSync(path.join(data, 'Users', 'me', 'photo.jpg'), 'utf8'), 'keep');
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('a source checkout or a publisher key in a custom XDG folder is refused by name', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'elastos-xdg-checkout-'));
+  try {
+    const home = path.join(root, 'home');
+    const data = path.join(home, 'code', 'elastos');
+    const env = { XDG_DATA_HOME: path.join(home, 'code') };
+    // A clone of the runtime repository has components.json and capsules/ too.
+    realXdgInstall(data);
+    for (const name of ['README.md', 'docs', '.git']) {
+      if (name.includes('.')) fs.writeFileSync(path.join(data, name), 'x');
+      else fs.mkdirSync(path.join(data, name));
+    }
+    assert.equal(launcherOwnedDirectories(data, home, 'linux', env), false);
+    assert.match(foreignRuntimeDataMessage(data, home, 'linux', env), /not part of the runtime: \.git, README\.md, docs\./);
+    for (const name of ['README.md', 'docs', '.git']) fs.rmSync(path.join(data, name), { recursive: true });
+    assert.equal(launcherOwnedDirectories(data, home, 'linux', env), true);
+    fs.writeFileSync(path.join(data, 'release-key.hex'), 'secret');
+    assert.equal(launcherOwnedDirectories(data, home, 'linux', env), false);
+    assert.match(foreignRuntimeDataMessage(data, home, 'linux', env), /not part of the runtime: release-key\.hex\./);
+    fs.rmSync(path.join(data, 'release-key.hex'));
+    fs.symlinkSync(path.join(root, 'outside'), path.join(data, 'Public-link'));
+    fs.rmSync(path.join(data, 'Public'), { recursive: true });
+    fs.renameSync(path.join(data, 'Public-link'), path.join(data, 'Public'));
+    assert.equal(launcherOwnedDirectories(data, home, 'linux', env), false);
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }

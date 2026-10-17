@@ -1,6 +1,8 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import { verifyReleaseHead } from './releaseHead';
+import { loadRuntimePinFile } from './runtimePin';
 
 /**
  * Join a runtime path. A Linux path (`/root/...`) stays POSIX even when this
@@ -98,61 +100,32 @@ function withinHome(candidate: string, homeDir: string, platform: string): boole
   return value === home || value.startsWith(`${home}/`);
 }
 
-/** A regular file. A symlink does not count, so a marker cannot point outside the directory. */
-function isRegularFile(file: string): boolean {
-  try {
-    return fs.lstatSync(file).isFile();
-  } catch {
-    return false;
-  }
-}
-
 /**
- * The host lock or `components.json` is present as a real file. A filename
- * alone does not make a custom directory safe to delete.
+ * Top-level names the runtime writes in its data directory, from runtime 0.8:
+ * the rooted Home folders (`elastos-common` `ALL_ROOTS`), the release files
+ * that install.sh manages, and the files and folders the gateway and setup
+ * create. A custom data directory holding any other name is refused by name.
+ * A publisher's `release-key.hex` and `releases` are not on this list, so a
+ * reset never deletes a release signing key.
  */
-export function elastosDataDirMarked(dataDir: string): boolean {
-  return isRegularFile(runtimeHostLockPath(dataDir))
-    || isRegularFile(runtimeJoin(dataDir, 'components.json'));
-}
-
-const RUNTIME_DATA_FILES = new Set([
-  'components.json',
-  'host-process.lock',
-  'sources.json',
-  'runtime-coords.json',
+const RUNTIME_DATA_NAMES = new Set([
+  'AppCapsules', 'ElastOS', 'Local', 'MyWebSite', 'Public', 'Users', 'UsersAI', 'WebSpaces',
+  'installation', 'bin', 'libexec', 'capsules', 'tools', 'scripts', 'browser-vm', 'update-controller',
+  'model-catalog.json', 'components.json', 'sources.json', '.components.upgrade.tmp',
+  'host-process.lock', 'gateway-runtime-ownership.lock', 'managed-runtime-start.lock',
+  'runtime-coords.json', 'gateway-runtime-coords.json', 'home-runtime-coords.json',
+  'ca.key', 'ca.pem', 'tls.key', 'tls.pem', 'tls.ips', 'signing_key', 'identity', 'did',
+  'capability_store', 'namespaces', 'gateway-cache', 'cache', 'content_cache',
+  'config', 'config.toml', 'providers', 'protected-content', 'model-preparation',
+  'services-model-runs.json', 'services-model-remote-runs.json', 'operator-control.json',
+  'backups', 'logs', 'policy', 'shares', 'storage', 'time_counter', 'audit.log', '.audit',
+  'crosvm', 'crosvm-empty', 'vz', 'vz-browser', 'rootfs-cache', 'Image', 'Runtime',
 ]);
-const RUNTIME_DATA_DIRS = new Set(['state']);
-const KNOWN_PARTIAL_FILES = new Set(['components.json', 'host-process.lock', 'sources.json']);
-
-function readJsonObject(file: string): Record<string, unknown> | null {
-  if (!isRegularFile(file)) return null;
-  try {
-    const parsed = JSON.parse(fs.readFileSync(file, 'utf8')) as unknown;
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
-    return parsed as Record<string, unknown>;
-  } catch {
-    return null;
-  }
-}
-
-/** The host lock names the gateway, or components.json is a component manifest. */
-function elastosInstallProved(dataDir: string): boolean {
-  const lock = readJsonObject(runtimeHostLockPath(dataDir));
-  if (lock
-    && typeof lock.pid === 'number'
-    && Number.isInteger(lock.pid)
-    && lock.pid > 0
-    && lock.addr === '127.0.0.1:8090') {
-    return true;
-  }
-  const components = readJsonObject(path.join(dataDir, 'components.json'));
-  const manifest = components?.components;
-  return !!manifest
-    && typeof manifest === 'object'
-    && !Array.isArray(manifest)
-    && Object.keys(manifest as object).length > 0;
-}
+/** What a half-finished install leaves. These alone need no signed record. */
+const RUNTIME_PARTIAL_FILES = new Set(['components.json', 'host-process.lock', 'sources.json']);
+/** install.sh writes the verified release head here before anything else runs. */
+export const INSTALLED_RELEASE_HEAD = path.join('installation', 'release-head.json');
+const RELEASE_HEAD_MAX_BYTES = 64 * 1024;
 
 /** A real directory. A symlink does not count, even when its target holds a marker. */
 function isRealDirectory(dataDir: string): boolean {
@@ -164,57 +137,110 @@ function isRealDirectory(dataDir: string): boolean {
   }
 }
 
+function pinnedMaintainerDid(): string | null {
+  try {
+    return loadRuntimePinFile().maintainerDid || null;
+  } catch {
+    return null;
+  }
+}
+
 /**
- * A custom data directory this launcher may reset: it exists as a real
- * directory and is empty, or every entry is one of the runtime's own files.
- * Anything else, including a symlink or a user file beside a marker, is foreign.
- * A missing directory is absent. Extra runtime files count only when the
- * lock or components manifest proves this is an ElastOS install.
+ * The install record proves this directory is a runtime data directory:
+ * `installation/release-head.json` is a regular file in a real folder, and
+ * its Ed25519 signature matches the pinned maintainer DID. A filename, a lock,
+ * or a components manifest alone is not proof, because anyone can write them.
+ * A missing pin or a bad signature is not proof either.
  */
-function customXdgContents(dataDir: string): 'owned' | 'foreign' | 'absent' {
+export function signedInstallRecord(
+  dataDir: string,
+  maintainerDid: string | null = pinnedMaintainerDid(),
+): boolean {
+  if (!maintainerDid) return false;
+  if (!isRealDirectory(path.join(dataDir, 'installation'))) return false;
+  const head = path.join(dataDir, INSTALLED_RELEASE_HEAD);
+  try {
+    const stat = fs.lstatSync(head);
+    if (!stat.isFile() || stat.size > RELEASE_HEAD_MAX_BYTES) return false;
+    verifyReleaseHead(fs.readFileSync(head, 'utf8'), maintainerDid);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+type CustomXdgContents =
+  | { kind: 'owned' }
+  | { kind: 'absent' }
+  | { kind: 'foreign'; names: string[] }
+  | { kind: 'unproved' };
+
+/**
+ * A custom data directory this launcher may reset. It is a real directory and
+ * is empty, holds only the partial-install files, or holds only runtime names
+ * and a signed install record. A symlink, an unknown name, and a record that
+ * does not verify are refused. A missing directory is absent.
+ */
+function customXdgContents(dataDir: string, proved: (dir: string) => boolean): CustomXdgContents {
   let stat: fs.Stats;
   try {
     stat = fs.lstatSync(dataDir);
   } catch {
-    return 'absent';
+    return { kind: 'absent' };
   }
-  if (stat.isSymbolicLink() || !stat.isDirectory()) return 'foreign';
+  if (stat.isSymbolicLink() || !stat.isDirectory()) return { kind: 'foreign', names: [] };
   let names: string[];
   try {
-    names = fs.readdirSync(dataDir);
+    names = fs.readdirSync(dataDir).sort();
   } catch {
-    return 'foreign';
+    return { kind: 'foreign', names: [] };
   }
-  let extra = false;
+  const foreign: string[] = [];
+  let partialOnly = true;
   for (const name of names) {
-    const child = path.join(dataDir, name);
-    if (RUNTIME_DATA_FILES.has(name)) {
-      if (!isRegularFile(child)) return 'foreign';
-      if (!KNOWN_PARTIAL_FILES.has(name)) extra = true;
+    let entry: fs.Stats;
+    try {
+      entry = fs.lstatSync(path.join(dataDir, name));
+    } catch {
+      foreign.push(name);
       continue;
     }
-    if (RUNTIME_DATA_DIRS.has(name)) {
-      if (!isRealDirectory(child)) return 'foreign';
-      extra = true;
+    const plain = entry.isFile() || entry.isDirectory();
+    if (!RUNTIME_DATA_NAMES.has(name) || entry.isSymbolicLink() || !plain) {
+      foreign.push(name);
       continue;
     }
-    return 'foreign';
+    if (!RUNTIME_PARTIAL_FILES.has(name) || !entry.isFile()) partialOnly = false;
   }
-  if (extra && !elastosInstallProved(dataDir)) return 'foreign';
-  return 'owned';
+  if (foreign.length) return { kind: 'foreign', names: foreign };
+  if (partialOnly) return { kind: 'owned' };
+  return proved(dataDir) ? { kind: 'owned' } : { kind: 'unproved' };
 }
 
-/** Names the path when a custom data directory holds files Reset must not delete. */
+function listNames(names: string[]): string {
+  const shown = names.slice(0, 5).join(', ');
+  return names.length > 5 ? `${shown}, and ${names.length - 5} more` : shown;
+}
+
+/** Names the path, and the entries, when a custom data directory is not one Reset may delete. */
 export function foreignRuntimeDataMessage(
   dataDir: string,
   homeDir: string,
   platform: string,
   env: NodeJS.ProcessEnv,
+  proved: (dir: string) => boolean = (dir) => signedInstallRecord(dir),
 ): string | null {
   const extra = customXdgDataDir(homeDir, platform, env);
   if (!extra || compareKey(extra, platform) !== compareKey(dataDir, platform)) return null;
-  if (customXdgContents(dataDir) !== 'foreign') return null;
-  return `will not reset ${dataDir} because it contains files that are not part of the runtime. Move those files out, then reset.`;
+  const contents = customXdgContents(dataDir, proved);
+  if (contents.kind === 'foreign') {
+    const named = contents.names.length ? `: ${listNames(contents.names)}` : '';
+    return `will not reset ${dataDir} because it contains files that are not part of the runtime${named}. Move those files out, then reset.`;
+  }
+  if (contents.kind === 'unproved') {
+    return `will not reset ${dataDir} because it has no signed ElastOS install record. ElastOS deletes only a folder it can prove it installed.`;
+  }
+  return null;
 }
 
 function customXdgDataDir(
@@ -234,19 +260,19 @@ function customXdgDataDir(
 /**
  * True only for an exact default runtime path of this account, or for an XDG
  * data directory under that home that is empty, holds only
- * `components.json`, `host-process.lock`, and `sources.json`, or holds a
- * proved ElastOS lock or components manifest and only other runtime files.
+ * `components.json`, `host-process.lock`, and `sources.json`, or holds only
+ * runtime names and an install record signed by the pinned maintainer.
  * The home defaults to `os.homedir()`. A relative path, a `..` segment,
  * another account, a data directory outside that home, and a bare
- * `<dir>/elastos` are refused. A user file is refused by name even when a
- * marker is present.
+ * `<dir>/elastos` are refused. A user file is refused by name even when the
+ * signed record is present.
  */
 export function launcherOwnedDirectories(
   file: string,
   homeDir: string = os.homedir(),
   platform: string = process.platform,
   env: NodeJS.ProcessEnv = process.env,
-  marked: (dataDir: string) => boolean = elastosDataDirMarked,
+  proved: (dataDir: string) => boolean = (dir) => signedInstallRecord(dir),
 ): boolean {
   if (!file || file.includes('\0') || hasDotSegment(file) || !isAbsolutePath(file)) return false;
   if (!homeDir || homeDir.includes('\0') || hasDotSegment(homeDir) || !isAbsolutePath(homeDir)) return false;
@@ -264,10 +290,9 @@ export function launcherOwnedDirectories(
   }
   const extra = customXdgDataDir(homeDir, platform, env);
   if (extra && compareKey(extra, platform) !== compareKey(data, platform)) {
-    if (customXdgContents(extra) === 'owned') {
+    if (customXdgContents(extra, proved).kind === 'owned') {
       owned.push(extra, runtimeHostLockPath(extra));
     }
-    void marked;
   }
   const key = compareKey(file, platform);
   return owned.some((candidate) => compareKey(candidate, platform) === key);
