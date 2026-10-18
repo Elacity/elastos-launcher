@@ -681,8 +681,8 @@ export function removeLauncherHostFiles(files: string[], deps: {
   (deps.sweepHost ?? sweepRemovalHoldings)(path.dirname(files[0]));
 }
 
-export function describeDistroBackupOnThisComputer(action: RemovalAction = 'reset'): Promise<BackupDescription> {
-  return describeDistroBackup({ run: wslHelperRun(), home: os.homedir(), action });
+export function describeDistroBackupOnThisComputer(): Promise<BackupDescription> {
+  return describeDistroBackup({ run: wslHelperRun(), home: os.homedir() });
 }
 
 export async function describeDistroBackup(input: {
@@ -693,14 +693,12 @@ export async function describeDistroBackup(input: {
   /** The same probe Reset runs first. False when python3 is missing in the distro. */
   pythonPresent?: () => Promise<boolean | null>;
   freeBytes?: (dir: string) => number | null;
-  /** Reset or Uninstall: the words of the python3 line. */
-  action?: RemovalAction;
 }): Promise<BackupDescription> {
   const present = await (input.distroPresent ?? (() => elastosDistroPresent()))();
   if (present === false) return describeMeasuredBackup(null, input.home, input.freeBytes);
   // Without python3 the measure below fails too, and the dialog would only say it could not measure.
   if ((await (input.pythonPresent ?? distroPythonPresent)()) === false) {
-    return { ...describeMeasuredBackup(null, input.home, input.freeBytes), blocked: distroPythonMissingDialog(input.action ?? 'reset') };
+    return { ...describeMeasuredBackup(null, input.home, input.freeBytes), blocked: DISTRO_PYTHON_MISSING_DIALOG };
   }
   const measured = await measureDistroBackup(input.run, input.paths ?? distroResetPaths());
   return describeMeasuredBackup(measured, input.home, input.freeBytes);

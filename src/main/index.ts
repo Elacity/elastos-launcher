@@ -177,8 +177,7 @@ ipcMain.handle('elastos:install', async (event) => {
   });
 });
 
-ipcMain.handle('elastos:uninstall', (_event, choice: unknown) => {
-  const backup = choice && typeof choice === 'object' ? (choice as { backup?: unknown }).backup : undefined;
+ipcMain.handle('elastos:uninstall', () => {
   // The second question on Windows, asked here in the main process so the
   // window alone cannot answer it. Cancel is the default button.
   const confirmRemoval = async (prompt: { title: string; message: string; detail: string; confirmLabel: string; cancelLabel: string }) => {
@@ -195,13 +194,13 @@ ipcMain.handle('elastos:uninstall', (_event, choice: unknown) => {
     const answer = mainWindow ? await dialog.showMessageBox(mainWindow, options) : await dialog.showMessageBox(options);
     return answer.response === 1;
   };
-  return launch.uninstall({ backup }, confirmRemoval);
+  return launch.uninstall(confirmRemoval);
 });
 ipcMain.handle('elastos:resetRuntime', (_event, choice: unknown) => {
   const backup = choice && typeof choice === 'object' ? (choice as { backup?: unknown }).backup : undefined;
   return launch.resetRuntime({ backup });
 });
-ipcMain.handle('elastos:describeResetBackup', (_event, action: unknown) => launch.describeResetBackup(action === 'uninstall' ? 'uninstall' : 'reset'));
+ipcMain.handle('elastos:describeResetBackup', () => launch.describeResetBackup());
 
 // Version and updates
 ipcMain.handle('elastos:getVersion', () => launch.getVersion());

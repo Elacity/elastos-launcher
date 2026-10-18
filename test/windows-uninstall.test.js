@@ -6,23 +6,25 @@ const path = require('node:path');
 const test = require('node:test');
 
 const {
-  describeDistroBackup,
   distroHelperArgs,
   distroResetPaths,
   inspectDistro,
+  removeInDistro,
+  resetRuntimeInDistro,
   spawnHelper,
   writeDistroBackup,
 } = require('../dist/main/targets/windowsReset');
 const {
-  assertExportSpace,
   decodeWslText,
   distroUsedBytes,
   elastosRowOf,
   exportDistroToBackups,
   exportNeededBytes,
+  linuxCopyMessage,
+  planDistroExport,
+  restoreCommand,
   uninstallPrompt,
   uninstallRuntimeInDistro,
-  UNINSTALL_CHOICE_MESSAGE,
   verifyExportFile,
   wslExportArgs,
   wslListArgs,
@@ -33,7 +35,8 @@ const {
 const { parseWslDistroList } = require('../dist/main/legacyPc2Removal');
 const { removeVerifiedTarget } = require('../dist/main/targets/runtimeUninstall');
 const { failureScreen } = require('../dist/main/targets/runtimeRecovery');
-const { readStoredZipEntries } = require('../dist/main/targets/runtimeBackup');
+const { plainBytes, readStoredZipEntries } = require('../dist/main/targets/runtimeBackup');
+const { RESET_CHOICE_MESSAGE } = require('../dist/main/targets/runtimeUninstall');
 const { loadActiveRuntimePin } = require('../dist/main/targets/runtimePin');
 const flow = require('../src/renderer/flow.js');
 
@@ -122,7 +125,6 @@ function deps(fx, calls, extra = {}) {
   const freeBytes = () => state.free;
   const d = {
     state,
-    backup: true,
     homeDir: fx.winHome,
     platform: 'linux',
     env: {},
@@ -133,12 +135,9 @@ function deps(fx, calls, extra = {}) {
     pythonPresent: async () => { calls.push('python'); return true; },
     inspect: () => inspectDistro(run, fx.paths, 'uninstall'),
     maintainerDid: DID,
-    checkBackupSpace: async () => { calls.push('space'); },
-    saveBackup: () => writeDistroBackup({
-      run, paths: fx.paths, home: fx.winHome, platform: 'linux', restrict: () => {}, freeBytes: () => 1e12,
-    }),
-    checkLinuxSpace: () => assertExportSpace({ home: fx.winHome, usedBytes, freeBytes }),
-    saveLinux: () => exportDistroToBackups({
+    planLinuxCopy: () => planDistroExport({ home: fx.winHome, usedBytes, freeBytes }),
+    saveLinux: (plan) => exportDistroToBackups({
+      plan,
       home: fx.winHome,
       dataDir: fx.paths.dataDir,
       platform: 'linux',
@@ -183,14 +182,13 @@ test('Windows Uninstall: second question, list, record, whole-environment copy, 
     const result = await uninstallRuntimeInDistro(deps(fx, calls));
     assert.deepEqual(unregisterCalls(calls), [['wsl', ['--unregister', 'ElastOS']]]);
     assert.equal(result.removedLinux, true);
-    assert.ok(result.backupPath && readStoredZipEntries(result.backupPath).some((entry) => entry.name === 'elastos/Users/alice/notes.txt'));
     assert.match(path.basename(result.linuxCopyPath), /^ElastOS-linux-\d{8}-\d{6}Z\.tar$/);
     assert.equal(path.dirname(result.linuxCopyPath), backups(fx));
     assert.equal(verifyExportFile(result.linuxCopyPath), 2048);
     assert.equal(result.restoreHint, `To bring it back, open PowerShell and run: wsl --import ElastOS C:\\ElastOS\\distro "${result.linuxCopyPath}"`);
     const steps = calls.map((call) => (Array.isArray(call) ? (call[0] === 'wsl' ? `wsl ${call[1][0]}` : call[0]) : call));
     assert.deepEqual(steps, [
-      'wsl-list', 'python', 'inspect', 'space', 'used', 'stop', 'measure', 'zip',
+      'wsl-list', 'python', 'inspect', 'used', 'stop',
       'confirm',
       'wsl-list', 'inspect',
       'restrict', 'used', 'wsl --terminate', 'wsl --export', 'restrict',
@@ -203,10 +201,27 @@ test('Windows Uninstall: second question, list, record, whole-environment copy, 
       ['restrict', 'ElastOS-backups', true],
       ['restrict', path.basename(result.linuxCopyPath), false],
     ]);
+    // The second question, before the copy: the exact file it then wrote, an estimated size, the several-GB warning, and the restore command.
     const prompt = calls.find((call) => Array.isArray(call) && call[0] === 'confirm')[1];
-    assert.deepEqual(prompt, uninstallPrompt(result.backupPath, backups(fx)));
-    assert.equal(prompt.detail, `First, ElastOS saves the whole Linux environment as one file in ${backups(fx)}. If it cannot save that file, nothing is removed. Your copy of your ElastOS data is in ${result.backupPath}. You cannot undo the removal. Only the saved file can bring the Linux environment back.`);
+    const lines = prompt.detail.split('\n');
+    assert.equal(lines[1], result.linuxCopyPath);
+    assert.match(lines[2], /^Estimated size: about \d+(\.\d)? (KB|MB|GB)\. This is an estimate, not the exact size\. The file can be several GB\.$/);
+    assert.equal(lines[5], `wsl --import ElastOS C:\\ElastOS\\distro "${result.linuxCopyPath}"`);
+    assert.equal(prompt.detail, [
+      'Before it removes anything, ElastOS saves the whole Linux environment in this file:',
+      result.linuxCopyPath,
+      lines[2],
+      'If ElastOS cannot save the file, it stops and removes nothing.',
+      'You cannot undo the removal. To bring the Linux environment back from the file, open PowerShell and run:',
+      restoreCommand(result.linuxCopyPath),
+    ].join('\n'));
+    assert.equal(prompt.title, 'Remove the ElastOS Linux environment?');
+    assert.equal(prompt.message, 'This removes the Linux environment named ElastOS from this computer, with everything in it: the ElastOS program and all your ElastOS data.');
     assert.equal(prompt.cancelLabel, 'Cancel');
+    assert.equal(prompt.confirmLabel, 'Remove ElastOS');
+    // After the copy: the real path and the real size.
+    assert.equal(result.linuxCopyBytes, 2048);
+    assert.equal(result.linuxCopyMessage, `ElastOS saved the whole Linux environment in ${result.linuxCopyPath}. The file is 2 KB. Keep it private: it holds your ElastOS keys and data. To bring it back, open PowerShell and run: wsl --import ElastOS C:\\ElastOS\\distro "${result.linuxCopyPath}"`);
     assert.equal(fs.existsSync(path.join(fx.winHome, '.elastos-launcher', 'install-stage.json')), false);
   } finally {
     fx.cleanup();
@@ -217,9 +232,8 @@ test('files outside the data folder no longer stop Uninstall: the whole-environm
   const fx = cleanDistro();
   try {
     const calls = [];
-    const result = await uninstallRuntimeInDistro({ ...deps(fx, calls), backup: false });
+    const result = await uninstallRuntimeInDistro(deps(fx, calls));
     assert.equal(result.removedLinux, true);
-    assert.equal(result.backupPath, null);
     assert.equal(exportCalls(calls).length, 1);
     assert.ok(calls.indexOf(exportCalls(calls)[0]) < calls.indexOf(unregisterCalls(calls)[0]));
   } finally {
@@ -273,7 +287,7 @@ test('at the start: two ElastOS lines or another case refuse; a look-alike or no
     try {
       const calls = [];
       const result = await uninstallRuntimeInDistro(deps(fx, calls, { list }));
-      assert.deepEqual(result, { backupPath: null, linuxCopyPath: null, restoreHint: null, removedLinux: false });
+      assert.deepEqual(result, { linuxCopyPath: null, linuxCopyBytes: null, linuxCopyMessage: null, restoreHint: null, removedLinux: false });
       assert.deepEqual(calls.filter((call) => Array.isArray(call) && call[0] === 'wsl'), []);
       assert.equal(calls.includes('inspect'), false);
     } finally {
@@ -363,7 +377,7 @@ test('the whole-environment copy failing stops Uninstall: no unregister, and no 
       await assert.rejects(() => uninstallRuntimeInDistro(d), (err) => { message = err.message; return true; }, name);
       assert.match(message, /^ElastOS was not uninstalled\. It could not save a copy of its whole Linux environment \(/, `${name}: ${message}`);
       assert.match(message, reason, `${name}: ${message}`);
-      assert.match(message, /Nothing was removed\. Your copy of your ElastOS data is in .*\.zip\. Click Uninstall to try again\.$/, `${name}: ${message}`);
+      assert.match(message, /\. Nothing was removed\. Click Uninstall to try again\.$/, `${name}: ${message}`);
       assertNothingRemoved(fx, calls, name);
       assert.deepEqual(tars(fx), [], name);
     } finally {
@@ -394,7 +408,7 @@ test('without a yes to the second question, nothing is saved, unregistered, or r
       const calls = [];
       const d = deps(fx, calls, { deps: { confirmRemoval: async () => answer } });
       await assert.rejects(() => uninstallRuntimeInDistro(d), (err) => {
-        assert.match(err.message, /^ElastOS was not uninstalled\. Nothing was removed\. Your copy of your ElastOS data is in .*\.zip\. Click Start to use ElastOS again\.$/);
+        assert.equal(err.message, 'ElastOS was not uninstalled. Nothing was removed. Click Start to use ElastOS again.');
         return true;
       });
       assert.deepEqual(exportCalls(calls), [], String(answer));
@@ -405,17 +419,73 @@ test('without a yes to the second question, nothing is saved, unregistered, or r
   }
 });
 
-test('no answer to the copy offer removes nothing and stops nothing', POSIX, async () => {
+test('Uninstall never offers or writes a data zip, even with the old answer and copy functions handed in; Reset still offers its zip', POSIX, async () => {
   const fx = cleanDistro();
   try {
-    for (const backup of [undefined, 'true', 1, null]) {
-      const calls = [];
-      await assert.rejects(() => uninstallRuntimeInDistro({ ...deps(fx, calls), backup }), (err) => err.message === UNINSTALL_CHOICE_MESSAGE);
-      assert.deepEqual(calls, []);
+    const calls = [];
+    const trap = (name) => async () => { calls.push(`trap:${name}`); throw new Error(`${name} must not run`); };
+    // The old Uninstall shape: an answer and the copy functions. None of them may be used.
+    const d = { ...deps(fx, calls), backup: true, checkBackupSpace: trap('checkBackupSpace'), saveBackup: trap('saveBackup') };
+    const result = await uninstallRuntimeInDistro(d);
+    assert.equal(result.removedLinux, true);
+    assert.equal('backupPath' in result, false);
+    assert.deepEqual(calls.filter((call) => typeof call === 'string' && (call.startsWith('trap:') || call === 'measure' || call === 'zip')), []);
+    assert.deepEqual(fs.readdirSync(backups(fx)).filter((name) => !name.endsWith('.tar')), []);
+    // Any answer, or none, is the same Uninstall: the answer is not read.
+    for (const backup of [undefined, false, 'true', null]) {
+      const again = cleanDistro();
+      try {
+        const seen = [];
+        const r = await uninstallRuntimeInDistro({ ...deps(again, seen), backup });
+        assert.equal(r.removedLinux, true, String(backup));
+        assert.equal(seen.includes('zip'), false, String(backup));
+      } finally {
+        again.cleanup();
+      }
     }
-    assertNothingRemoved(fx, []);
   } finally {
     fx.cleanup();
+  }
+  // The window: only Reset loads the copy offer and sends an answer; Uninstall sends nothing.
+  const app = fs.readFileSync(path.join(__dirname, '../src/renderer/app.js'), 'utf8');
+  const uninstallClick = app.slice(app.indexOf("uninstallBtn.addEventListener('click'"), app.indexOf("removePc2Btn.addEventListener('click'"));
+  assert.equal(/loadBackupOffer|resetBackup/.test(uninstallClick), false);
+  assert.match(app, /await loadBackupOffer\('reset'\);/);
+  assert.equal((app.match(/loadBackupOffer\(/g) || []).length, 2);
+  assert.match(app, /function syncResetButton\(\) \{\n  if \(confirmMode !== 'reset'\) return;/);
+  assert.match(app, /const result = await window\.elastos\.uninstall\(\);/);
+  const preload = fs.readFileSync(path.join(__dirname, '../src/preload/index.ts'), 'utf8');
+  assert.match(preload, /uninstall: \(\) => ipcRenderer\.invoke\('elastos:uninstall'\),/);
+  const main = fs.readFileSync(path.join(__dirname, '../src/main/index.ts'), 'utf8');
+  assert.match(main, /ipcMain\.handle\('elastos:uninstall', \(\) => \{/);
+  const src = fs.readFileSync(path.join(__dirname, '../src/main/targets/windowsUninstall.ts'), 'utf8');
+  assert.equal(/saveBackup|checkBackupSpace|writeDistroBackup|runBackupWorker|deps\.backup/.test(src), false);
+
+  // Reset on Windows still needs the answer, and with yes it writes the data zip.
+  const rx = cleanDistro();
+  try {
+    const run = localRun([]);
+    const resetDeps = {
+      backup: true,
+      homeDir: rx.winHome,
+      platform: 'linux',
+      env: {},
+      paths: rx.paths,
+      stop: async () => {},
+      distroPresent: async () => true,
+      pythonPresent: async () => true,
+      inspect: () => inspectDistro(run, rx.paths),
+      maintainerDid: DID,
+      saveBackup: () => writeDistroBackup({ run, paths: rx.paths, home: rx.winHome, platform: 'linux', restrict: () => {}, freeBytes: () => 1e12 }),
+      removeInDistro: (plan) => removeInDistro(run, rx.paths, plan),
+      removeHost: (target) => removeVerifiedTarget(target),
+    };
+    await assert.rejects(() => resetRuntimeInDistro({ ...resetDeps, backup: undefined }), (err) => err.message === RESET_CHOICE_MESSAGE);
+    const reset = await resetRuntimeInDistro(resetDeps);
+    assert.match(path.basename(reset.backupPath), /^ElastOS-data-.*\.zip$/);
+    assert.ok(readStoredZipEntries(reset.backupPath).some((entry) => entry.name === 'elastos/Users/alice/notes.txt'));
+  } finally {
+    rx.cleanup();
   }
 });
 
@@ -488,7 +558,6 @@ test('the record or ownership changing after the second question stops Uninstall
       let message = '';
       await assert.rejects(() => uninstallRuntimeInDistro(d), (err) => { message = err.message; return true; }, name);
       assert.match(message, reason, `${name}: ${message}`);
-      assert.match(message, /Your copy of your ElastOS data is in .*\.zip\.$/, `${name}: ${message}`);
       assert.deepEqual(exportCalls(calls), [], name);
       assert.deepEqual(unregisterCalls(calls), [], name);
       assert.equal(calls.filter((call) => call === 'inspect').length, 2, name);
@@ -505,24 +574,6 @@ test('a user file in the data folder is refused with the Reset rule and Uninstal
     const calls = [];
     await assert.rejects(() => uninstallRuntimeInDistro(deps(fx, calls)), /^Error: ElastOS will not uninstall .* because it contains files that are not part of the runtime: holiday-photos\. Move those files out, then uninstall\./);
     assert.deepEqual(unregisterCalls(calls), []);
-  } finally {
-    fx.cleanup();
-  }
-});
-
-test('a copy of the data the person chose that fails stops Uninstall before anything is removed', POSIX, async () => {
-  const fx = cleanDistro();
-  try {
-    const calls = [];
-    const d = deps(fx, calls, { deps: { saveBackup: async () => { throw new Error('The disk is full'); } } });
-    await assert.rejects(() => uninstallRuntimeInDistro(d), /^Error: ElastOS was not uninstalled\. The copy of your data could not be saved \(The disk is full\)\. Nothing was removed\.$/);
-    assert.equal(calls.some((call) => Array.isArray(call) && call[0] === 'confirm'), false);
-    assert.deepEqual(exportCalls(calls), []);
-    assertNothingRemoved(fx, calls);
-    const tight = [];
-    await assert.rejects(() => uninstallRuntimeInDistro(deps(fx, tight, { deps: { checkBackupSpace: async () => { throw new Error('There is not enough free space for a copy of your data'); } } })), /Free some space, or uninstall without a copy\./);
-    assert.equal(tight.includes('stop'), false);
-    assert.deepEqual(unregisterCalls(tight), []);
   } finally {
     fx.cleanup();
   }
@@ -590,12 +641,25 @@ test('the saved file never replaces a file, and a real GNU tar file passes the c
     fs.writeFileSync(path.join(backups(fx), 'ElastOS-linux-20261018-120000Z.tar'), 'older copy');
     const calls = [];
     const d = deps(fx, calls);
-    const saved = await exportDistroToBackups({
-      home: fx.winHome, dataDir: fx.paths.dataDir, platform: 'linux', restrict: () => {}, usedBytes: async () => 1, freeBytes: () => 1e12, runWsl: d.runWsl, now,
+    const input = { home: fx.winHome, usedBytes: async () => 2.5 * 1024 ** 3, freeBytes: () => 1e12, now };
+    const plan = await planDistroExport(input);
+    assert.deepEqual(plan, { file: path.join(backups(fx), 'ElastOS-linux-20261018-120000Z-2.tar'), estimatedBytes: 2.5 * 1024 ** 3 });
+    assert.match(uninstallPrompt(plan).detail, /\nEstimated size: about 2\.5 GB\. This is an estimate, not the exact size\. The file can be several GB\.\n/);
+    const { file: saved, bytes } = await exportDistroToBackups({
+      ...input, plan, dataDir: fx.paths.dataDir, platform: 'linux', restrict: () => {}, runWsl: d.runWsl,
     });
-    assert.equal(path.basename(saved), 'ElastOS-linux-20261018-120000Z-2.tar');
+    assert.equal(saved, plan.file);
+    assert.equal(bytes, 2048);
+    assert.equal(linuxCopyMessage(saved, bytes).includes(`in ${saved}. The file is ${plainBytes(2048)}.`), true);
     assert.equal(fs.readFileSync(path.join(backups(fx), 'ElastOS-linux-20261018-120000Z.tar'), 'utf8'), 'older copy');
     assert.deepEqual(calls.map((call) => call[1]), [wslTerminateArgs(), wslExportArgs(saved)]);
+    // A file that appears at the planned name after the question is never replaced: nothing runs.
+    const late = await planDistroExport({ ...input, now: new Date(Date.UTC(2026, 9, 18, 13, 0, 0)) });
+    fs.writeFileSync(late.file, 'made after the question');
+    const before = calls.length;
+    await assert.rejects(() => exportDistroToBackups({ ...input, plan: late, dataDir: fx.paths.dataDir, platform: 'linux', restrict: () => {}, runWsl: d.runWsl }), /The file for the copy changed/);
+    assert.equal(calls.length, before);
+    assert.equal(fs.readFileSync(late.file, 'utf8'), 'made after the question');
     // The same check on what tar itself writes.
     const real = path.join(fx.top, 'real.tar');
     execFileSync('tar', ['-cf', real, '-C', fx.root, '.local/share/elastos/components.json']);
@@ -620,7 +684,7 @@ test('the helper measures the bytes in use in the Linux environment', POSIX, asy
   }
 });
 
-test('python3 missing in the distro: Uninstall and its dialog say so in Uninstall words', POSIX, async () => {
+test('python3 missing in the distro: Uninstall says so in Uninstall words', POSIX, async () => {
   const fx = cleanDistro();
   try {
     const calls = [];
@@ -629,24 +693,19 @@ test('python3 missing in the distro: Uninstall and its dialog say so in Uninstal
       (err) => err.message === 'ElastOS was not uninstalled, because the program python3 is missing from its Linux environment, and Uninstall needs it. Nothing was deleted. Click Install to add python3 again, then click Uninstall.',
     );
     assert.deepEqual(calls, ['wsl-list', 'python']);
-    const seen = await describeDistroBackup({
-      run: localRun([]), home: fx.winHome, paths: fx.paths, distroPresent: async () => true, pythonPresent: async () => false, action: 'uninstall',
-    });
-    assert.equal(seen.blocked, 'ElastOS cannot uninstall yet, because the program python3 is missing from its Linux environment, and Uninstall needs it. Click Install to add python3 again, then click Uninstall.');
   } finally {
     fx.cleanup();
   }
 });
 
-test('the window asks for the copy on Windows Uninstall, the main process asks the second question, and wsl.exe runs with no shell', () => {
+test('the Windows Uninstall window says what happens, the main process asks the second question, and wsl.exe runs with no shell', () => {
   const copy = flow.confirmCopy('runtime', [], true);
   assert.match(copy.body, /the Linux environment named ElastOS, with the ElastOS program and all your ElastOS data in it/);
-  assert.match(copy.body, /Before it removes anything, it saves the whole Linux environment as one file in your ElastOS-backups folder\./);
+  assert.match(copy.body, /Next, ElastOS asks you one more time, and shows the file where it will save the whole Linux environment before it removes anything\./);
+  assert.equal(/copy of your data/.test(copy.body), false);
   assert.equal(flow.confirmCopy('runtime', [], false).body, 'This removes the ElastOS program and its data from this computer.');
   const app = fs.readFileSync(path.join(__dirname, '../src/renderer/app.js'), 'utf8');
-  assert.match(app, /if \(uninstallOffersCopy\) await loadBackupOffer\('uninstall'\);/);
-  assert.match(app, /window\.elastos\.uninstall\(resetChoice \|\| undefined\)/);
-  assert.match(app, /The whole ElastOS Linux environment is saved in \$\{result\.linuxCopyPath\}\. Keep it private\. \$\{result\.restoreHint\}\./);
+  assert.match(app, /if \(result && result\.linuxCopyMessage\) addLog\(result\.linuxCopyMessage\);/);
   const main = fs.readFileSync(path.join(__dirname, '../src/main/index.ts'), 'utf8');
   assert.match(main, /defaultId: 0,\s*cancelId: 0,/);
   assert.match(main, /return answer\.response === 1;/);

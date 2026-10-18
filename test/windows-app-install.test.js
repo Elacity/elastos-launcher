@@ -181,6 +181,9 @@ test('the distro gateway identity uses the lock pid socket and a positive wsl pi
   assert.match(script, /After Uninstall, the ElastOS Linux environment is gone/);
   // The saved copy must exist, and wsl --import of it must bring back a file outside the data folder.
   assert.match(script, /verifyExportFile\(saved\)/);
+  assert.match(script, /uninstallRuntimeInDistroOnThisComputer\(\(\) => target\.stopForRemoval\(\), async \(prompt\)/);
+  assert.match(script, /if \(!asked\.split\('\\n'\)\.includes\(saved\)\)/);
+  assert.match(script, /Uninstall wrote a data zip/);
   assert.match(script, /if \(elastosRowOf\(after\) !== 'absent'\)/);
   assert.match(script, /\['--import', check, where, saved\]/);
   assert.match(script, /uninstall\.restoreHint !== `To bring it back, open PowerShell and run: wsl --import \$\{check\} \$\{where\} "\$\{saved\}"`/);

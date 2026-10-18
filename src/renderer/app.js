@@ -52,8 +52,8 @@ let legacyItems = [];
 let legacyConfirmPaths = [];
 let pc2Busy = false;
 let resetOffer = null;
-/** Windows: Uninstall offers the same copy as Reset (launch info). */
-let uninstallOffersCopy = false;
+/** Windows: Uninstall removes the ElastOS Linux environment after it saves it (launch info). */
+let uninstallRemovesLinux = false;
 let targetId = 'runtime';
 // The main process sends the Home address (src/main/targets/gatewayAddress.ts).
 let openUrl = '';
@@ -103,14 +103,9 @@ function hideResetBackup() {
   confirmDelete.disabled = false;
 }
 
-/** Reset stays off until the person answers the backup offer. */
-/** The Reset dialog, and the Uninstall dialog when it offers a copy. */
-function offersBackup() {
-  return confirmMode === 'reset' || (confirmMode === 'uninstall' && uninstallOffersCopy);
-}
-
+/** Reset stays off until the person answers the backup offer. Only Reset offers it. */
 function syncResetButton() {
-  if (!offersBackup()) return;
+  if (confirmMode !== 'reset') return;
   if (!resetOffer) {
     confirmDelete.disabled = true;
     return;
@@ -349,7 +344,7 @@ async function loadBackupOffer(mode) {
   confirmDelete.disabled = true;
   let description = null;
   try {
-    description = await window.elastos.describeResetBackup(mode);
+    description = await window.elastos.describeResetBackup();
   } catch {
     description = null;
   }
@@ -364,15 +359,14 @@ uninstallBtn.addEventListener('click', async () => {
   confirmMode = 'uninstall';
   hidePc2Backup();
   hideResetBackup();
-  confirmDelete.textContent = uninstallOffersCopy ? 'Uninstall' : 'Delete';
-  const copy = flow.confirmCopy(targetId, [], uninstallOffersCopy);
+  confirmDelete.textContent = uninstallRemovesLinux ? 'Uninstall' : 'Delete';
+  const copy = flow.confirmCopy(targetId, [], uninstallRemovesLinux);
   confirmTitle.textContent = copy.title;
   confirmBody.textContent = copy.body;
-  confirmPath.textContent = uninstallOffersCopy
+  confirmPath.textContent = uninstallRemovesLinux
     ? 'The Linux environment named ElastOS, with everything in it'
     : 'The ElastOS program and its data folder';
   confirmModal.classList.remove('hidden');
-  if (uninstallOffersCopy) await loadBackupOffer('uninstall');
 });
 
 removePc2Btn.addEventListener('click', () => {
@@ -398,8 +392,8 @@ confirmCancel.addEventListener('click', () => {
 
 confirmDelete.addEventListener('click', async () => {
   let resetChoice = null;
-  if (offersBackup()) {
-    // No answer to the backup offer means no Reset and no Windows Uninstall.
+  if (confirmMode === 'reset') {
+    // No answer to the backup offer means no Reset.
     if (!resetOffer || resetOffer.blocked) return;
     if (resetOffer.needsChoice && !resetBackupYes.checked && !resetBackupNo.checked) return;
     resetChoice = { backup: Boolean(resetOffer.canSave && resetBackupYes.checked) };
@@ -429,7 +423,7 @@ confirmDelete.addEventListener('click', async () => {
   const saving = Boolean(resetChoice && resetChoice.backup);
   statusText.textContent = resetting
     ? (saving ? 'Saving a copy of your data, then resetting...' : 'Resetting...')
-    : (saving ? 'Saving a copy of your data...' : 'Removing...');
+    : (uninstallRemovesLinux ? 'Saving the whole Linux environment, then removing it...' : 'Removing...');
   hideResetBackup();
   try {
     if (resetting) {
@@ -437,11 +431,8 @@ confirmDelete.addEventListener('click', async () => {
       if (result && result.backupPath) addLog(`A copy of your ElastOS data is in ${result.backupPath}. Keep it private.`);
       addLog('ElastOS was reset. Click Install to set it up again.');
     } else {
-      const result = await window.elastos.uninstall(resetChoice || undefined);
-      if (result && result.backupPath) addLog(`A copy of your ElastOS data is in ${result.backupPath}. Keep it private.`);
-      if (result && result.linuxCopyPath) {
-        addLog(`The whole ElastOS Linux environment is saved in ${result.linuxCopyPath}. Keep it private. ${result.restoreHint}.`);
-      }
+      const result = await window.elastos.uninstall();
+      if (result && result.linuxCopyMessage) addLog(result.linuxCopyMessage);
       addLog(result && result.removedLinux ? 'ElastOS was removed, with its Linux environment.' : 'ElastOS was removed.');
     }
     stepsEl.classList.add('hidden');
@@ -529,7 +520,7 @@ async function refreshLaunch() {
   const info = await window.elastos.getLaunchInfo();
   targetId = 'runtime';
   openUrl = info.openUrl;
-  uninstallOffersCopy = Boolean(info.uninstallOffersCopy);
+  uninstallRemovesLinux = Boolean(info.uninstallRemovesLinux);
   if (rollbackBtn) rollbackBtn.classList.toggle('hidden', !info.canRollback);
   loginCheckbox.checked = Boolean(info.openAtLogin);
   const browserText = flow.browserNoteText(info);

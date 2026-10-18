@@ -35,15 +35,11 @@ export interface LaunchController {
   restart(): Promise<void>;
   install(onProgress: (message: string) => void): Promise<void>;
   update(onProgress: (message: string) => void): Promise<void>;
-  /**
-   * On Windows `choice.backup` must be true or false, and `confirmRemoval`
-   * asks the second question before the Linux environment is removed.
-   */
-  uninstall(choice?: { backup?: unknown }, confirmRemoval?: (prompt: UninstallPrompt) => Promise<unknown>): Promise<UninstallResult | void>;
+  /** On Windows `confirmRemoval` asks the second question before the Linux environment is saved and removed. */
+  uninstall(confirmRemoval?: (prompt: UninstallPrompt) => Promise<unknown>): Promise<UninstallResult | void>;
   /** `choice.backup` must be true or false. Anything else resets nothing. */
   resetRuntime(choice?: { backup?: unknown }): Promise<ResetResult>;
-  /** `action` picks the words of a refusal shown in the dialog (Reset or Uninstall). */
-  describeResetBackup(action?: 'reset' | 'uninstall'): Promise<BackupDescription>;
+  describeResetBackup(): Promise<BackupDescription>;
   rollback(onProgress?: (message: string) => void): Promise<void>;
   getVersion(): string;
   checkForUpdate(): Promise<UpdateCheck>;
@@ -128,8 +124,8 @@ export interface LaunchInfo {
   platformNote: string | null;
   /** Shown in the info panel. Windows only: its Browser is not available yet. */
   browserNote: string | null;
-  /** Windows: Uninstall removes the Linux environment, so it offers a copy of the data first. */
-  uninstallOffersCopy: boolean;
+  /** Windows: Uninstall saves the whole Linux environment as one file, then removes it. */
+  uninstallRemovesLinux: boolean;
   preflight: PreflightReport;
   openAtLogin: boolean;
   canRollback: boolean;
@@ -252,15 +248,15 @@ export function createLaunchController(options: LaunchControllerOptions = {}): L
     install: (onProgress) => runRuntime(() => active.install(onProgress)),
     update: (onProgress) => runRuntime(() => active.update(onProgress)),
     // On Windows, Uninstall removes the ElastOS Linux environment, after the Reset checks and a second question.
-    uninstall: (choice, confirmRemoval) => runRuntime<UninstallResult | void>(() => (process.platform === 'win32'
-      ? uninstallRuntimeInDistroOnThisComputer(() => active.stopForRemoval(), choice ?? {}, confirmRemoval ?? (async () => false))
+    uninstall: (confirmRemoval) => runRuntime<UninstallResult | void>(() => (process.platform === 'win32'
+      ? uninstallRuntimeInDistroOnThisComputer(() => active.stopForRemoval(), confirmRemoval ?? (async () => false))
       : active.uninstall())),
     // On Windows the ElastOS data is inside the ElastOS Linux environment, so Reset works there.
     resetRuntime: (choice) => runRuntime(() => (process.platform === 'win32'
       ? resetRuntimeInDistroOnThisComputer(() => active.stopForRemoval(), choice ?? {})
       : resetRuntimeOnThisComputer(() => active.stopForRemoval(), choice ?? {}))),
-    describeResetBackup: (action) => (process.platform === 'win32'
-      ? describeDistroBackupOnThisComputer(action === 'uninstall' ? 'uninstall' : 'reset')
+    describeResetBackup: () => (process.platform === 'win32'
+      ? describeDistroBackupOnThisComputer()
       : describeRuntimeBackupOnThisComputer()),
     rollback: (onProgress) => runRuntime(() => rollbackRuntimeUpdate(onProgress)),
     getVersion: () => runRuntimeSync(() => active.getVersion()),
@@ -289,7 +285,7 @@ export function createLaunchController(options: LaunchControllerOptions = {}): L
         status,
         platformNote: platform?.message ?? null,
         browserNote: browserNote(process.platform),
-        uninstallOffersCopy: process.platform === 'win32',
+        uninstallRemovesLinux: process.platform === 'win32',
         preflight,
         openAtLogin: readOpenAtLogin(),
         canRollback: Boolean(runtimeHeadStore().get()),

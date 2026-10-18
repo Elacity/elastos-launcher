@@ -108,7 +108,7 @@ export function createRuntimeTarget(): LaunchTarget {
     install: (onProgress) => runtimeInstall.installRuntimeOnThisComputer(onProgress),
     update: (onProgress) => applyRuntimeUpdate(runRuntimeCommand, runtimeHeadStore(), headVerify(), onProgress),
     // On Windows the launch controller runs uninstallRuntimeInDistro (windowsUninstall.ts) with the two answers.
-    uninstall: () => (process.platform === 'win32' ? Promise.reject(new Error('Uninstall on Windows needs your answers in the Uninstall window. Nothing was removed.')) : runtimeUninstall(() => stopGateway(true))),
+    uninstall: () => (process.platform === 'win32' ? Promise.reject(new Error('Uninstall on Windows needs your answer in the Uninstall window. Nothing was removed.')) : runtimeUninstall(() => stopGateway(true))),
     getVersion: () => (process.platform === 'win32' ? readDistroVersion() : readRuntimeVersion()),
     checkForUpdate: () => runtimeCheckForUpdate(),
     openInBrowser: () => openRuntimeHome(),

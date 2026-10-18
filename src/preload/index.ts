@@ -8,13 +8,11 @@ contextBridge.exposeInMainWorld('elastos', {
   restart: () => ipcRenderer.invoke('elastos:restart'),
   openBrowser: () => ipcRenderer.invoke('elastos:openBrowser'),
   install: () => ipcRenderer.invoke('elastos:install'),
-  uninstall: (choice?: { backup?: unknown }) => ipcRenderer.invoke('elastos:uninstall', {
-    backup: choice?.backup,
-  }),
+  uninstall: () => ipcRenderer.invoke('elastos:uninstall'),
   resetRuntime: (choice: { backup?: unknown }) => ipcRenderer.invoke('elastos:resetRuntime', {
     backup: choice && (choice.backup === true || choice.backup === false) ? choice.backup : undefined,
   }),
-  describeResetBackup: (action?: 'reset' | 'uninstall') => ipcRenderer.invoke('elastos:describeResetBackup', action),
+  describeResetBackup: () => ipcRenderer.invoke('elastos:describeResetBackup'),
 
   getStatus: () => ipcRenderer.invoke('elastos:getStatus'),
   getLogs: (lines: number) => ipcRenderer.invoke('elastos:getLogs', lines),
@@ -73,9 +71,9 @@ declare global {
       restart: () => Promise<void>;
       openBrowser: () => void;
       install: () => Promise<void>;
-      uninstall: (choice?: { backup: boolean }) => Promise<{ backupPath: string | null; linuxCopyPath: string | null; restoreHint: string | null; removedLinux: boolean } | void>;
+      uninstall: () => Promise<{ linuxCopyPath: string | null; linuxCopyMessage: string | null; restoreHint: string | null; removedLinux: boolean } | void>;
       resetRuntime: (choice: { backup: boolean }) => Promise<{ backupPath: string | null }>;
-      describeResetBackup: (action?: 'reset' | 'uninstall') => Promise<{
+      describeResetBackup: () => Promise<{
         present: boolean;
         bytes: number;
         neededBytes: number;
@@ -97,7 +95,7 @@ declare global {
         status: RuntimeStatus;
         platformNote: string | null;
         browserNote: string | null;
-        uninstallOffersCopy: boolean;
+        uninstallRemovesLinux: boolean;
         preflight: { ok: boolean; checks: Array<{ id: string; level: string; message: string }> };
         openAtLogin: boolean;
         canRollback: boolean;

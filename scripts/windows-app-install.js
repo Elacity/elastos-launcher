@@ -4,8 +4,8 @@
  * start the gateway without a terminal, and require /healthz from Windows.
  * Then Reset with a copy, require the distro to hold no program or data,
  * and require Install to install again. Then Uninstall, answering yes to
- * the second question: require a saved copy of the whole Linux environment
- * in ElastOS-backups, the ElastOS distro to be gone, and the restore hint
+ * the second question: require that it named the file, a saved copy of the
+ * whole Linux environment in that file in ElastOS-backups, no data zip, the ElastOS distro to be gone, and the restore hint
  * (`wsl --import`) to bring back a file outside the data folder, the
  * install record, and the program. Then remove it again.
  */
@@ -93,8 +93,13 @@ async function main() {
   // Linux environment first, so this file must be in the saved copy.
   const marker = runWslSync(['bash', '-c', 'mkdir -p /srv && printf kept > /srv/elastos-ci-marker.txt && cat /srv/elastos-ci-marker.txt']);
   if (marker.code !== 0 || marker.stdout !== 'kept') throw new Error('Could not write /srv/elastos-ci-marker.txt before Uninstall');
-  const uninstall = await uninstallRuntimeInDistroOnThisComputer(() => target.stopForRemoval(), { backup: false }, async (prompt) => {
-    console.log(`Second question: ${prompt.title} ${prompt.message} ${prompt.detail} -> ${prompt.confirmLabel}`);
+  // Uninstall offers no data zip (decision, 18 Oct): the zips in the folder must be the same after it.
+  const zips = () => fs.readdirSync(backupFolder(os.homedir())).filter((name) => name.endsWith('.zip')).sort();
+  const zipsBefore = zips();
+  let asked = '';
+  const uninstall = await uninstallRuntimeInDistroOnThisComputer(() => target.stopForRemoval(), async (prompt) => {
+    asked = prompt.detail;
+    console.log(`Second question: ${prompt.title}\n${prompt.message}\n${prompt.detail}\n-> ${prompt.confirmLabel}`);
     return true;
   });
   if (!uninstall.removedLinux) throw new Error('Uninstall did not remove the ElastOS Linux environment');
@@ -102,7 +107,13 @@ async function main() {
   if (!saved || path.dirname(saved) !== backupFolder(os.homedir())) {
     throw new Error(`Uninstall did not save the whole Linux environment in ${backupFolder(os.homedir())} (${saved})`);
   }
-  console.log(`Uninstall saved the whole Linux environment in ${saved} (${verifyExportFile(saved)} bytes)`);
+  if (!asked.split('\n').includes(saved)) throw new Error('The second question did not show the file that Uninstall wrote');
+  const bytes = verifyExportFile(saved);
+  if (bytes !== uninstall.linuxCopyBytes) throw new Error(`The saved size ${uninstall.linuxCopyBytes} is not the file size ${bytes}`);
+  console.log(`Uninstall saved the whole Linux environment in ${saved} (${bytes} bytes)`);
+  console.log(`Message: ${uninstall.linuxCopyMessage}`);
+  if (JSON.stringify(zips()) !== JSON.stringify(zipsBefore)) throw new Error(`Uninstall wrote a data zip: ${zips().join(', ')}`);
+  console.log(`Uninstall wrote no data zip (${zipsBefore.length} zip from Reset, unchanged)`);
   console.log(execFileSync('icacls.exe', [saved], { encoding: 'utf8' }).trim());
   console.log(`Restore hint: ${uninstall.restoreHint}`);
   const after = await listDistroNames();
