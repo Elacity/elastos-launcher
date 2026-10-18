@@ -439,6 +439,9 @@ confirmDelete.addEventListener('click', async () => {
     } else {
       const result = await window.elastos.uninstall(resetChoice || undefined);
       if (result && result.backupPath) addLog(`A copy of your ElastOS data is in ${result.backupPath}. Keep it private.`);
+      if (result && result.linuxCopyPath) {
+        addLog(`The whole ElastOS Linux environment is saved in ${result.linuxCopyPath}. Keep it private. ${result.restoreHint}.`);
+      }
       addLog(result && result.removedLinux ? 'ElastOS was removed, with its Linux environment.' : 'ElastOS was removed.');
     }
     stepsEl.classList.add('hidden');

@@ -53,7 +53,7 @@ function confirmCopy(_targetId, paths, offersCopy) {
     // Windows: Uninstall removes the whole ElastOS Linux environment (windowsUninstall.ts).
     return {
       title: 'Uninstall ElastOS?',
-      body: 'This removes ElastOS from this computer: the Linux environment named ElastOS, with the ElastOS program and all your ElastOS data in it. First, choose if you want a copy of your data. Then ElastOS asks you one more time before it removes anything.',
+      body: 'This removes ElastOS from this computer: the Linux environment named ElastOS, with the ElastOS program and all your ElastOS data in it. First, choose if you want a copy of your data. Then ElastOS asks you one more time. Before it removes anything, it saves the whole Linux environment as one file in your ElastOS-backups folder.',
       paths,
     };
   }

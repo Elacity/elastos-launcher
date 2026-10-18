@@ -72,7 +72,7 @@ export function distroResetPaths(home: string = DISTRO_HOME): DistroResetPaths {
   };
 }
 
-export type DistroHelperOp = 'inspect' | 'measure' | 'zip' | 'remove' | 'list';
+export type DistroHelperOp = 'inspect' | 'measure' | 'zip' | 'remove' | 'used';
 
 export interface DistroHelperResult {
   code: number;

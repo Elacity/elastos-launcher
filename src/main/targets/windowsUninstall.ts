@@ -1,12 +1,23 @@
-import { spawn } from 'child_process';
+import { execFile } from 'child_process';
+import * as fs from 'fs';
 import * as os from 'os';
-import { parseWslDistroList } from '../legacyPc2Removal';
-import { BackupSpaceError, describeMeasuredBackup, runBackupWorker } from './runtimeBackup';
+import * as path from 'path';
+import { backupStamp } from '../legacyPc2Removal';
+import {
+  backupFolder,
+  BackupSpaceError,
+  describeMeasuredBackup,
+  freeBytesAt,
+  MAX_BACKUP_ATTEMPTS,
+  plainBytes,
+  prepareBackupFolder,
+  runBackupWorker,
+  TOO_MANY_BACKUPS,
+} from './runtimeBackup';
 import { isForeignGatewayError } from './runtimeGateway';
-import { listNames, pinnedMaintainerDid, RuntimeDataEntry } from './runtimePaths';
+import { pinnedMaintainerDid } from './runtimePaths';
 import { RemovalStat, removeVerifiedTarget } from './runtimeUninstall';
-import { RootfsFile, ROOTFS_MANIFEST } from './rootfsManifest';
-import { listDistros, lookupCommand } from './windowsHost';
+import { lookupCommand } from './windowsHost';
 import { DISTRO_NAME, wslSpawnEnv } from './windowsRuntime';
 import {
   distroPythonMissingMessage,
@@ -16,41 +27,56 @@ import {
   DistroHelperRun,
   DistroInspection,
   DistroResetPaths,
-  explorerPath,
   inspectDistro,
   launcherHostFiles,
   measureDistroBackup,
   removeLauncherHostFiles,
+  RestrictToOwner,
+  windowsRestrictToOwner,
   wslHelperRun,
 } from './windowsReset';
 
 /**
  * Uninstall on Windows. ElastOS lives in its own WSL2 Linux environment
  * named ElastOS, which Install imported from the pinned rootfs. Uninstall
- * removes that whole environment with `wsl.exe --unregister ElastOS`, so it
- * reuses every Reset check first (windowsReset.ts) and adds two:
+ * removes that whole environment with `wsl.exe --unregister ElastOS`.
  *
- * - The environment must be proven to be the one ElastOS made: the name is
- *   exactly ElastOS, and its data folder passes the Reset ownership rule
- *   with a signed install record (the marker). A partial or missing data
- *   folder is not enough, because unregister removes everything.
- * - Nothing a person keeps may be outside the data folder. /root holds
- *   only the names the rootfs, Install, the runtime, and a shell write, and
- *   the rootfs files in it are unchanged. /home holds only the home that
- *   the rootfs's cloud-init makes on first boot, with the /etc/skel files
- *   unchanged. Each .ssh folder is empty or holds only an empty
- *   authorized_keys. The bytes come from the pinned rootfs
- *   (rootfsManifest.ts). The copy that Uninstall offers holds only the data
- *   folder, so a file anywhere else would be lost with no copy. It is
- *   refused by name, whatever the person chose for the copy (fail closed).
+ * Before anything is stopped, it reuses the Reset checks (windowsReset.ts):
+ * python3, the data-folder ownership rule, no other drive or mount, and the
+ * signed install record. It then offers the same copy of the data folder
+ * as Reset, and asks a second, separate question.
  *
- * Then, after Stop and the copy, a second, separate confirmation in plain
- * words. Only a yes to that runs unregister, once, with a fixed argv.
+ * Only after a yes to that question, in this order:
+ * 1. List the WSL environments again: exactly one line is exactly ElastOS.
+ * 2. Check ownership and the signed record again (the same record).
+ * 3. Save the whole Linux environment with `wsl.exe --export ElastOS` into
+ *    the same owner-only ElastOS-backups folder, after a free-space check.
+ *    The file must be a complete tar file. Any failure stops here, and
+ *    nothing is removed.
+ * 4. List again, right before unregister.
+ * 5. `wsl.exe --unregister ElastOS`, once.
+ * 6. List again: ElastOS must be gone.
+ *
+ * Every wsl.exe call is execFile with a fixed argument list and no shell.
  */
 
 /** The exact arguments. No name from anywhere else is ever passed. */
 export function wslUnregisterArgs(): string[] {
   return ['--unregister', DISTRO_NAME];
+}
+
+export function wslTerminateArgs(): string[] {
+  return ['--terminate', DISTRO_NAME];
+}
+
+/** `file` is a path this code chose in the backups folder. */
+export function wslExportArgs(file: string): string[] {
+  return ['--export', DISTRO_NAME, file];
+}
+
+/** The list of names only, one per line. */
+export function wslListArgs(): string[] {
+  return ['--list', '--quiet'];
 }
 
 export const UNINSTALL_CHOICE_MESSAGE =
@@ -65,174 +91,237 @@ export interface UninstallPrompt {
   cancelLabel: string;
 }
 
-export function uninstallPrompt(backupPath: string | null): UninstallPrompt {
+export function uninstallPrompt(backupPath: string | null, folder: string): UninstallPrompt {
+  const copy = backupPath ? ` Your copy of your ElastOS data is in ${backupPath}.` : '';
   return {
     title: 'Remove the ElastOS Linux environment?',
     message: `This removes the Linux environment named ${DISTRO_NAME} from this computer, with everything in it: the ElastOS program and all your ElastOS data.`,
-    detail: backupPath
-      ? `You cannot undo this. Only your copy can bring your ElastOS data back. Your copy is in ${backupPath}.`
-      : 'You cannot undo this. You chose not to save a copy, so your ElastOS data cannot come back.',
+    detail: `First, ElastOS saves the whole Linux environment as one file in ${folder}. If it cannot save that file, nothing is removed.${copy} You cannot undo the removal. Only the saved file can bring the Linux environment back.`,
     confirmLabel: `Remove ${DISTRO_NAME}`,
     cancelLabel: 'Cancel',
   };
 }
 
-/** Folders outside the data folder that Uninstall checks, in the Linux environment. */
-export interface DistroOutsideDirs {
-  root: string;
-  local: string;
-  bin: string;
-  share: string;
-  rootSsh: string;
-  homes: string;
-  /** The home cloud-init makes for the rootfs's default user. */
-  userHome: string;
-  userSsh: string;
+/** How to bring the environment back from the saved file. The folder is where Install puts it (windowsHost.ts). */
+export function restoreHint(file: string): string {
+  return `To bring it back, open PowerShell and run: wsl --import ${DISTRO_NAME} C:\\ElastOS\\distro "${file}"`;
 }
 
-export function distroOutsideDirs(paths: DistroResetPaths, homes = '/home'): DistroOutsideDirs {
-  const userHome = `${homes}/${ROOTFS_MANIFEST.defaultUser}`;
-  return {
-    root: paths.root,
-    local: `${paths.root}/.local`,
-    bin: `${paths.root}/.local/bin`,
-    share: `${paths.root}/.local/share`,
-    rootSsh: `${paths.root}/.ssh`,
-    homes,
-    userHome,
-    userSsh: `${userHome}/.ssh`,
-  };
+/** The raw result of `wsl.exe --list --quiet`. `code` is null when wsl.exe could not run. */
+export interface WslListOutput {
+  code: number | null;
+  stdout: Buffer | string;
 }
 
 /**
- * Other names in /root that Install, the launcher, the runtime (its cache
- * in ~/.cache), and a shell write. `.cache` and `.local/state` are caches
- * and history, never files a person keeps. `.motd_shown` and
- * `.cloud-locale-test.skip` are empty marks the rootfs's login scripts
- * write (etc/profile.d/update-motd.sh, Z99-cloud-locale-test.sh).
+ * wsl.exe writes its list as UTF-16LE, with or without a byte order mark.
+ * With WSL_UTF8=1 a newer wsl.exe writes UTF-8. Decode either.
  */
-const ROOT_NAMES = new Set([
-  '.local', '.cache', '.elastos-launcher',
-  '.bash_history', '.lesshst', '.wget-hsts', '.hushlogin', '.python_history',
-  '.sudo_as_admin_successful', '.viminfo', '.selected_editor', '.motd_shown',
-  '.cloud-locale-test.skip',
-]);
-const LOCAL_NAMES = new Set(['bin', 'share', 'state']);
-/** install.sh and the install writer put only `elastos` and `.elastos.*` scratch here (install_transaction.rs:22-26). */
-const BIN_NAME = (name: string) => name === 'elastos' || name.startsWith('.elastos.');
-/** The data folder, and a folder Reset moved aside and has not finished deleting (`.elastos-removing-`). */
-const SHARE_NAME = (name: string) => name === 'elastos' || name.startsWith('.elastos-removing-');
-
-/** [name, kind, size, sha256]: size for a regular file, sha256 when it is at most 64 KiB. */
-export type ListedEntry = [string, RuntimeDataEntry['kind'], number | null, string | null];
-export type Listing = Record<string, ListedEntry[] | 'absent' | 'unknown'>;
-
-type Rule = (entry: ListedEntry) => boolean;
-
-const isFileOrDir: Rule = ([, kind]) => kind === 'file' || kind === 'dir';
-const isDir: Rule = ([, kind]) => kind === 'dir';
-/** The same bytes as the rootfs file. A changed, missing-hash, or other-kind entry fails. */
-const sameAs = (want: RootfsFile): Rule => ([, kind, size, sha256]) => kind === 'file' && size === want.size && sha256 === want.sha256;
-/**
- * cloud-init's ssh module writes ~/.ssh/authorized_keys for the default user
- * and root on first boot. With no keys given, the file is empty
- * (cloudinit/config/cc_ssh.py apply_credentials, ssh_util.py
- * setup_user_keys and update_authorized_keys in the rootfs). A key in it
- * came from someone, so it is refused.
- */
-const sshRules: Record<string, Rule> = { authorized_keys: ([, kind, size]) => kind === 'file' && size === 0 };
-
-function rulesOf(names: Iterable<string>, rule: Rule): Record<string, Rule> {
-  return Object.fromEntries([...names].map((name) => [name, rule]));
-}
-
-/**
- * Full paths of entries outside the data folder that ElastOS did not make,
- * or that changed since the rootfs put them there. Null when a folder
- * could not be read, so nothing can be proven.
- */
-export function foreignOutsideData(listing: Listing, dirs: DistroOutsideDirs): string[] | null {
-  const foreign: string[] = [];
-  const m = ROOTFS_MANIFEST;
-  /** A folder is read only when its parent listed it as a folder; otherwise there is nothing in it to lose. */
-  const check = (dir: string, rules: Record<string, Rule>, pattern?: (name: string) => boolean): boolean => {
-    const seen = listing[dir];
-    if (seen === 'absent') return true;
-    if (!Array.isArray(seen)) return false;
-    for (const entry of seen) {
-      const name = entry[0];
-      const rule = Object.prototype.hasOwnProperty.call(rules, name) ? rules[name] : pattern?.(name) ? isFileOrDir : null;
-      if (!rule || !rule(entry)) foreign.push(`${dir}/${name}`);
-    }
-    return true;
-  };
-  const listedDir = (dir: string, name: string) => {
-    const seen = listing[dir];
-    return Array.isArray(seen) && seen.some((entry) => entry[0] === name && entry[1] === 'dir');
-  };
-  // /root is where Install puts ElastOS. Without it, this is not the environment ElastOS made.
-  if (listing[dirs.root] === 'absent') foreign.push(dirs.root);
-  const rootRules = {
-    ...rulesOf(ROOT_NAMES, isFileOrDir),
-    ...Object.fromEntries(Object.entries(m.rootFiles).map(([name, want]) => [name, sameAs(want)])),
-    ...rulesOf(m.rootDirs, isDir),
-  };
-  if (!check(dirs.root, rootRules)) return null;
-  if (listedDir(dirs.root, '.local') && !check(dirs.local, rulesOf(LOCAL_NAMES, isFileOrDir))) return null;
-  if (listedDir(dirs.local, 'bin') && !check(dirs.bin, {}, BIN_NAME)) return null;
-  if (listedDir(dirs.local, 'share') && !check(dirs.share, {}, SHARE_NAME)) return null;
-  if (listedDir(dirs.root, '.ssh') && !check(dirs.rootSsh, sshRules)) return null;
-  if (!check(dirs.homes, rulesOf([...m.homeEntries, m.defaultUser], isDir))) return null;
-  const userHome = dirs.userHome.slice(dirs.homes.length + 1);
-  if (listedDir(dirs.homes, userHome)) {
-    const homeRules = {
-      ...Object.fromEntries(Object.entries(m.skel).map(([name, want]) => [name, sameAs(want)])),
-      '.ssh': isDir,
-    };
-    if (!check(dirs.userHome, homeRules)) return null;
-    if (listedDir(dirs.userHome, '.ssh') && !check(dirs.userSsh, sshRules)) return null;
+export function decodeWslText(raw: Buffer | string): string {
+  if (typeof raw === 'string') return raw;
+  if (raw.length >= 2 && raw[0] === 0xff && raw[1] === 0xfe) return raw.subarray(2).toString('utf16le');
+  if (raw.length >= 3 && raw[0] === 0xef && raw[1] === 0xbb && raw[2] === 0xbf) return raw.subarray(3).toString('utf8');
+  if (raw.length >= 2 && raw.length % 2 === 0) {
+    // UTF-16LE with no mark: an ASCII name has a zero byte after each letter.
+    let zeros = 0;
+    for (let i = 1; i < raw.length; i += 2) if (raw[i] === 0) zeros += 1;
+    if (zeros * 2 >= raw.length / 2) return raw.toString('utf16le');
   }
-  return foreign;
+  return raw.toString('utf8');
 }
 
-export async function listOutsideData(run: DistroHelperRun, paths: DistroResetPaths, dirs: DistroOutsideDirs): Promise<Listing> {
-  const result = await run('list', { root: paths.root, dirs: Object.values(dirs) }, { timeoutMs: 60_000 });
-  if (result.code !== 0) throw new Error(UNCHECKED);
-  try {
-    const line = result.stdout.trim().split(/\r?\n/).pop() ?? '';
-    return JSON.parse(line) as Listing;
-  } catch {
-    throw new Error(UNCHECKED);
+/** One name per line. A byte order mark, a zero, a CR, and the spaces at each end are not part of the name. */
+export function wslListLines(raw: Buffer | string): string[] {
+  return decodeWslText(raw)
+    .split(/\r\n|\n|\r/)
+    .map((line) => line.replace(/[\uFEFF\0]/g, '').trim())
+    .filter(Boolean);
+}
+
+export type DistroRow = 'present' | 'absent' | 'unknown';
+
+/**
+ * `present`: wsl.exe ran with exit 0, and exactly one line is exactly
+ * ElastOS, with no other line that WSL would read as the same name (WSL
+ * names ignore case, so `elastos` is refused). `absent`: no such line.
+ * `unknown`: anything else, which proves nothing.
+ */
+export function elastosRowOf(out: WslListOutput): DistroRow {
+  if (out.code == null) return 'unknown';
+  const lines = wslListLines(out.stdout);
+  const exact = lines.filter((line) => line === DISTRO_NAME).length;
+  const near = lines.filter((line) => line.toLowerCase() === DISTRO_NAME.toLowerCase()).length;
+  if (out.code !== 0) {
+    // With no distro at all, wsl.exe prints a message and exits non-zero.
+    return near === 0 && lines.length > 0 ? 'absent' : 'unknown';
   }
+  if (near === 0) return 'absent';
+  if (exact === 1 && near === 1) return 'present';
+  return 'unknown';
 }
 
 const UNCHECKED = 'ElastOS was not uninstalled because it could not check its Linux environment. Nothing was removed. Try again.';
 
 /**
- * The proof that this environment is the one ElastOS made, and that
- * removing it loses nothing but the ElastOS data. Throws a plain refusal.
+ * The proof that this environment is the one ElastOS made: the Reset
+ * ownership rule with Uninstall words, and a signed install record.
+ * Returns the record's SHA-256. Throws a plain refusal.
  */
-export function assertDistroIsElastosOnly(
+export function assertDistroIsElastos(
   seen: DistroInspection,
-  outside: Listing,
   paths: DistroResetPaths,
-  dirs: DistroOutsideDirs,
   maintainerDid: string | null,
-): void {
-  // The Reset ownership rule, with Uninstall words (no user file, no mount, signed record).
+): string {
   const plan = distroRemovalPlan(seen, paths, maintainerDid, 'uninstall');
   if (plan.dataKind !== 'dir' || plan.recordSha256 == null) {
     throw new Error(`ElastOS did not uninstall. It cannot prove that the Linux environment named ${DISTRO_NAME} is the one it made, because ${paths.dataDir} in it has no signed ElastOS install record. Click Install to finish installing ElastOS, then click Uninstall again. Nothing was removed.`);
   }
-  const foreign = foreignOutsideData(outside, dirs);
-  if (foreign == null) throw new Error(UNCHECKED);
-  if (foreign.length) {
-    throw new Error(`ElastOS did not uninstall, because the Linux environment named ${DISTRO_NAME} holds files that ElastOS did not make, or that were changed: ${listNames(foreign)}. Uninstall would delete them, and the copy holds only your ElastOS data. Move those files out, then click Uninstall. Nothing was removed. To see them, open ${explorerPath(foreign[0].slice(0, foreign[0].lastIndexOf('/')) || '/')} in File Explorer.`);
+  return plan.recordSha256;
+}
+
+/** Room for the tar headers and the end of the file, on top of the bytes in use. */
+export function exportNeededBytes(usedBytes: number): number {
+  return usedBytes + Math.ceil(usedBytes / 10) + 64 * 1024 * 1024;
+}
+
+export class ExportSpaceError extends Error {
+  readonly code = 'export-space';
+
+  constructor(readonly neededBytes: number, readonly freeBytes: number | null) {
+    super(freeBytes == null
+      ? 'ElastOS could not check the free space for a copy of its whole Linux environment'
+      : `There is not enough free space for a copy of the whole ElastOS Linux environment. It needs about ${plainBytes(neededBytes)}, and ${plainBytes(freeBytes)} is free`);
+    this.name = 'ExportSpaceError';
   }
+}
+
+/** Refuse when the whole-environment copy cannot fit in the backups folder. */
+export async function assertExportSpace(input: {
+  home: string;
+  usedBytes: () => Promise<number>;
+  freeBytes?: (dir: string) => number | null;
+}): Promise<void> {
+  const used = await input.usedBytes();
+  if (!Number.isSafeInteger(used) || used < 0) throw new Error('ElastOS could not measure its Linux environment');
+  const needed = exportNeededBytes(used);
+  let dir = backupFolder(input.home);
+  while (!fs.existsSync(dir) && path.dirname(dir) !== dir) dir = path.dirname(dir);
+  const free = (input.freeBytes ?? freeBytesAt)(dir);
+  if (free == null || free < needed) throw new ExportSpaceError(needed, free);
+}
+
+/** The bytes in use in the Linux environment, from the helper's `used`. */
+export async function distroUsedBytes(run: DistroHelperRun, paths: DistroResetPaths): Promise<number> {
+  const result = await run('used', { root: paths.root }, { timeoutMs: 60_000 });
+  let bytes = NaN;
+  try {
+    const line = result.stdout.trim().split(/\r?\n/).pop() ?? '';
+    bytes = Number((JSON.parse(line) as { bytes?: unknown }).bytes);
+  } catch {
+    bytes = NaN;
+  }
+  if (result.code !== 0 || !Number.isSafeInteger(bytes) || bytes < 0) {
+    throw new Error('ElastOS could not measure its Linux environment');
+  }
+  return bytes;
+}
+
+/** `ElastOS-linux-<stamp>.tar`, then `-2`, `-3`, and so on. */
+export function exportFileName(stamp: string, attempt: number): string {
+  return attempt === 1 ? `ElastOS-linux-${stamp}.tar` : `ElastOS-linux-${stamp}-${attempt}.tar`;
+}
+
+const NOT_A_TAR = 'The saved file is not a complete copy';
+
+/**
+ * The saved file must be a real, non-empty file with a tar header at the
+ * start, a length in whole 512-byte blocks, and the two zero blocks that
+ * end every tar file. A file cut short fails the last check.
+ */
+export function verifyExportFile(file: string): number {
+  const st = fs.lstatSync(file);
+  if (st.isSymbolicLink() || !st.isFile()) throw new Error(NOT_A_TAR);
+  if (st.size === 0) throw new Error('The saved file is empty');
+  if (st.size < 1536 || st.size % 512 !== 0) throw new Error(NOT_A_TAR);
+  const fd = fs.openSync(file, 'r');
+  try {
+    const head = Buffer.alloc(512);
+    const tail = Buffer.alloc(1024);
+    if (fs.readSync(fd, head, 0, 512, 0) !== 512) throw new Error(NOT_A_TAR);
+    if (fs.readSync(fd, tail, 0, 1024, st.size - 1024) !== 1024) throw new Error(NOT_A_TAR);
+    if (head.subarray(257, 262).toString('latin1') !== 'ustar') throw new Error(NOT_A_TAR);
+    if (tail.some((byte) => byte !== 0)) throw new Error(NOT_A_TAR);
+  } finally {
+    fs.closeSync(fd);
+  }
+  return st.size;
+}
+
+/** Runs wsl.exe with these arguments and no shell. Resolves to the exit code; rejects when it could not run or ran too long. */
+export type RunWsl = (args: string[], timeoutMs: number) => Promise<number>;
+
+export const EXPORT_TIMEOUT_MS = 6 * 60 * 60 * 1000;
+
+/**
+ * Save the whole ElastOS Linux environment as a tar file in the owner-only
+ * backups folder, and return its path. The name never replaces a file.
+ * The environment is stopped first, so no program writes while it is read.
+ * A file left by a failed save is deleted.
+ */
+export async function exportDistroToBackups(input: {
+  home: string;
+  dataDir: string;
+  restrict: RestrictToOwner;
+  usedBytes: () => Promise<number>;
+  runWsl: RunWsl;
+  platform?: string;
+  freeBytes?: (dir: string) => number | null;
+  now?: Date;
+}): Promise<string> {
+  const folder = prepareBackupFolder(input.home, input.dataDir, input.platform);
+  input.restrict(folder, true);
+  await assertExportSpace(input);
+  const stamp = backupStamp(input.now ?? new Date());
+  let dest: string | null = null;
+  for (let attempt = 1; attempt <= MAX_BACKUP_ATTEMPTS && dest == null; attempt += 1) {
+    const candidate = path.join(folder, exportFileName(stamp, attempt));
+    try {
+      fs.lstatSync(candidate);
+    } catch (err) {
+      if (err && typeof err === 'object' && (err as { code?: string }).code === 'ENOENT') dest = candidate;
+      else throw err;
+    }
+  }
+  if (dest == null) throw new Error(TOO_MANY_BACKUPS);
+  const stopCode = await input.runWsl(wslTerminateArgs(), 2 * 60 * 1000).catch(() => null);
+  if (stopCode !== 0) throw new Error('ElastOS could not stop its Linux environment before saving it');
+  try {
+    let code: number;
+    try {
+      code = await input.runWsl(wslExportArgs(dest), EXPORT_TIMEOUT_MS);
+    } catch {
+      throw new Error('wsl.exe could not save it, or took too long');
+    }
+    if (code !== 0) throw new Error(`wsl.exe stopped with code ${code}`);
+    verifyExportFile(dest);
+    input.restrict(dest, false);
+  } catch (err) {
+    try {
+      if (fs.lstatSync(dest).isFile()) fs.rmSync(dest, { force: true });
+    } catch {
+      // Nothing was written.
+    }
+    throw err;
+  }
+  return dest;
 }
 
 export interface UninstallResult {
   backupPath: string | null;
+  /** The saved whole Linux environment (a tar file), when it was removed. */
+  linuxCopyPath: string | null;
+  /** How to bring that file back (restoreHint), for the window's log. */
+  restoreHint: string | null;
   /** True when the ElastOS Linux environment was removed. */
   removedLinux: boolean;
 }
@@ -244,36 +333,34 @@ export interface DistroUninstallDeps {
   platform?: string;
   env?: NodeJS.ProcessEnv;
   paths?: DistroResetPaths;
-  outsideDirs?: DistroOutsideDirs;
   stop: () => Promise<void>;
-  /** The WSL list (`wsl.exe --list --verbose`). Empty when wsl.exe could not run. */
-  listDistros: () => Promise<string>;
+  /** `wsl.exe --list --quiet`, raw. */
+  listDistros: () => Promise<WslListOutput>;
   hasWsl: () => Promise<boolean>;
   pythonPresent: () => Promise<boolean | null>;
   inspect: () => Promise<DistroInspection>;
-  listOutside: () => Promise<Listing>;
   maintainerDid: string | null;
   checkBackupSpace?: () => Promise<void>;
   saveBackup?: () => Promise<string | null>;
+  /** Refuses when a copy of the whole Linux environment cannot fit. Runs before Stop. */
+  checkLinuxSpace: () => Promise<void>;
+  /** Saves the whole Linux environment and returns the file (exportDistroToBackups). */
+  saveLinux: () => Promise<string>;
   /** The second confirmation. Only `true` counts as yes. */
   confirmRemoval: (prompt: UninstallPrompt) => Promise<unknown>;
-  /** Runs wsl.exe with these arguments, with no shell. Resolves to the exit code. */
-  runWsl: (args: string[]) => Promise<number>;
+  runWsl: RunWsl;
   removeHost: (target: string) => void;
   sweepHost?: (parent: string) => void;
   lstat?: (file: string) => RemovalStat;
 }
 
-/** Exactly one row named exactly ElastOS. Another case or a look-alike name is not ElastOS. */
-async function elastosRow(deps: DistroUninstallDeps): Promise<'present' | 'absent' | 'unknown'> {
+async function elastosRow(deps: DistroUninstallDeps): Promise<DistroRow> {
   if (!(await deps.hasWsl())) return 'absent';
-  const text = (await deps.listDistros()).replace(/\0/g, '');
-  if (!text.trim()) return 'unknown';
-  const rows = parseWslDistroList(text);
-  const near = rows.filter((row) => row.name.toLowerCase() === DISTRO_NAME.toLowerCase());
-  if (near.length === 0) return 'absent';
-  if (near.length === 1 && near[0].name === DISTRO_NAME) return 'present';
-  return 'unknown';
+  try {
+    return elastosRowOf(await deps.listDistros());
+  } catch {
+    return 'unknown';
+  }
 }
 
 function messageOf(err: unknown): string {
@@ -288,22 +375,27 @@ export async function uninstallRuntimeInDistro(deps: DistroUninstallDeps): Promi
     throw new Error('ElastOS was not uninstalled. A copy of your data cannot be saved here. Nothing was removed.');
   }
   const paths = deps.paths ?? distroResetPaths();
-  const dirs = deps.outsideDirs ?? distroOutsideDirs(paths);
   const hostFiles = launcherHostFiles(deps.homeDir, deps.platform ?? 'win32', deps.env ?? {});
   const row = await elastosRow(deps);
   if (row === 'unknown') throw new Error(UNCHECKED);
   const present = row === 'present';
+  let recordSha256: string | null = null;
   if (present) {
     const python = await deps.pythonPresent();
     if (python === false) throw new Error(distroPythonMissingMessage('uninstall'));
     if (python == null) throw new Error(UNCHECKED);
-    assertDistroIsElastosOnly(await deps.inspect(), await deps.listOutside(), paths, dirs, deps.maintainerDid);
+    recordSha256 = assertDistroIsElastos(await deps.inspect(), paths, deps.maintainerDid);
     if (wantsBackup && deps.checkBackupSpace) {
       try {
         await deps.checkBackupSpace();
       } catch (err) {
         throw new Error(`ElastOS was not uninstalled. ${messageOf(err)}. Nothing was removed. Free some space, or uninstall without a copy.`);
       }
+    }
+    try {
+      await deps.checkLinuxSpace();
+    } catch (err) {
+      throw new Error(`ElastOS was not uninstalled. ${messageOf(err)}. Nothing was removed. Free some space, then click Uninstall.`);
     }
   }
   try {
@@ -313,6 +405,7 @@ export async function uninstallRuntimeInDistro(deps: DistroUninstallDeps): Promi
     throw err;
   }
   let backupPath: string | null = null;
+  let linuxCopyPath: string | null = null;
   if (present) {
     if (wantsBackup && deps.saveBackup) {
       try {
@@ -321,50 +414,87 @@ export async function uninstallRuntimeInDistro(deps: DistroUninstallDeps): Promi
         throw new Error(`ElastOS was not uninstalled. The copy of your data could not be saved (${messageOf(err)}). Nothing was removed.`);
       }
     }
-    const kept = backupPath ? ` Your copy of your ElastOS data is in ${backupPath}.` : '';
-    // Look again after Stop and the copy.
+    const kept = () => [
+      backupPath ? ` Your copy of your ElastOS data is in ${backupPath}.` : '',
+      linuxCopyPath ? ` A copy of the whole Linux environment is saved in ${linuxCopyPath}.` : '',
+    ].join('');
+    if ((await deps.confirmRemoval(uninstallPrompt(backupPath, backupFolder(deps.homeDir)))) !== true) {
+      throw new Error(`ElastOS was not uninstalled. Nothing was removed.${kept()} Click Start to use ElastOS again.`);
+    }
+    const changed = () => new Error(`ElastOS was not uninstalled, because its Linux environment changed. Nothing was removed.${kept()} Click Uninstall to try again.`);
+    // (1) The list again, after the yes.
+    if ((await elastosRow(deps)) !== 'present') throw changed();
+    // (2) Ownership and the same signed record again.
+    let again: string;
     try {
-      assertDistroIsElastosOnly(await deps.inspect(), await deps.listOutside(), paths, dirs, deps.maintainerDid);
+      again = assertDistroIsElastos(await deps.inspect(), paths, deps.maintainerDid);
     } catch (err) {
-      throw new Error(`${messageOf(err)}.${kept}`);
+      throw new Error(`${messageOf(err)}.${kept()}`);
     }
-    if ((await deps.confirmRemoval(uninstallPrompt(backupPath))) !== true) {
-      throw new Error(`ElastOS was not uninstalled. Nothing was removed.${kept} Click Start to use ElastOS again.`);
+    if (again !== recordSha256) throw changed();
+    // (3) Save the whole Linux environment. Without that file, nothing is removed.
+    try {
+      linuxCopyPath = await deps.saveLinux();
+    } catch (err) {
+      throw new Error(`ElastOS was not uninstalled. It could not save a copy of its whole Linux environment (${messageOf(err)}). Nothing was removed.${kept()} Click Uninstall to try again.`);
     }
-    if ((await elastosRow(deps)) !== 'present') {
-      throw new Error(`ElastOS was not uninstalled, because its Linux environment changed. Nothing was removed.${kept} Click Uninstall to try again.`);
-    }
+    // (4) The list again, right before unregister.
+    if ((await elastosRow(deps)) !== 'present') throw changed();
+    // (5) Unregister, once.
     let code: number;
     try {
-      code = await deps.runWsl(wslUnregisterArgs());
+      code = await deps.runWsl(wslUnregisterArgs(), 10 * 60 * 1000);
     } catch {
-      throw new Error(`ElastOS could not run wsl.exe to remove its Linux environment.${kept} Click Uninstall to try again.`);
+      throw new Error(`ElastOS could not run wsl.exe to remove its Linux environment.${kept()} Click Uninstall to try again.`);
     }
     if (code !== 0) {
-      throw new Error(`ElastOS could not remove its Linux environment (wsl.exe stopped with code ${code}).${kept} Click Uninstall to try again.`);
+      throw new Error(`ElastOS could not remove its Linux environment (wsl.exe stopped with code ${code}).${kept()} Click Uninstall to try again.`);
     }
+    // (6) It must be gone.
     if ((await elastosRow(deps)) !== 'absent') {
-      throw new Error(`ElastOS asked Windows to remove its Linux environment, but it is still listed.${kept} Restart Windows, then click Uninstall again.`);
+      throw new Error(`ElastOS asked Windows to remove its Linux environment, but it is still listed.${kept()} Restart Windows, then click Uninstall again.`);
     }
   }
   removeLauncherHostFiles(hostFiles, deps);
-  return { backupPath, removedLinux: present };
+  return { backupPath, linuxCopyPath, restoreHint: linuxCopyPath ? restoreHint(linuxCopyPath) : null, removedLinux: present };
 }
 
-function runWslNoShell(args: string[]): Promise<number> {
+/** wsl.exe through execFile: a fixed argument list, no shell, a time limit. */
+export function runWslNoShell(args: string[], timeoutMs: number): Promise<number> {
   return new Promise((resolve, reject) => {
-    const child = spawn('wsl.exe', [...args], { windowsHide: true, shell: false, env: wslSpawnEnv(), stdio: 'ignore' });
-    const timer = setTimeout(() => {
-      child.kill();
-      reject(new Error('timeout'));
-    }, 10 * 60 * 1000);
-    child.on('error', (err) => {
-      clearTimeout(timer);
+    execFile('wsl.exe', [...args], {
+      windowsHide: true,
+      shell: false,
+      env: wslSpawnEnv(),
+      timeout: timeoutMs,
+      encoding: 'buffer',
+      // wsl.exe --export can print progress for a long time; too much output would stop it.
+      maxBuffer: 64 * 1024 * 1024,
+    }, (err) => {
+      if (!err) return resolve(0);
+      const code = (err as { code?: unknown }).code;
+      if (typeof code === 'number' && !(err as { killed?: boolean }).killed) return resolve(code);
       reject(err);
     });
-    child.on('exit', (code) => {
-      clearTimeout(timer);
-      resolve(code ?? 1);
+  });
+}
+
+/** `wsl.exe --list --quiet` through execFile, with the raw bytes. */
+export function listDistroNames(): Promise<WslListOutput> {
+  return new Promise((resolve) => {
+    execFile('wsl.exe', wslListArgs(), {
+      windowsHide: true,
+      shell: false,
+      env: wslSpawnEnv(),
+      timeout: 60_000,
+      encoding: 'buffer',
+      maxBuffer: 1024 * 1024,
+    }, (err, stdout) => {
+      const raw = Buffer.isBuffer(stdout) ? stdout : Buffer.alloc(0);
+      if (!err) return resolve({ code: 0, stdout: raw });
+      const code = (err as { code?: unknown }).code;
+      const killed = Boolean((err as { killed?: boolean }).killed);
+      resolve({ code: typeof code === 'number' && !killed ? code : null, stdout: raw });
     });
   });
 }
@@ -377,26 +507,32 @@ export async function uninstallRuntimeInDistroOnThisComputer(
   const home = os.homedir();
   const run = wslHelperRun();
   const paths = distroResetPaths();
-  const dirs = distroOutsideDirs(paths);
+  const usedBytes = () => distroUsedBytes(run, paths);
   return uninstallRuntimeInDistro({
     backup: choice.backup,
     homeDir: home,
     platform: process.platform,
     env: process.env,
     paths,
-    outsideDirs: dirs,
     stop,
-    listDistros,
+    listDistros: listDistroNames,
     hasWsl: () => lookupCommand('wsl.exe'),
     pythonPresent: () => distroPythonPresent(),
     inspect: () => inspectDistro(run, paths, 'uninstall'),
-    listOutside: () => listOutsideData(run, paths, dirs),
     maintainerDid: pinnedMaintainerDid(),
     checkBackupSpace: async () => {
       const seen = describeMeasuredBackup(await measureDistroBackup(run, paths), home);
       if (seen.present && !seen.enough) throw new BackupSpaceError(seen.neededBytes, seen.freeBytes);
     },
     saveBackup: () => runBackupWorker<string | null>({ op: 'write-distro', home, dataDir: paths.dataDir }, 6 * 60 * 60 * 1000),
+    checkLinuxSpace: () => assertExportSpace({ home, usedBytes }),
+    saveLinux: () => exportDistroToBackups({
+      home,
+      dataDir: paths.dataDir,
+      restrict: windowsRestrictToOwner(),
+      usedBytes,
+      runWsl: runWslNoShell,
+    }),
     confirmRemoval,
     runWsl: runWslNoShell,
     removeHost: (target) => removeVerifiedTarget(target),
