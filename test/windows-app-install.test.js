@@ -179,6 +179,12 @@ test('the distro gateway identity uses the lock pid socket and a positive wsl pi
   // Uninstall runs last, after Install ran again.
   assert.ok(script.indexOf('await uninstallRuntimeInDistroOnThisComputer(') > script.indexOf('After Reset, Install installed ElastOS again'));
   assert.match(script, /After Uninstall, the ElastOS Linux environment is gone/);
+  // The saved copy must exist, and wsl --import of it must bring back a file outside the data folder.
+  assert.match(script, /verifyExportFile\(saved\)/);
+  assert.match(script, /if \(elastosRowOf\(after\) !== 'absent'\)/);
+  assert.match(script, /\['--import', check, where, saved\]/);
+  assert.match(script, /uninstall\.restoreHint !== `To bring it back, open PowerShell and run: wsl --import \$\{check\} \$\{where\} "\$\{saved\}"`/);
+  assert.match(script, /cat \/srv\/elastos-ci-marker\.txt/);
 });
 
 test('an adopted distro gateway uses the lock pid and does not report a live pid stopped', async () => {
