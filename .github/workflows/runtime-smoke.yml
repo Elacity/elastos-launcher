@@ -154,7 +154,7 @@ jobs:
       - name: Compile
         run: npx tsc
 
-      - name: Install inside the ElastOS distro and require /healthz
+      - name: Install inside the ElastOS distro, require /healthz, then Reset, Uninstall, and restore the saved copy
         run: node scripts/windows-app-install.js
 
   clean-machine-linux:

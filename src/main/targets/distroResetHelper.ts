@@ -13,6 +13,9 @@
  * - `zip`: writes a stored zip of the data folder to stdout, with ZIP64 when
  *   needed, and the entry count to stderr. Each file is read twice and must
  *   not change between the reads.
+ * - `used`: the bytes in use on the drive of `/`, so Uninstall can check
+ *   that a copy of the whole Linux environment fits before it saves one.
+ *   Prints JSON.
  * - `remove`: checks that nothing changed since `inspect`, then moves the
  *   data folder aside, deletes the program and the stage file, and then
  *   deletes the moved folder. Prints JSON. Exit 3 means it refused before
@@ -561,9 +564,16 @@ def do_remove():
         raise partial('delete', removed, False, left[0], left)
     print(json.dumps({'removed': removed}))
 
+def do_used():
+    # The bytes in use on the drive of /. A copy of the whole Linux environment needs about this much.
+    st = os.statvfs('/')
+    print(json.dumps({'bytes': (st.f_blocks - st.f_bfree) * st.f_frsize}))
+
 try:
     if op == 'inspect':
         do_inspect()
+    elif op == 'used':
+        do_used()
     elif op == 'measure':
         do_measure()
     elif op == 'zip':

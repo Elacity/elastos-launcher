@@ -72,7 +72,7 @@ export function distroResetPaths(home: string = DISTRO_HOME): DistroResetPaths {
   };
 }
 
-export type DistroHelperOp = 'inspect' | 'measure' | 'zip' | 'remove';
+export type DistroHelperOp = 'inspect' | 'measure' | 'zip' | 'remove' | 'used';
 
 export interface DistroHelperResult {
   code: number;
@@ -135,12 +135,27 @@ export async function distroPythonPresent(): Promise<boolean | null> {
  * Install adds python3 to the ElastOS Linux environment when it is missing
  * (ensureElastosDistro in windowsRuntime.ts), so that is the next click.
  */
-const PYTHON_MISSING_REASON = 'the program python3 is missing from its Linux environment, and Reset needs it';
-const PYTHON_MISSING_NEXT = 'Click Install to add python3 again, then click Reset.';
-/** The refusal when Reset was clicked. */
-export const DISTRO_PYTHON_MISSING_MESSAGE = `ElastOS was not reset, because ${PYTHON_MISSING_REASON}. Nothing was deleted. ${PYTHON_MISSING_NEXT}`;
-/** The same reason and next click, in the Reset dialog before Reset is clicked. */
-export const DISTRO_PYTHON_MISSING_DIALOG = `ElastOS cannot reset yet, because ${PYTHON_MISSING_REASON}. ${PYTHON_MISSING_NEXT}`;
+/** Reset and Uninstall share every check and message; only these words differ. */
+export type RemovalAction = 'reset' | 'uninstall';
+const REMOVAL_WORDS: Record<RemovalAction, { verb: string; past: string; button: string }> = {
+  reset: { verb: 'reset', past: 'reset', button: 'Reset' },
+  uninstall: { verb: 'uninstall', past: 'uninstalled', button: 'Uninstall' },
+};
+
+/** The refusal when Reset or Uninstall was clicked and python3 is missing. */
+export function distroPythonMissingMessage(action: RemovalAction): string {
+  const { past, button } = REMOVAL_WORDS[action];
+  return `ElastOS was not ${past}, because the program python3 is missing from its Linux environment, and ${button} needs it. Nothing was deleted. Click Install to add python3 again, then click ${button}.`;
+}
+
+/** The same reason and next click, in the dialog before the button is clicked. */
+export function distroPythonMissingDialog(action: RemovalAction): string {
+  const { verb, button } = REMOVAL_WORDS[action];
+  return `ElastOS cannot ${verb} yet, because the program python3 is missing from its Linux environment, and ${button} needs it. Click Install to add python3 again, then click ${button}.`;
+}
+
+export const DISTRO_PYTHON_MISSING_MESSAGE = distroPythonMissingMessage('reset');
+export const DISTRO_PYTHON_MISSING_DIALOG = distroPythonMissingDialog('reset');
 
 /** Spawn a helper process with no shell. Exported so tests can run the same helper with a local python3. */
 export function spawnHelper(
@@ -246,15 +261,18 @@ function parseJson<T>(text: string): T {
   return JSON.parse(line) as T;
 }
 
-export async function inspectDistro(run: DistroHelperRun, paths: DistroResetPaths): Promise<DistroInspection> {
+export async function inspectDistro(
+  run: DistroHelperRun,
+  paths: DistroResetPaths,
+  action: RemovalAction = 'reset',
+): Promise<DistroInspection> {
+  const unchecked = `ElastOS was not ${REMOVAL_WORDS[action].past} because it could not check its files ${DATA_IN_LINUX}. Nothing was deleted. Try again.`;
   const result = await run('inspect', helperInput(paths), { timeoutMs: 60_000 });
-  if (result.code !== 0) {
-    throw new Error(`ElastOS was not reset because it could not check its files ${DATA_IN_LINUX}. Nothing was deleted. Try again.`);
-  }
+  if (result.code !== 0) throw new Error(unchecked);
   try {
     return parseJson<DistroInspection>(result.stdout);
   } catch {
-    throw new Error(`ElastOS was not reset because it could not check its files ${DATA_IN_LINUX}. Nothing was deleted. Try again.`);
+    throw new Error(unchecked);
   }
 }
 
@@ -268,27 +286,29 @@ export function distroRemovalPlan(
   seen: DistroInspection,
   paths: DistroResetPaths,
   maintainerDid: string | null,
+  action: RemovalAction = 'reset',
 ): DistroRemovalPlan {
+  const { verb, past, button } = REMOVAL_WORDS[action];
   const where = `${paths.dataDir} ${DATA_IN_LINUX}`;
   for (const [file, kind] of seen.ancestors ?? []) {
     if (kind !== 'dir' && kind !== 'absent') {
-      throw new Error(`ElastOS will not reset, because ${file} ${DATA_IN_LINUX} is not a real folder. Nothing was deleted.`);
+      throw new Error(`ElastOS will not ${verb}, because ${file} ${DATA_IN_LINUX} is not a real folder. Nothing was deleted.`);
     }
   }
   if (seen.binary !== 'file' && seen.binary !== 'absent') {
-    throw new Error(`ElastOS will not reset, because ${paths.binary} ${DATA_IN_LINUX} is not a plain file. Nothing was deleted.`);
+    throw new Error(`ElastOS will not ${verb}, because ${paths.binary} ${DATA_IN_LINUX} is not a plain file. Nothing was deleted.`);
   }
   if (seen.stage !== 'file' && seen.stage !== 'absent') {
-    throw new Error(`ElastOS will not reset, because ${paths.stageFile} ${DATA_IN_LINUX} is not a plain file. Nothing was deleted.`);
+    throw new Error(`ElastOS will not ${verb}, because ${paths.stageFile} ${DATA_IN_LINUX} is not a plain file. Nothing was deleted.`);
   }
   if (seen.data === 'absent') return { dataKind: 'absent', entries: [], recordSha256: null };
   if (seen.data !== 'dir' || !Array.isArray(seen.entries)) {
-    throw new Error(`ElastOS will not reset ${where}, because it is not a real folder. Nothing was deleted.`);
+    throw new Error(`ElastOS will not ${verb} ${where}, because it is not a real folder. Nothing was deleted.`);
   }
   if (!Array.isArray(seen.crossing)) {
-    throw new Error(`ElastOS was not reset because it could not check its files ${DATA_IN_LINUX}. Nothing was deleted. Try again.`);
+    throw new Error(`ElastOS was not ${past} because it could not check its files ${DATA_IN_LINUX}. Nothing was deleted. Try again.`);
   }
-  if (seen.crossing.length > 0) throw new Error(mountedMessage(where, seen.crossing));
+  if (seen.crossing.length > 0) throw new Error(mountedMessage(where, seen.crossing, action));
   const entries = seen.entries;
   const record = seen.record;
   const verdict = classifyRuntimeEntries(
@@ -296,11 +316,11 @@ export function distroRemovalPlan(
     () => distroRecordProves(seen, maintainerDid),
   );
   if (verdict.kind === 'foreign') {
-    throw new Error(`ElastOS will not reset ${where}, because it contains files that are not part of the runtime: ${listNames(verdict.names)}. Move those files out, then reset. Nothing was deleted. To see them, open ${explorerPath(paths.dataDir)} in File Explorer.`);
+    throw new Error(`ElastOS will not ${verb} ${where}, because it contains files that are not part of the runtime: ${listNames(verdict.names)}. Move those files out, then ${verb}. Nothing was deleted. To see them, open ${explorerPath(paths.dataDir)} in File Explorer.`);
   }
   if (verdict.kind === 'unproved') {
     // The same words as on Mac and Linux, so the failure screen offers Fix it (runtimeRecovery.ts).
-    throw new Error(`ElastOS did not reset ${where}. This folder ${NO_INSTALL_RECORD}, so ElastOS cannot prove that it made the folder. An older ElastOS can cause this. Click Fix it to install ElastOS again. This keeps your data. Then click Reset again. Nothing was deleted.`);
+    throw new Error(`ElastOS did not ${verb} ${where}. This folder ${NO_INSTALL_RECORD}, so ElastOS cannot prove that it made the folder. An older ElastOS can cause this. Click Fix it to install ElastOS again. This keeps your data. Then click ${button} again. Nothing was deleted.`);
   }
   return {
     dataKind: 'dir',
@@ -331,12 +351,13 @@ export async function distroInstallRecordProved(
   return seen.data === 'dir' && distroRecordProves(seen, maintainerDid);
 }
 
-function mountedMessage(where: string, names: string[]): string {
+function mountedMessage(where: string, names: string[], action: RemovalAction = 'reset'): string {
+  const { verb, button } = REMOVAL_WORDS[action];
   const self = names.includes('.');
   const what = self
     ? `${where}, because that folder is on another drive or is mounted from another folder`
     : `${where}, because these names in it are on another drive or are mounted from another folder: ${listNames(names)}`;
-  return `ElastOS will not reset ${what}. ElastOS deletes only its own files, never files on another drive. Nothing was deleted. Unmount ${self ? 'it' : 'them'}, then click Reset.`;
+  return `ElastOS will not ${verb} ${what}. ElastOS deletes only its own files, never files on another drive. Nothing was deleted. Unmount ${self ? 'it' : 'them'}, then click ${button}.`;
 }
 
 /** The File Explorer address of a path in the ElastOS Linux environment. */
@@ -576,18 +597,7 @@ export async function resetRuntimeInDistro(deps: {
     throw new Error('ElastOS was not reset. A copy of your data cannot be saved here. Nothing was deleted.');
   }
   const paths = deps.paths ?? distroResetPaths();
-  const platform = deps.platform ?? 'win32';
-  const env = deps.env ?? {};
-  const hostFiles = [
-    runtimeInstallStagePath(deps.homeDir),
-    runtimeResumeInstallPath(deps.homeDir),
-    runtimeResumeInstallLockPath(deps.homeDir),
-  ];
-  for (const file of hostFiles) {
-    if (!launcherOwnedDirectories(file, deps.homeDir, platform, env)) {
-      throw new Error('Refusing to remove a file that is not an ElastOS launcher file.');
-    }
-  }
+  const hostFiles = launcherHostFiles(deps.homeDir, deps.platform ?? 'win32', deps.env ?? {});
   const present = await deps.distroPresent();
   if (present == null) {
     throw new Error('ElastOS was not reset because it could not check its Linux environment. Nothing was deleted. Try again.');
@@ -633,14 +643,42 @@ export async function resetRuntimeInDistro(deps: {
       throw new Error(`${messageOf(err)}. Your copy of your data is in ${backupPath}.`);
     }
   }
+  removeLauncherHostFiles(hostFiles, deps);
+  return { backupPath };
+}
+
+/**
+ * The launcher's own files on the Windows side that Reset and Uninstall
+ * remove: the install stage, the resume marker, and its lock. Each must be
+ * an exact launcher path of this account.
+ */
+export function launcherHostFiles(homeDir: string, platform: string, env: NodeJS.ProcessEnv): string[] {
+  const files = [
+    runtimeInstallStagePath(homeDir),
+    runtimeResumeInstallPath(homeDir),
+    runtimeResumeInstallLockPath(homeDir),
+  ];
+  for (const file of files) {
+    if (!launcherOwnedDirectories(file, homeDir, platform, env)) {
+      throw new Error('Refusing to remove a file that is not an ElastOS launcher file.');
+    }
+  }
+  return files;
+}
+
+/** Remove those files after the step in the Linux environment succeeded. */
+export function removeLauncherHostFiles(files: string[], deps: {
+  removeHost: (target: string) => void;
+  sweepHost?: (parent: string) => void;
+  lstat?: (file: string) => RemovalStat;
+}): void {
   const lstat = deps.lstat ?? fs.lstatSync;
-  for (const file of hostFiles) {
+  for (const file of files) {
     assertNoSymlinkAncestors(file, lstat);
     assertStableRemovalTarget(file, lstat);
   }
-  for (const file of hostFiles) deps.removeHost(file);
-  (deps.sweepHost ?? sweepRemovalHoldings)(path.dirname(hostFiles[0]));
-  return { backupPath };
+  for (const file of files) deps.removeHost(file);
+  (deps.sweepHost ?? sweepRemovalHoldings)(path.dirname(files[0]));
 }
 
 export function describeDistroBackupOnThisComputer(): Promise<BackupDescription> {

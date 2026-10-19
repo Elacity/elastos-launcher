@@ -9,6 +9,7 @@ const {
   BackupSpaceError,
   RUNTIME_BACKUP_EXCLUDES,
   assertBackupSpace,
+  plainBytes,
   backupExcluded,
   describeRuntimeBackup,
   measureRuntimeBackup,
@@ -338,18 +339,39 @@ test('Reset with a backup writes it after Stop and before any delete', async () 
   }
 });
 
+test('sizes are in decimal units, so the number agrees with KB, MB, and GB', () => {
+  // 1,646,233,600 bytes is the real whole-environment copy on Windows (run 39085928916). In GiB it is 1.5.
+  assert.equal(plainBytes(1646233600), '1.6 GB');
+  assert.equal(flow.formatBytes(1646233600), '1.6 GB');
+  assert.equal(plainBytes(1e9), '1.0 GB');
+  assert.equal(flow.formatBytes(1e9), '1.0 GB');
+  assert.equal(plainBytes(2 * 1024 ** 3), '2.1 GB');
+  assert.equal(plainBytes(999e6), '999 MB');
+  assert.equal(plainBytes(999e6 + 1), '1.0 GB');
+  assert.equal(plainBytes(5e6), '5 MB');
+  assert.equal(flow.formatBytes(5e6), '5.0 MB');
+  assert.equal(plainBytes(999e3), '999 KB');
+  assert.equal(plainBytes(999e3 + 1), '1 MB');
+  assert.equal(plainBytes(1000), '1 KB');
+  assert.equal(plainBytes(1001), '2 KB');
+  assert.equal(plainBytes(0), '1 KB');
+  assert.equal(flow.formatBytes(999), '999 bytes');
+  assert.equal(flow.formatBytes(999.5e3), '1.0 MB');
+  assert.equal(flow.formatBytes(999.5e6), '1.0 GB');
+});
+
 test('the Reset dialog says the size, the folder, and that the copy holds keys', () => {
   const offer = flow.resetBackupCopy({ present: true, bytes: 5 * 1024 * 1024, neededBytes: 22 * 1024 * 1024, freeBytes: 1e12, enough: true, folder: '/home/a/ElastOS-backups' });
   assert.equal(offer.needsChoice, true);
   assert.equal(offer.canSave, true);
-  assert.match(offer.text, /about 5\.0 MB/);
+  assert.match(offer.text, /about 5\.2 MB/);
   assert.match(offer.text, /\/home\/a\/ElastOS-backups/);
   assert.match(offer.warning, /keys and your sign-in identity/);
   assert.equal(offer.yes, 'Save a copy of your ElastOS data first');
   const tight = flow.resetBackupCopy({ present: true, bytes: 5, neededBytes: 2 * 1024 * 1024 * 1024, freeBytes: 1024, enough: false, folder: '/h' });
   assert.equal(tight.canSave, false);
   assert.equal(tight.needsChoice, true);
-  assert.match(tight.space, /not enough free space.*2\.0 GB.*1\.0 KB is free/);
+  assert.match(tight.space, /not enough free space.*2\.1 GB.*1\.0 KB is free/);
   assert.equal(flow.resetBackupCopy({ present: false }).needsChoice, false);
   const unknown = flow.resetBackupCopy(null);
   assert.equal(unknown.canSave, false);

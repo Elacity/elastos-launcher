@@ -156,10 +156,18 @@ export class BackupSpaceError extends Error {
   }
 }
 
+/**
+ * A size in decimal units: 1 KB is 1000 bytes, 1 MB is 1000 KB, 1 GB is
+ * 1000 MB, so the number agrees with the label. Windows Explorer divides
+ * by 1024 and still writes GB, so it shows a smaller number for the same
+ * file. KB and MB round up.
+ */
 export function plainBytes(bytes: number): string {
-  if (bytes < 1024 * 1024) return `${Math.max(1, Math.ceil(bytes / 1024))} KB`;
-  if (bytes < 1024 * 1024 * 1024) return `${Math.ceil(bytes / (1024 * 1024))} MB`;
-  return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
+  const kb = Math.max(1, Math.ceil(bytes / 1e3));
+  if (kb < 1000) return `${kb} KB`;
+  const mb = Math.ceil(bytes / 1e6);
+  if (mb < 1000) return `${mb} MB`;
+  return `${(bytes / 1e9).toFixed(1)} GB`;
 }
 
 export function backupFolder(home: string): string {

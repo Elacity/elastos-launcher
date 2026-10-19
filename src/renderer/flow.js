@@ -48,7 +48,15 @@ function primaryAction(state) {
   return { id: 'start', label: 'Start', enabled: true };
 }
 
-function confirmCopy(_targetId, paths) {
+function confirmCopy(_targetId, paths, removesLinux) {
+  if (removesLinux) {
+    // Windows: Uninstall removes the whole ElastOS Linux environment (windowsUninstall.ts).
+    return {
+      title: 'Uninstall ElastOS?',
+      body: 'This removes ElastOS from this computer: the Linux environment named ElastOS, with the ElastOS program and all your ElastOS data in it. Next, ElastOS asks you one more time, and shows the file where it will save the whole Linux environment before it removes anything.',
+      paths,
+    };
+  }
   return {
     title: 'Uninstall ElastOS?',
     body: 'This removes the ElastOS program and its data from this computer.',
@@ -111,13 +119,14 @@ function firstRunCopy(_targetId, status) {
   return 'Install ElastOS on this computer. One button downloads it, sets it up, and starts it. Then you open your computer in the browser.';
 }
 
+/** Decimal units, as plainBytes in runtimeBackup.ts: 1 KB is 1000 bytes, 1 MB is 1000 KB, 1 GB is 1000 MB. */
 function formatBytes(bytes) {
   if (bytes === null || bytes === undefined || Number.isNaN(Number(bytes))) return 'size unavailable';
   const size = Number(bytes);
-  if (size < 1024) return `${size} bytes`;
-  if (size < 1024 * 1024) return `${(size / 1024).toFixed(size < 10 * 1024 ? 1 : 0)} KB`;
-  if (size < 1024 * 1024 * 1024) return `${(size / (1024 * 1024)).toFixed(size < 10 * 1024 * 1024 ? 1 : 0)} MB`;
-  return `${(size / (1024 * 1024 * 1024)).toFixed(1)} GB`;
+  if (size < 1e3) return `${size} bytes`;
+  if (size < 999.5e3) return `${(size / 1e3).toFixed(size < 9.95e3 ? 1 : 0)} KB`;
+  if (size < 999.5e6) return `${(size / 1e6).toFixed(size < 9.95e6 ? 1 : 0)} MB`;
+  return `${(size / 1e9).toFixed(1)} GB`;
 }
 
 function legacyPc2Copy(items) {

@@ -71,7 +71,7 @@ declare global {
       restart: () => Promise<void>;
       openBrowser: () => void;
       install: () => Promise<void>;
-      uninstall: () => Promise<void>;
+      uninstall: () => Promise<{ linuxCopyPath: string | null; linuxCopyMessage: string | null; restoreHint: string | null; removedLinux: boolean } | void>;
       resetRuntime: (choice: { backup: boolean }) => Promise<{ backupPath: string | null }>;
       describeResetBackup: () => Promise<{
         present: boolean;
@@ -95,6 +95,7 @@ declare global {
         status: RuntimeStatus;
         platformNote: string | null;
         browserNote: string | null;
+        uninstallRemovesLinux: boolean;
         preflight: { ok: boolean; checks: Array<{ id: string; level: string; message: string }> };
         openAtLogin: boolean;
         canRollback: boolean;

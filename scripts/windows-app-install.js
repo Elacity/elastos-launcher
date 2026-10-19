@@ -3,17 +3,26 @@
  * Drive the Windows Install button path: install inside the ElastOS distro,
  * start the gateway without a terminal, and require /healthz from Windows.
  * Then Reset with a copy, require the distro to hold no program or data,
- * and require Install to install again.
+ * and require Install to install again. Then Uninstall, answering yes to
+ * the second question: require that it named the file, a saved copy of the
+ * whole Linux environment in that file in ElastOS-backups, no data zip, the ElastOS distro to be gone, and the restore hint
+ * (`wsl --import`) to bring back a file outside the data folder, the
+ * install record, and the program. Then remove it again.
  */
 const { installRuntimeOnThisComputer } = require('../dist/main/targets/runtimeInstall');
 const { createRuntimeTarget } = require('../dist/main/targets/runtimeTarget');
 const { HOME_URL, getLocalPath, isHealthOk, probeGatewayHealth } = require('../dist/main/targets/runtimeGateway');
-const { readStoredZipEntries } = require('../dist/main/targets/runtimeBackup');
+const { backupFolder, readStoredZipEntries } = require('../dist/main/targets/runtimeBackup');
 const { distroResetPaths, resetRuntimeInDistroOnThisComputer } = require('../dist/main/targets/windowsReset');
 const { distroIsInstalled, runWslSync } = require('../dist/main/targets/windowsRuntime');
+const {
+  elastosRowOf, listDistroNames, uninstallRuntimeInDistroOnThisComputer, verifyExportFile, wslListLines,
+} = require('../dist/main/targets/windowsUninstall');
 const { isRuntimeDataName } = require('../dist/main/targets/runtimePaths');
-const { execFileSync } = require('child_process');
+const { execFileSync, spawnSync } = require('child_process');
 const fs = require('fs');
+const os = require('os');
+const path = require('path');
 
 async function main() {
   await installRuntimeOnThisComputer((message) => {
@@ -79,6 +88,60 @@ async function main() {
     throw new Error('After Reset, Install did not install ElastOS again');
   }
   console.log('After Reset, Install installed ElastOS again');
+
+  // A file a person could keep outside the data folder. Uninstall saves the whole
+  // Linux environment first, so this file must be in the saved copy.
+  const marker = runWslSync(['bash', '-c', 'mkdir -p /srv && printf kept > /srv/elastos-ci-marker.txt && cat /srv/elastos-ci-marker.txt']);
+  if (marker.code !== 0 || marker.stdout !== 'kept') throw new Error('Could not write /srv/elastos-ci-marker.txt before Uninstall');
+  // Uninstall offers no data zip (decision, 18 Oct): the zips in the folder must be the same after it.
+  const zips = () => fs.readdirSync(backupFolder(os.homedir())).filter((name) => name.endsWith('.zip')).sort();
+  const zipsBefore = zips();
+  let asked = '';
+  const uninstall = await uninstallRuntimeInDistroOnThisComputer(() => target.stopForRemoval(), async (prompt) => {
+    asked = prompt.detail;
+    console.log(`Second question: ${prompt.title}\n${prompt.message}\n${prompt.detail}\n-> ${prompt.confirmLabel}`);
+    return true;
+  });
+  if (!uninstall.removedLinux) throw new Error('Uninstall did not remove the ElastOS Linux environment');
+  const saved = uninstall.linuxCopyPath;
+  if (!saved || path.dirname(saved) !== backupFolder(os.homedir())) {
+    throw new Error(`Uninstall did not save the whole Linux environment in ${backupFolder(os.homedir())} (${saved})`);
+  }
+  if (!asked.split('\n').includes(saved)) throw new Error('The second question did not show the file that Uninstall wrote');
+  const bytes = verifyExportFile(saved);
+  if (bytes !== uninstall.linuxCopyBytes) throw new Error(`The saved size ${uninstall.linuxCopyBytes} is not the file size ${bytes}`);
+  console.log(`Uninstall saved the whole Linux environment in ${saved} (${bytes} bytes)`);
+  console.log(`Message: ${uninstall.linuxCopyMessage}`);
+  if (JSON.stringify(zips()) !== JSON.stringify(zipsBefore)) throw new Error(`Uninstall wrote a data zip: ${zips().join(', ')}`);
+  console.log(`Uninstall wrote no data zip (${zipsBefore.length} zip from Reset, unchanged)`);
+  console.log(execFileSync('icacls.exe', [saved], { encoding: 'utf8' }).trim());
+  console.log(`Restore hint: ${uninstall.restoreHint}`);
+  const after = await listDistroNames();
+  const lines = wslListLines(after.stdout);
+  console.log(`After Uninstall, wsl.exe --list --quiet exit ${after.code}, lines: ${JSON.stringify(lines)}`);
+  if (elastosRowOf(after) !== 'absent') throw new Error('After Uninstall, wsl.exe still lists ElastOS');
+  console.log('After Uninstall, the ElastOS Linux environment is gone');
+
+  // The restore hint, run as it is written: wsl --import ElastOS C:\\ElastOS\\distro "<file>".
+  const check = 'ElastOS';
+  const where = 'C:\\ElastOS\\distro';
+  if (uninstall.restoreHint !== `To bring it back, open PowerShell and run: wsl --import ${check} ${where} "${saved}"`) {
+    throw new Error(`Unexpected restore hint: ${uninstall.restoreHint}`);
+  }
+  execFileSync('wsl.exe', ['--import', check, where, saved], { stdio: 'inherit', timeout: 30 * 60 * 1000 });
+  try {
+    const back = spawnSync('wsl.exe', ['-d', check, '-u', 'root', '--', 'bash', '-c',
+      'cat /srv/elastos-ci-marker.txt && test -f /root/.local/share/elastos/installation/release-head.json && test -x /root/.local/bin/elastos && echo " record program"'],
+    { encoding: 'utf8', timeout: 5 * 60 * 1000 });
+    console.log(`After wsl --import: exit ${back.status}, ${JSON.stringify((back.stdout || '').trim())}`);
+    if (back.status !== 0 || (back.stdout || '').trim() !== 'kept record program') {
+      throw new Error('The saved file did not bring back the marker, the install record, and the program');
+    }
+    console.log('The restore hint brought back /srv/elastos-ci-marker.txt, the install record, and the program');
+  } finally {
+    execFileSync('wsl.exe', ['--unregister', check], { stdio: 'inherit', timeout: 10 * 60 * 1000 });
+    fs.rmSync(saved, { force: true });
+  }
 }
 
 main().catch((err) => {
