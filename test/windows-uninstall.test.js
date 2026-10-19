@@ -215,7 +215,7 @@ test('Windows Uninstall: second question, list, record, whole-environment copy, 
     const prompt = calls.find((call) => Array.isArray(call) && call[0] === 'confirm')[1];
     const lines = prompt.detail.split('\n');
     assert.equal(lines[1], result.linuxCopyPath);
-    assert.equal(lines[2], 'Estimated size: about 1.5 GB. This is an estimate, not the exact size. The file can be several GB.');
+    assert.equal(lines[2], 'Estimated size: about 1.6 GB. This is an estimate, not the exact size. The file can be several GB.');
     assert.equal(lines[5], `wsl --import ElastOS C:\\ElastOS\\distro "${result.linuxCopyPath}"`);
     assert.equal(prompt.detail, [
       'Before it removes anything, ElastOS saves the whole Linux environment in this file:',
@@ -231,7 +231,7 @@ test('Windows Uninstall: second question, list, record, whole-environment copy, 
     assert.equal(prompt.confirmLabel, 'Remove ElastOS');
     // After the copy: the real path and the real size.
     assert.equal(result.linuxCopyBytes, 2048);
-    assert.equal(result.linuxCopyMessage, `ElastOS saved the whole Linux environment in ${result.linuxCopyPath}. The file is 2 KB. Keep it private: it holds your ElastOS keys and data. To bring it back, open PowerShell and run: wsl --import ElastOS C:\\ElastOS\\distro "${result.linuxCopyPath}"`);
+    assert.equal(result.linuxCopyMessage, `ElastOS saved the whole Linux environment in ${result.linuxCopyPath}. The file is 3 KB. Keep it private: it holds your ElastOS keys and data. To bring it back, open PowerShell and run: wsl --import ElastOS C:\\ElastOS\\distro "${result.linuxCopyPath}"`);
     assert.equal(fs.existsSync(path.join(fx.winHome, '.elastos-launcher', 'install-stage.json')), false);
   } finally {
     fx.cleanup();
@@ -416,7 +416,7 @@ test('space (a): exactly enough free space for the estimated copy lets Uninstall
 });
 
 test('space (b): too little free space for the estimated copy is refused before Stop, with a plain message', POSIX, async () => {
-  for (const [free, said] of [[1e9, '954 MB'], [NEEDED - 1, plainBytes(NEEDED - 1)]]) {
+  for (const [free, said] of [[1e9, '1.0 GB'], [NEEDED - 1, plainBytes(NEEDED - 1)]]) {
     const fx = cleanDistro();
     try {
       const calls = [];
@@ -704,9 +704,9 @@ test('the saved file never replaces a file, and a real GNU tar file passes the c
     fs.writeFileSync(path.join(backups(fx), 'ElastOS-linux-20261018-120000Z.tar'), 'older copy');
     const calls = [];
     const d = deps(fx, calls);
-    const input = { home: fx.winHome, usedBytes: async () => 2.5 * 1024 ** 3, freeBytes: () => 1e12, now };
+    const input = { home: fx.winHome, usedBytes: async () => 2.5e9, freeBytes: () => 1e12, now };
     const plan = await planDistroExport(input);
-    assert.deepEqual(plan, { file: path.join(backups(fx), 'ElastOS-linux-20261018-120000Z-2.tar'), estimatedBytes: 2.5 * 1024 ** 3 });
+    assert.deepEqual(plan, { file: path.join(backups(fx), 'ElastOS-linux-20261018-120000Z-2.tar'), estimatedBytes: 2.5e9 });
     assert.match(uninstallPrompt(plan).detail, /\nEstimated size: about 2\.5 GB\. This is an estimate, not the exact size\. The file can be several GB\.\n/);
     const { file: saved, bytes } = await exportDistroToBackups({
       ...input, plan, dataDir: fx.paths.dataDir, platform: 'linux', restrict: () => {}, runWsl: d.runWsl,
@@ -714,6 +714,8 @@ test('the saved file never replaces a file, and a real GNU tar file passes the c
     assert.equal(saved, plan.file);
     assert.equal(bytes, 2048);
     assert.equal(linuxCopyMessage(saved, bytes).includes(`in ${saved}. The file is ${plainBytes(2048)}.`), true);
+    // The size of the real copy on Windows (run 39085928916), in decimal GB.
+    assert.equal(linuxCopyMessage(saved, 1646233600).includes(`in ${saved}. The file is 1.6 GB.`), true);
     assert.equal(fs.readFileSync(path.join(backups(fx), 'ElastOS-linux-20261018-120000Z.tar'), 'utf8'), 'older copy');
     assert.deepEqual(calls.map((call) => call[1]), [wslTerminateArgs(), wslExportArgs(saved)]);
     // A file that appears at the planned name after the question is never replaced: nothing runs.
