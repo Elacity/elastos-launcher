@@ -114,15 +114,25 @@ function cleanDistro() {
 }
 
 /**
+ * The disk numbers every Uninstall test passes in, so no result depends on
+ * the disk of the machine that runs the tests. USED is the size of the
+ * whole-environment copy on real Windows (run 39085928916).
+ */
+const USED = 1646233600;
+const NEEDED = exportNeededBytes(USED);
+const FREE = 100e9;
+
+/**
  * Every outside call is recorded in `calls`. wsl.exe is a fake: --terminate
  * returns 0, --export writes `state.exportBytes` (a complete tar by default),
- * --unregister removes ElastOS from the list.
+ * --unregister removes ElastOS from the list. The bytes in use and the free
+ * space are `state.used` and `state.free`.
  */
 function deps(fx, calls, extra = {}) {
   const run = localRun(calls);
-  const state = { list: extra.list ?? LISTED, exportBytes: tarBytes(), exportCode: 0, free: 1e12 };
-  const usedBytes = () => distroUsedBytes(run, fx.paths);
-  const freeBytes = () => state.free;
+  const state = { list: extra.list ?? LISTED, exportBytes: tarBytes(), exportCode: 0, used: USED, free: FREE };
+  const usedBytes = async () => { calls.push('used'); return state.used; };
+  const freeBytes = () => { calls.push('free'); return state.free; };
   const d = {
     state,
     homeDir: fx.winHome,
@@ -188,10 +198,10 @@ test('Windows Uninstall: second question, list, record, whole-environment copy, 
     assert.equal(result.restoreHint, `To bring it back, open PowerShell and run: wsl --import ElastOS C:\\ElastOS\\distro "${result.linuxCopyPath}"`);
     const steps = calls.map((call) => (Array.isArray(call) ? (call[0] === 'wsl' ? `wsl ${call[1][0]}` : call[0]) : call));
     assert.deepEqual(steps, [
-      'wsl-list', 'python', 'inspect', 'used', 'stop',
+      'wsl-list', 'python', 'inspect', 'used', 'free', 'stop',
       'confirm',
       'wsl-list', 'inspect',
-      'restrict', 'used', 'wsl --terminate', 'wsl --export', 'restrict',
+      'restrict', 'used', 'free', 'wsl --terminate', 'wsl --export', 'restrict',
       'wsl-list', 'wsl --unregister', 'wsl-list',
       'host:install-stage.json', 'host:resume-install.json', 'host:resume-install.json.lock',
     ]);
@@ -205,7 +215,7 @@ test('Windows Uninstall: second question, list, record, whole-environment copy, 
     const prompt = calls.find((call) => Array.isArray(call) && call[0] === 'confirm')[1];
     const lines = prompt.detail.split('\n');
     assert.equal(lines[1], result.linuxCopyPath);
-    assert.match(lines[2], /^Estimated size: about \d+(\.\d)? (KB|MB|GB)\. This is an estimate, not the exact size\. The file can be several GB\.$/);
+    assert.equal(lines[2], 'Estimated size: about 1.5 GB. This is an estimate, not the exact size. The file can be several GB.');
     assert.equal(lines[5], `wsl --import ElastOS C:\\ElastOS\\distro "${result.linuxCopyPath}"`);
     assert.equal(prompt.detail, [
       'Before it removes anything, ElastOS saves the whole Linux environment in this file:',
@@ -360,7 +370,7 @@ test('the whole-environment copy failing stops Uninstall: no unregister, and no 
     ['too little space when the copy starts', (d) => {
       const real = d.confirmRemoval;
       d.confirmRemoval = async (prompt) => { d.state.free = 10; return real(prompt); };
-    }, /\(There is not enough free space for a copy of the whole ElastOS Linux environment\. It needs about [\d.]+ [KMG]B, and 1 KB is free\)/],
+    }, new RegExp(`\\(There is not enough free space for a copy of the whole ElastOS Linux environment\\. It needs about ${plainBytes(NEEDED).replace('.', '\\.')}, and 1 KB is free\\)`)],
     ['free space cannot be read', (d) => {
       const real = d.confirmRemoval;
       d.confirmRemoval = async (prompt) => { d.state.free = null; return real(prompt); };
@@ -386,18 +396,71 @@ test('the whole-environment copy failing stops Uninstall: no unregister, and no 
   }
 });
 
-test('too little space for the whole-environment copy is refused before Stop', POSIX, async () => {
+test('space (a): exactly enough free space for the estimated copy lets Uninstall go on', POSIX, async () => {
   const fx = cleanDistro();
   try {
     const calls = [];
     const d = deps(fx, calls);
-    d.state.free = 1024;
-    await assert.rejects(() => uninstallRuntimeInDistro(d), /^Error: ElastOS was not uninstalled\. There is not enough free space for a copy of the whole ElastOS Linux environment\. It needs about [\d.]+ [KMG]B, and 1 KB is free\. Nothing was removed\. Free some space, then click Uninstall\.$/);
-    assert.equal(calls.includes('stop'), false);
-    assertNothingRemoved(fx, calls);
+    d.state.free = NEEDED;
+    const result = await uninstallRuntimeInDistro(d);
+    assert.equal(result.removedLinux, true);
+    assert.equal(exportCalls(calls).length, 1);
+    assert.deepEqual(unregisterCalls(calls), [['wsl', ['--unregister', 'ElastOS']]]);
+    // Measured and checked twice: before Stop, and again right before the copy.
+    assert.equal(calls.filter((call) => call === 'used').length, 2);
+    assert.equal(calls.filter((call) => call === 'free').length, 2);
     assert.equal(exportNeededBytes(1000), 1000 + 100 + 64 * 1024 * 1024);
   } finally {
     fx.cleanup();
+  }
+});
+
+test('space (b): too little free space for the estimated copy is refused before Stop, with a plain message', POSIX, async () => {
+  for (const [free, said] of [[1e9, '954 MB'], [NEEDED - 1, plainBytes(NEEDED - 1)]]) {
+    const fx = cleanDistro();
+    try {
+      const calls = [];
+      const d = deps(fx, calls);
+      d.state.free = free;
+      await assert.rejects(() => uninstallRuntimeInDistro(d), (err) => {
+        assert.equal(err.message, `ElastOS was not uninstalled. There is not enough free space for a copy of the whole ElastOS Linux environment. It needs about ${plainBytes(NEEDED)}, and ${said} is free. Nothing was removed. Free some space, then click Uninstall.`);
+        return true;
+      });
+      assert.deepEqual(calls, ['wsl-list', 'python', 'inspect', 'used', 'free'], String(free));
+      assert.deepEqual(wslCalls(calls, '--terminate'), [], String(free));
+      assert.deepEqual(exportCalls(calls), [], String(free));
+      assertNothingRemoved(fx, calls, String(free));
+      assert.deepEqual(tars(fx), [], String(free));
+    } finally {
+      fx.cleanup();
+    }
+  }
+});
+
+test('space (c): free space that drops, or a size that grows, after the question is refused before the copy', POSIX, async () => {
+  const cases = [
+    ['free space drops by one byte too many', (d) => { d.state.free = NEEDED - 1; }, `It needs about ${plainBytes(NEEDED)}, and ${plainBytes(NEEDED - 1)} is free`],
+    ['the environment grows', (d) => { d.state.free = NEEDED; d.state.used = USED + 1; }, `It needs about ${plainBytes(exportNeededBytes(USED + 1))}, and ${plainBytes(NEEDED)} is free`],
+  ];
+  for (const [name, change, said] of cases) {
+    const fx = cleanDistro();
+    try {
+      const calls = [];
+      const d = deps(fx, calls);
+      d.state.free = NEEDED;
+      d.confirmRemoval = async (prompt) => { calls.push(['confirm', prompt]); change(d); return true; };
+      await assert.rejects(() => uninstallRuntimeInDistro(d), (err) => {
+        assert.equal(err.message, `ElastOS was not uninstalled. It could not save a copy of its whole Linux environment (There is not enough free space for a copy of the whole ElastOS Linux environment. ${said}). Nothing was removed. Click Uninstall to try again.`, name);
+        return true;
+      });
+      assert.ok(calls.some((call) => Array.isArray(call) && call[0] === 'confirm'), name);
+      assert.deepEqual(wslCalls(calls, '--terminate'), [], name);
+      assert.deepEqual(exportCalls(calls), [], name);
+      assertNothingRemoved(fx, calls, name);
+      assert.deepEqual(tars(fx), [], name);
+    } finally {
+      fx.cleanup();
+    }
   }
 });
 
