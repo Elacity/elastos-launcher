@@ -3,6 +3,7 @@ import * as os from 'os';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as https from 'https';
+import * as crypto from 'crypto';
 import log from 'electron-log';
 import { HeartbeatPoller, HeartbeatState } from './pc2Heartbeat';
 
@@ -14,12 +15,19 @@ const IS_ARM = process.arch === 'arm64';
 
 // Node.js 22 LTS download URLs (Active LTS with best compatibility)
 // jsdom@27 requires >=20.19.0 or ^22.12.0, so using Node 22 LTS
-const NODE_VERSION = '22.13.1';
+const NODE_VERSION = '22.23.4';
 const NODE_URLS: Record<string, string> = {
   'darwin-arm64': `https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-darwin-arm64.tar.gz`,
   'darwin-x64': `https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-darwin-x64.tar.gz`,
   'linux-x64': `https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.gz`,
   'linux-arm64': `https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-arm64.tar.gz`,
+};
+// SHA-256 from https://nodejs.org/dist/v22.23.4/SHASUMS256.txt; update together with NODE_VERSION.
+const NODE_SHA256: Record<string, string> = {
+  'darwin-arm64': 'c9e1dbc748b33ed2d14f42445191ecaf14c56259c7a9a26d0042c49ec2b66428',
+  'darwin-x64': 'efcc2b0db6f94bf53eddb038fe2b370277a042bd29e4f19b8f8e23598795b819',
+  'linux-x64': 'b8492284c76a54baf58d61668dd0e41ee0fc98adabf9503d30f05d08f55b4406',
+  'linux-arm64': 'f7a1e486dbc8b286847815b477d4fb5e9fb963ed4489c3e1588853d685f589f9',
 };
 
 // Where we store our bundled Node.js (separate from .pc2 to avoid backup issues)
@@ -121,6 +129,14 @@ async function downloadFile(url: string, dest: string, onProgress?: (percent: nu
         }
       }
       
+      if (response.statusCode !== 200) {
+        response.resume();
+        file.close();
+        fs.unlink(dest, () => {});
+        reject(new Error(`Download failed: HTTP ${response.statusCode} for ${url}`));
+        return;
+      }
+
       const totalBytes = parseInt(response.headers['content-length'] || '0', 10);
       let downloadedBytes = 0;
       
@@ -144,6 +160,16 @@ async function downloadFile(url: string, dest: string, onProgress?: (percent: nu
   });
 }
 
+function sha256File(filePath: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const hash = crypto.createHash('sha256');
+    fs.createReadStream(filePath)
+      .on('data', (chunk) => hash.update(chunk))
+      .on('end', () => resolve(hash.digest('hex')))
+      .on('error', reject);
+  });
+}
+
 // Download and extract Node.js for the current platform
 async function downloadBundledNode(onProgress: (message: string) => void): Promise<void> {
   const platform = process.platform;
@@ -151,7 +177,8 @@ async function downloadBundledNode(onProgress: (message: string) => void): Promi
   const key = `${platform}-${arch}`;
   
   const url = NODE_URLS[key];
-  if (!url) {
+  const expectedSha256 = NODE_SHA256[key];
+  if (!url || !expectedSha256) {
     throw new Error(`No Node.js binary available for ${key}. Please install Node.js 20 manually.`);
   }
   
@@ -169,6 +196,12 @@ async function downloadBundledNode(onProgress: (message: string) => void): Promi
     onProgress(`Downloading Node.js ${NODE_VERSION}... ${percent}%`);
   });
   
+  const actualSha256 = await sha256File(tarPath);
+  if (actualSha256 !== expectedSha256) {
+    fs.unlinkSync(tarPath);
+    throw new Error(`Node.js ${NODE_VERSION} download failed its checksum check (expected ${expectedSha256}, got ${actualSha256}). Nothing was installed.`);
+  }
+
   onProgress('Extracting Node.js...');
   log.info('Extracting Node.js...');
   
