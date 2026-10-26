@@ -121,3 +121,7 @@ This is idempotent, fail-loud, and self-checking — it stops PC2 cleanly, pulls
 The ElastOS Personal Cloud is your sovereign computing environment - your data, your AI, your rules.
 
 Built by [Elacity Labs](https://ela.city)
+
+## License
+
+[MIT](LICENSE). Copyright (c) 2026 Elacity.
