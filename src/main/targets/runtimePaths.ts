@@ -122,7 +122,6 @@ const RUNTIME_DATA_NAMES = new Set([
   'installation', 'bin', 'libexec', 'capsules', 'tools', 'scripts', 'browser-vm', 'update-controller',
   'model-catalog.json', 'components.json', 'sources.json', '.components.upgrade.tmp',
   'host-process.lock', 'gateway-runtime-ownership.lock', 'managed-runtime-start.lock',
-  // The signed check. update_check_status.rs writes it after `elastos update --check`.
   'update-check.json',
   'runtime-coords.json', 'gateway-runtime-coords.json', 'home-runtime-coords.json',
   'ca.key', 'ca.pem', 'tls.key', 'tls.pem', 'tls.ips', 'signing_key', 'identity', 'did',

@@ -35,11 +35,6 @@ import {
 } from './windowsRuntime';
 import { LaunchTarget, UpdateCheck } from './types';
 
-/**
- * Runtime host. Install, start, stop, and uninstall follow the launcher
- * contract. Update reads `{data_dir}/update-check.json` after `elastos update
- * --check` exits 0, and can roll back.
- */
 export function createRuntimeTarget(): LaunchTarget {
   let supervisor: GatewaySupervisor | null = null;
 
