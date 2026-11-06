@@ -4,7 +4,7 @@ const path = require('node:path');
 const test = require('node:test');
 
 const { installRuntime, pinnedInstallerLaunch } = require('../dist/main/targets/runtimeInstall');
-const { runtimeBinaryPath, runtimeJoin } = require('../dist/main/targets/runtimePaths');
+const { runtimeBinaryPath, runtimeDataDir, runtimeJoin, runtimeUpdateCheckPath } = require('../dist/main/targets/runtimePaths');
 const { runtimeInstallBlock } = require('../dist/main/targets/runtimeSupport');
 const {
   adoptDistroGatewayProcess,
@@ -14,6 +14,7 @@ const {
   assertDistroPath,
   distroGatewayArgs,
   distroInstallerArgs,
+  distroRuntimeArgs,
   distroPackageArgs,
   distroPidAlive,
   distroStopArgs,
@@ -66,6 +67,8 @@ test('distro paths stay POSIX and the installer uses ELASTOS_HEAD_CID', () => {
   assert.deepEqual([...wslCommandPrefix(), ...args].slice(0, 4), ['-d', 'ElastOS', '-u', 'root']);
   assert.equal(wslSpawnEnv({}).WSL_UTF8, '1');
   assert.deepEqual(distroGatewayArgs().slice(-3), ['gateway', '--addr', 'localhost:8090']);
+  assert.deepEqual(distroRuntimeArgs(['update', '--check']), ['/root/.local/bin/elastos', 'update', '--check']);
+  assert.equal(runtimeUpdateCheckPath(runtimeDataDir('linux', '/root', {})), '/root/.local/share/elastos/update-check.json');
   assert.match(distroPackageArgs().join(' '), /nameserver 8\.8\.8\.8/);
   assert.match(distroPackageArgs().join(' '), /python3 curl ca-certificates/);
 });
@@ -107,6 +110,7 @@ test('ensuring the distro imports the pinned rootfs and hides command failures',
 
   const seen = [];
   const progress = [];
+  const boot = [];
   await ensureElastosDistro({
     lookupWsl: async () => true,
     listDistros: async () => '  NAME      STATE           VERSION\n',
@@ -116,25 +120,58 @@ test('ensuring the distro imports the pinned rootfs and hides command failures',
       return 0;
     },
     prepareImportDir() {},
-    hasTools: async () => false,
+    runInDistro: async (args, timeoutMs) => {
+      boot.push({ args: [...args], timeoutMs });
+      return { code: 0, stdout: '', stderr: 'apt-get failed\n' };
+    },
+    hasTools: async () => {
+      boot.push('tools');
+      return false;
+    },
     installTools: async () => 0,
     onProgress: (message) => progress.push(message),
   });
   assert.equal(seen[0].installDir, DISTRO_INSTALL_DIR);
   assert.deepEqual(seen[0].args, importDistroArgs(DISTRO_INSTALL_DIR, 'C:\\ElastOS\\rootfs.tar.gz'));
-  assert.deepEqual(progress, ['Rootfs SHA-256 matches the pin']);
+  assert.equal(progress.indexOf('Rootfs SHA-256 matches the pin') + 1, progress.indexOf('Starting the Linux environment for the first time'));
+  assert.deepEqual(boot[0], { args: ['true'], timeoutMs: 3 * 60 * 1000 });
+  assert.equal(boot[1], 'tools');
 
+  const existingBoot = [];
+  const existingProgress = [];
   await assert.rejects(() => ensureElastosDistro({
     lookupWsl: async () => true,
     listDistros: async () => '  NAME      STATE           VERSION\n* ElastOS    Stopped         2\n',
     ensureRootfs: async () => { throw new Error('should not download'); },
     importDistro: async () => 0,
+    runInDistro: async () => {
+      existingBoot.push('boot');
+      return { code: 0, stdout: '', stderr: '' };
+    },
     hasTools: async () => false,
     installTools: async () => 1,
-    onProgress() {},
+    onProgress: (message) => existingProgress.push(message),
   }), (err) => {
     assert.equal(err.message, DISTRO_SETUP_FAILED);
     assert.equal(/wsl\.exe|powershell|\bbash\b|apt-get/.test(err.message), false);
+    return true;
+  });
+  assert.deepEqual(existingBoot, []);
+  assert.equal(existingProgress.includes('Starting the Linux environment for the first time'), false);
+
+  await assert.rejects(() => ensureElastosDistro({
+    lookupWsl: async () => true,
+    listDistros: async () => '  NAME      STATE           VERSION\n',
+    ensureRootfs: async () => 'C:\\ElastOS\\rootfs.tar.gz',
+    importDistro: async () => 0,
+    prepareImportDir() {},
+    runInDistro: async () => ({ code: 1, stdout: '', stderr: 'bash: true: command not found\n' }),
+    hasTools: async () => { throw new Error('tool check ran'); },
+    installTools: async () => 0,
+    onProgress() {},
+  }), (err) => {
+    assert.equal(err.message, DISTRO_SETUP_FAILED);
+    assert.equal(/bash|true/.test(err.message), false);
     return true;
   });
 });

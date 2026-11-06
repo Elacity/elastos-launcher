@@ -6,7 +6,9 @@ import { PinMismatchError } from './runtimeInstall';
 import { installRuntime, RuntimeInstallDeps } from './runtimeInstall';
 import { INSTALLER_ENV_NAMES, runtimeChildEnv } from './releaseHead';
 import { loadActiveRuntimePin } from './runtimePin';
+import { runtimeDataDir, runtimeUpdateCheckPath } from './runtimePaths';
 import { parseRuntimeVersion } from './runtimeProbe';
+import { RuntimeCommandResult } from './runtimeUpdate';
 import { WINDOWS_NATIVE_MESSAGE } from './runtimeSupport';
 import {
   createGatewaySupervisor,
@@ -191,6 +193,18 @@ export function distroToolCheckArgs(): readonly string[] {
   return ['bash', '-lc', 'command -v python3 >/dev/null && command -v curl >/dev/null'];
 }
 
+export function distroRuntimeArgs(args: readonly string[]): string[] {
+  return ['/root/.local/bin/elastos', ...args];
+}
+
+export function runDistroRuntimeCommand(args: readonly string[]): Promise<RuntimeCommandResult> {
+  return runWsl(distroRuntimeArgs(args), 15 * 60 * 1000);
+}
+
+export function readDistroUpdateStatus(): string {
+  return readDistroFile(runtimeUpdateCheckPath(runtimeDataDir('linux', DISTRO_HOME, {})));
+}
+
 export function distroPackageArgs(): readonly string[] {
   return ['bash', '-lc', 'printf "nameserver 8.8.8.8\\n" > /etc/resolv.conf; apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y python3 curl ca-certificates'];
 }
@@ -281,12 +295,15 @@ export function prepareImportDir(dir: string): void {
   if (fs.readdirSync(dir).length > 0) throw new Error(DISTRO_IMPORT_FAILED);
 }
 
+const DISTRO_FIRST_BOOT_MS = 3 * 60 * 1000;
+
 export async function ensureElastosDistro(deps: {
   lookupWsl: () => Promise<boolean>;
   listDistros: () => Promise<string>;
   ensureRootfs: () => Promise<string>;
   importDistro: (installDir: string, rootfs: string) => Promise<number>;
   prepareImportDir?: (dir: string) => void;
+  runInDistro?: (args: readonly string[], timeoutMs: number) => Promise<WslResult>;
   hasTools: () => Promise<boolean>;
   installTools: () => Promise<number>;
   onProgress: (message: string) => void;
@@ -304,6 +321,17 @@ export async function ensureElastosDistro(deps: {
     (deps.prepareImportDir ?? prepareImportDir)(DISTRO_INSTALL_DIR);
     const code = await deps.importDistro(DISTRO_INSTALL_DIR, rootfs);
     if (code !== 0) throw new Error(DISTRO_IMPORT_FAILED);
+    // The first command can block while the rootfs finishes its first boot.
+    // The tool check's 20 seconds is too short for that.
+    deps.onProgress('Starting the Linux environment for the first time');
+    const run = deps.runInDistro ?? ((args, timeoutMs) => runWsl(args, timeoutMs));
+    let booted: WslResult;
+    try {
+      booted = await run(['true'], DISTRO_FIRST_BOOT_MS);
+    } catch {
+      throw new Error(DISTRO_SETUP_FAILED);
+    }
+    if (booted.code !== 0) throw new Error(DISTRO_SETUP_FAILED);
   }
   if (!(await deps.hasTools())) {
     const code = await deps.installTools();

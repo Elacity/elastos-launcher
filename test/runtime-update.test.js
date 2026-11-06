@@ -5,8 +5,8 @@ const {
   applyRuntimeUpdate,
   checkRuntimeUpdate,
   parseHeadCid,
-  parseUpdateCheck,
   rollbackRuntime,
+  UPDATE_STATUS_UNREADABLE,
 } = require('../dist/main/targets/runtimeUpdate');
 const { releaseHeadCid } = require('../dist/main/targets');
 
@@ -34,26 +34,65 @@ function memoryStore(initial) {
   };
 }
 
-test('update --check is parsed from stdout, not the exit code', async () => {
+function status(outcome, offered, latest = '1.2.0', current = '1.0.0') {
+  return JSON.stringify({
+    schema: 'elastos.update-check/v1',
+    outcome,
+    current_version: current,
+    latest_version: latest,
+    offered,
+  });
+}
+
+test('update --check is read from the status file, not from stdout or the exit code', async () => {
+  let reads = 0;
   const current = await checkRuntimeUpdate(async (args) => {
     assert.deepEqual(args, ['update', '--check']);
-    return { code: 0, stdout: 'Installed release is up to date.\n', stderr: '' };
+    return { code: 0, stdout: 'Latest available: 9.9.9\nRun `elastos update` to install.\n', stderr: '' };
+  }, () => {
+    reads += 1;
+    return status('up_to_date', false, '1.0.0');
   });
   assert.equal(current.updateAvailable, false);
+  assert.equal(current.latest, '1.0.0');
+  assert.equal(reads, 1);
 
   const newer = await checkRuntimeUpdate(async () => ({
     code: 0,
-    stdout: 'Latest available: 0.8.0\nRun `elastos update` to install.\n',
+    stdout: 'Installed release is up to date.\n',
     stderr: '',
-  }));
+  }), () => status('update_available', true, '0.8.0'));
   assert.equal(newer.updateAvailable, true);
   assert.equal(newer.latest, '0.8.0');
-  assert.equal(parseUpdateCheck('Run elastos update to install.').updateAvailable, true);
+
+  const refused = await checkRuntimeUpdate(async () => ({
+    code: 0,
+    stdout: 'Run `elastos update` to install.\n',
+    stderr: '',
+  }), () => status('update_available', false, '0.8.0'));
+  assert.equal(refused.updateAvailable, false);
+
+  const installedNewer = await checkRuntimeUpdate(async () => ({
+    code: 0,
+    stdout: '',
+    stderr: '',
+  }), () => status('installed_newer', true, '0.7.0', '0.8.0'));
+  assert.equal(installedNewer.updateAvailable, false);
 
   await assert.rejects(
-    () => checkRuntimeUpdate(async () => ({ code: 1, stdout: 'Installed release is up to date.\n', stderr: 'no source' })),
+    () => checkRuntimeUpdate(async () => ({ code: 0, stdout: 'Run `elastos update` to install.\n', stderr: '' }), () => '{'),
+    new RegExp(UPDATE_STATUS_UNREADABLE.replace(/[.]/g, '\\.')),
+  );
+
+  let readOnFailure = false;
+  await assert.rejects(
+    () => checkRuntimeUpdate(async () => ({ code: 1, stdout: 'Installed release is up to date.\n', stderr: 'no source' }), () => {
+      readOnFailure = true;
+      return status('update_available', true);
+    }),
     /no source/,
   );
+  assert.equal(readOnFailure, false);
 });
 
 test('update stores only a head CID the launcher verified', async () => {

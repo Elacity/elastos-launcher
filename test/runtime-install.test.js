@@ -20,6 +20,7 @@ const {
   planRuntimeInstall,
   runtimeDataDir,
   runtimeHostLockPath,
+  runtimeUpdateCheckPath,
   verifyReleaseHead,
   wslKvmMessage,
 } = require('../dist/main/targets');
@@ -152,6 +153,18 @@ test('data dir and host lock follow the launcher contract', () => {
   assert.equal(
     runtimeHostLockPath(runtimeDataDir('linux', HOME, {})),
     `${HOME}/.local/share/elastos/host-process.lock`,
+  );
+  assert.equal(
+    runtimeUpdateCheckPath(runtimeDataDir('darwin', HOME, { XDG_DATA_HOME: '/ignored' })),
+    `${HOME}/Library/Application Support/elastos/update-check.json`,
+  );
+  assert.equal(
+    runtimeUpdateCheckPath(runtimeDataDir('linux', HOME, {})),
+    `${HOME}/.local/share/elastos/update-check.json`,
+  );
+  assert.equal(
+    runtimeUpdateCheckPath(runtimeDataDir('linux', HOME, { XDG_DATA_HOME: '/xdg' })),
+    '/xdg/elastos/update-check.json',
   );
 });
 
