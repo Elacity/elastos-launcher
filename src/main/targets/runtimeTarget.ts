@@ -11,7 +11,7 @@ import {
   probeGatewayHealth,
 } from './runtimeGateway';
 import * as runtimeInstall from './runtimeInstall';
-import { runtimeBinaryPath, runtimeComponentsPath, runtimeDataDir } from './runtimePaths';
+import { runtimeBinaryPath, runtimeComponentsPath, runtimeDataDir, runtimeUpdateCheckPath } from './runtimePaths';
 import { findRuntimeBinary, parseRuntimeVersion, probeRuntimeInstallation, RUNTIME_VERSION_ARGS } from './runtimeProbe';
 import { runtimeInstallBlock } from './runtimeSupport';
 import { removeVerifiedTarget, uninstallRuntime } from './runtimeUninstall';
@@ -20,6 +20,7 @@ import {
   checkRuntimeUpdate,
   HeadVerify,
   rollbackRuntime,
+  RuntimeCommand,
   runRuntimeCommand,
   runtimeHeadStore,
   toUpdateCheck,
@@ -28,14 +29,12 @@ import { loadActiveRuntimePin } from './runtimePin';
 import {
   createDistroGatewaySupervisor,
   distroIsInstalled,
+  readDistroUpdateStatus,
   readDistroVersion,
+  runDistroRuntimeCommand,
 } from './windowsRuntime';
 import { LaunchTarget, UpdateCheck } from './types';
 
-/**
- * Runtime host. Install, start, stop, and uninstall follow the launcher
- * contract. Update reads `elastos update --check` stdout and can roll back.
- */
 export function createRuntimeTarget(): LaunchTarget {
   let supervisor: GatewaySupervisor | null = null;
 
@@ -106,7 +105,7 @@ export function createRuntimeTarget(): LaunchTarget {
       await supervisor.start();
     },
     install: (onProgress) => runtimeInstall.installRuntimeOnThisComputer(onProgress),
-    update: (onProgress) => applyRuntimeUpdate(runRuntimeCommand, runtimeHeadStore(), headVerify(), onProgress),
+    update: (onProgress) => applyRuntimeUpdate(runtimeCommand(), runtimeHeadStore(), headVerify(), onProgress),
     // On Windows the launch controller runs uninstallRuntimeInDistro (windowsUninstall.ts) with the two answers.
     uninstall: () => (process.platform === 'win32' ? Promise.reject(new Error('Uninstall on Windows needs your answer in the Uninstall window. Nothing was removed.')) : runtimeUninstall(() => stopGateway(true))),
     getVersion: () => (process.platform === 'win32' ? readDistroVersion() : readRuntimeVersion()),
@@ -114,6 +113,15 @@ export function createRuntimeTarget(): LaunchTarget {
     openInBrowser: () => openRuntimeHome(),
     getLogs: async (lines) => supervisor?.getLogs(lines) ?? '',
   };
+}
+
+function runtimeCommand(): RuntimeCommand {
+  return process.platform === 'win32' ? runDistroRuntimeCommand : runRuntimeCommand;
+}
+
+function readHostUpdateStatus(): string {
+  const home = os.homedir();
+  return fs.readFileSync(runtimeUpdateCheckPath(runtimeDataDir(process.platform, home, process.env)), 'utf8');
 }
 
 async function runtimeCheckForUpdate(): Promise<UpdateCheck> {
@@ -128,16 +136,21 @@ async function runtimeCheckForUpdate(): Promise<UpdateCheck> {
     detail: 'not installed',
     latest: null,
   }, releaseUrl);
-  if (process.platform === 'win32' || runtimeInstallBlock(process.platform, process.arch)) return notInstalled;
+  if (process.platform === 'win32') {
+    if (!distroIsInstalled()) return notInstalled;
+    const parsed = await checkRuntimeUpdate(runDistroRuntimeCommand, readDistroUpdateStatus);
+    return toUpdateCheck(readDistroVersion(), parsed, releaseUrl);
+  }
+  if (runtimeInstallBlock(process.platform, process.arch)) return notInstalled;
   if (!findRuntimeBinary(os.homedir(), process.env.PATH ?? '')) return notInstalled;
-  const parsed = await checkRuntimeUpdate(runRuntimeCommand);
+  const parsed = await checkRuntimeUpdate(runRuntimeCommand, readHostUpdateStatus);
   return toUpdateCheck(readRuntimeVersion(), parsed, releaseUrl);
 }
 
 export async function rollbackRuntimeUpdate(
   onProgress: (message: string) => void = () => {},
 ): Promise<void> {
-  await rollbackRuntime(runRuntimeCommand, runtimeHeadStore(), headVerify(), onProgress);
+  await rollbackRuntime(runtimeCommand(), runtimeHeadStore(), headVerify(), onProgress);
 }
 
 function headVerify(): HeadVerify {

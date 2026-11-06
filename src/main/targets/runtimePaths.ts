@@ -52,6 +52,10 @@ export function runtimeHostLockPath(dataDir: string): string {
   return path.join(dataDir, 'host-process.lock');
 }
 
+export function runtimeUpdateCheckPath(dataDir: string): string {
+  return runtimeJoin(dataDir, 'update-check.json');
+}
+
 /** Launcher bookkeeping. Kept outside the runtime data dir so it cannot sit next to attach_secret. */
 export function runtimeInstallStagePath(homeDir: string): string {
   return runtimeJoin(homeDir, '.elastos-launcher', 'install-stage.json');
@@ -118,6 +122,7 @@ const RUNTIME_DATA_NAMES = new Set([
   'installation', 'bin', 'libexec', 'capsules', 'tools', 'scripts', 'browser-vm', 'update-controller',
   'model-catalog.json', 'components.json', 'sources.json', '.components.upgrade.tmp',
   'host-process.lock', 'gateway-runtime-ownership.lock', 'managed-runtime-start.lock',
+  'update-check.json',
   'runtime-coords.json', 'gateway-runtime-coords.json', 'home-runtime-coords.json',
   'ca.key', 'ca.pem', 'tls.key', 'tls.pem', 'tls.ips', 'signing_key', 'identity', 'did',
   'capability_store', 'namespaces', 'gateway-cache', 'cache', 'content_cache',

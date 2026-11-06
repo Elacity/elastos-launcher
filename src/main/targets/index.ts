@@ -60,6 +60,7 @@ export {
   runtimeComponentsPath,
   runtimeDataDir,
   runtimeHostLockPath,
+  runtimeUpdateCheckPath,
 } from './runtimePaths';
 export type { RuntimeProbe, RuntimeProbeRequest } from './runtimeProbe';
 export type { HealthProbe, LaunchTarget, LaunchTargetDescriptor, LaunchTargetId, TargetStatus, UpdateCheck } from './types';

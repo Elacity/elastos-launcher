@@ -6,9 +6,10 @@ import { findRuntimeBinary } from './runtimeProbe';
 import { runtimeChildEnv, verifyReleaseHead } from './releaseHead';
 import { UpdateCheck } from './types';
 
-export const UPDATE_CURRENT_LINE = 'Installed release is up to date.';
-export const UPDATE_AVAILABLE_LINE = 'Run `elastos update` to install.';
 export const UPDATE_CANCELLED_LINE = 'Update cancelled.';
+export const UPDATE_STATUS_UNREADABLE = 'ElastOS update status is not readable.';
+
+const UPDATE_CHECK_SCHEMA = 'elastos.update-check/v1';
 
 export interface RuntimeCommandResult {
   code: number;
@@ -29,23 +30,32 @@ export interface ParsedUpdateCheck {
   latest: string | null;
 }
 
-/** `update --check` exits 0 both when current and when a newer release exists. */
-export function parseUpdateCheck(stdout: string): ParsedUpdateCheck {
-  const latest = parseLatestVersion(stdout);
-  if (stdout.includes(UPDATE_CURRENT_LINE)) {
-    return { updateAvailable: false, detail: UPDATE_CURRENT_LINE, latest };
+export function parseUpdateCheckStatus(raw: string): ParsedUpdateCheck {
+  let value: unknown;
+  try {
+    value = JSON.parse(raw);
+  } catch {
+    throw new Error(UPDATE_STATUS_UNREADABLE);
   }
-  if (stdout.includes(UPDATE_AVAILABLE_LINE) || stdout.includes('Run elastos update to install.')) {
-    return { updateAvailable: true, detail: UPDATE_AVAILABLE_LINE, latest };
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error(UPDATE_STATUS_UNREADABLE);
   }
-  return { updateAvailable: false, detail: stdout.trim() || 'No update information.', latest };
-}
-
-export function parseLatestVersion(stdout: string): string | null {
-  const line = stdout.split(/\r?\n/).find((item) => item.includes('Latest available:'));
-  if (!line) return null;
-  const value = line.split(':').slice(1).join(':').trim();
-  return value || null;
+  const record = value as Record<string, unknown>;
+  const outcome = record.outcome;
+  if (record.schema !== UPDATE_CHECK_SCHEMA
+    || (outcome !== 'up_to_date' && outcome !== 'update_available' && outcome !== 'installed_newer')
+    || typeof record.current_version !== 'string'
+    || typeof record.latest_version !== 'string'
+    || typeof record.offered !== 'boolean') {
+    throw new Error(UPDATE_STATUS_UNREADABLE);
+  }
+  const updateAvailable = outcome === 'update_available' && record.offered === true;
+  const latest = record.latest_version.trim() ? record.latest_version : null;
+  return {
+    updateAvailable,
+    detail: updateAvailable ? record.latest_version : record.current_version,
+    latest,
+  };
 }
 
 export function parseHeadCid(stdout: string): string | null {
@@ -80,12 +90,21 @@ export async function verifiedHeadForRollback(candidate: string, verify: HeadVer
   return verified.headCid;
 }
 
-export async function checkRuntimeUpdate(run: RuntimeCommand): Promise<ParsedUpdateCheck> {
+export async function checkRuntimeUpdate(
+  run: RuntimeCommand,
+  readStatus: () => string,
+): Promise<ParsedUpdateCheck> {
   const result = await run(['update', '--check']);
   if (result.code !== 0) {
     throw new Error(result.stderr.trim() || result.stdout.trim() || 'Could not check for an ElastOS update.');
   }
-  return parseUpdateCheck(result.stdout);
+  let raw: string;
+  try {
+    raw = readStatus();
+  } catch {
+    throw new Error(UPDATE_STATUS_UNREADABLE);
+  }
+  return parseUpdateCheckStatus(raw);
 }
 
 export async function applyRuntimeUpdate(
