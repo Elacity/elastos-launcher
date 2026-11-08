@@ -7,6 +7,7 @@ import { findRuntimeBinary } from './runtimeProbe';
 import { runtimeChildEnv, verifyReleaseHead } from './releaseHead';
 import { UpdateCheck } from './types';
 import { ActiveRuntimePin } from './runtimePin';
+import { removeVerifiedTarget } from './runtimeUninstall';
 import { channelGateway, pinMismatchField, PinMismatchError, versionAtLeast, installedVersionMatches } from './runtimeInstall';
 
 export const UPDATE_CANCELLED_LINE = 'Update cancelled.';
@@ -150,7 +151,7 @@ export function launcherUpdateStatusStore(homeDir: string): { read(): string; wr
         fs.writeFileSync(temporary, raw, { flag: 'wx', mode: 0o600 });
         fs.renameSync(temporary, file);
       } finally {
-        if (fs.existsSync(temporary)) fs.unlinkSync(temporary);
+        if (fs.existsSync(temporary)) removeVerifiedTarget(temporary);
       }
     },
   };

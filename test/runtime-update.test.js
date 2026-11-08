@@ -329,6 +329,25 @@ test('concurrent signed checks atomically write only the launcher data directory
   assert.deepEqual(fs.readdirSync(path.join(home, '.elastos-launcher')), ['update-check.json']);
 });
 
+test('a failed atomic rename keeps the old launcher record and cleans only its own temporary file', (t) => {
+  const fs = require('node:fs');
+  const os = require('node:os');
+  const path = require('node:path');
+  const { launcherUpdateStatusStore } = require('../dist/main/targets/runtimeUpdate');
+  const home = fs.mkdtempSync(path.join(fs.realpathSync(os.homedir()), 'update-failed-'));
+  const store = launcherUpdateStatusStore(home);
+  store.write('old record');
+  const rename = fs.renameSync;
+  let first = true;
+  t.mock.method(fs, 'renameSync', (...args) => {
+    if (first) { first = false; throw new Error('rename refused'); }
+    return rename(...args);
+  });
+  assert.throws(() => store.write('new record'), /rename refused/);
+  assert.equal(store.read(), 'old record');
+  assert.deepEqual(fs.readdirSync(path.join(home, '.elastos-launcher')), ['update-check.json']);
+});
+
 for (const platform of ['darwin', 'linux', 'win32']) {
   test(`${platform} checks use the launcher store and preserve a Runtime refusal`, async (t) => {
     const fs = require('node:fs');
