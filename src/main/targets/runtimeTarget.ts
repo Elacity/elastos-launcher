@@ -61,8 +61,10 @@ export function createRuntimeTarget(platform: NodeJS.Platform = process.platform
     isInstalled: () => runtimeIsInstalled(),
     getStatus: async () => {
       if (updating) return 'starting';
+      const observedSupervisor = supervisor;
+      const observedPhase = supervisor?.phase();
       if (supervisor) {
-        const phase = supervisor.phase();
+        const phase = observedPhase;
         if (phase === 'starting' || phase === 'stopping' || phase === 'error'
           || (phase === 'running' && platform !== 'darwin')) {
           return phase;
@@ -74,12 +76,20 @@ export function createRuntimeTarget(platform: NodeJS.Platform = process.platform
         return 'stopped';
       }
       if (runtimeInstallBlock(platform, process.arch)) return 'not-installed';
-      if (!(await runtimeIsInstalled())) return 'not-installed';
-      if (isHealthOk(await readHealth())) {
-        if (platform === 'darwin' && !(await confirmInstalledGateway())) throw new Error('Another program is answering on port 8090. Home was not adopted.');
-        return 'running';
+      const installed = await runtimeIsInstalled();
+      if (updating) return 'starting';
+      if (!installed) return 'not-installed';
+      const health = await readHealth();
+      if (platform === 'darwin') {
+        const foreign = isHealthOk(health) && !(await confirmInstalledGateway());
+        // A control action can finish while version, health and socket probes
+        // are in flight. Its new phase supersedes those earlier observations.
+        const latestPhase = supervisor?.phase();
+        if (updating) return 'starting';
+        if (supervisor !== observedSupervisor || latestPhase !== observedPhase) return latestPhase ?? 'stopped';
+        if (foreign) throw new Error('Another program is answering on port 8090. Home was not adopted.');
       }
-      return 'stopped';
+      return isHealthOk(health) ? 'running' : 'stopped';
     },
     start: async () => {
       if (platform === 'win32') {

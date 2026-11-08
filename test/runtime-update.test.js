@@ -245,3 +245,25 @@ test('a 2.0.0 source with unknown head uses the stored signed record and matchin
   record = fixture.SIGNED_HEAD.replace('2.0.0', '9.9.9');
   await assert.rejects(() => applyRuntimeUpdate(run, store, verify), /signature/);
 });
+
+test('a Mac status query overlapping Stop preserves the completed stop transition', async (t) => {
+  const fs = require('node:fs');
+  const gateway = require('../dist/main/targets/runtimeGateway');
+  const probe = require('../dist/main/targets/runtimeProbe');
+  const support = require('../dist/main/targets/runtimeSupport');
+  const { createRuntimeTarget } = require('../dist/main/targets/runtimeTarget');
+  let phase = 'stopped';
+  t.mock.method(support, 'runtimeInstallBlock', () => null);
+  t.mock.method(probe, 'findRuntimeBinary', () => '/installed/elastos');
+  t.mock.method(probe, 'probeRuntimeInstallation', async () => ({ kind: 'version', version: 'ElastOS Runtime v2.0.0' }));
+  const stat = fs.statSync;
+  t.mock.method(fs, 'statSync', (...args) => String(args[0]).endsWith('components.json') ? { isFile: () => true } : stat(...args));
+  t.mock.method(gateway, 'createDefaultGatewaySupervisor', () => ({
+    start: async () => { phase = 'running'; }, phase: () => phase,
+  }));
+  t.mock.method(gateway, 'probeGatewayHealth', async () => ({ status: 200, body: 'OK' }));
+  t.mock.method(gateway, 'confirmInstalledGateway', async () => { phase = 'stopped'; return false; });
+  const target = createRuntimeTarget('darwin');
+  await target.start();
+  assert.equal(await target.getStatus(), 'stopped');
+});
