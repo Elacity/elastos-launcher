@@ -65,6 +65,12 @@ async function main() {
       window.webContents.send = (channel, ...args) => send(channel,
         ...(channel === 'elastos:status' ? ['stopped'] : args));
       window.setPosition(100, 100);
+      // Hosted Macs clamp the requested 860px window to their shorter display.
+      // Fit the intended CSS viewport on that display; native coordinates below
+      // use the measured zoom, and Logs calibrates the OS click translation.
+      const bounds = window.getContentBounds();
+      window.webContents.setZoomFactor(Math.min(1, bounds.height / 860));
+      console.log(`Dialog viewport: native=${JSON.stringify(bounds)} zoom=${window.webContents.getZoomFactor()}`);
       window.show(); window.focus(); app.focus({ steal: true });
     });
     await page.reload();
@@ -117,8 +123,11 @@ async function main() {
       const center = await page.locator(selector).evaluate((el) => {
         const r = el.getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
       });
-      const bounds = await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].getContentBounds());
-      const result = spawnSync(clickHelper, [String(bounds.x + center.x), String(bounds.y + center.y)], { encoding: 'utf8', timeout: 5000 });
+      const { bounds, zoom } = await app.evaluate(({ BrowserWindow }) => {
+        const window = BrowserWindow.getAllWindows()[0];
+        return { bounds: window.getContentBounds(), zoom: window.webContents.getZoomFactor() };
+      });
+      const result = spawnSync(clickHelper, [String(bounds.x + center.x * zoom), String(bounds.y + center.y * zoom)], { encoding: 'utf8', timeout: 5000 });
       assert.equal(result.status, 0, result.stderr);
       await page.waitForTimeout(300);
     }
