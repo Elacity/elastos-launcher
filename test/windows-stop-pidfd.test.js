@@ -10,6 +10,7 @@ const { createGatewaySupervisor } = require('../dist/main/targets/runtimeGateway
 
 const STOP_HELPER = windowsRuntime.STOP_HELPER;
 const FACTS_HELPER = windowsRuntime.FACTS_HELPER;
+const { factsAreElastos } = windowsRuntime;
 const { appendCappedOutput, WSL_OUTPUT_MAX } = windowsRuntime;
 const HOME_UNCONFIRMED_MESSAGE = windowsRuntime.HOME_UNCONFIRMED_MESSAGE || 'Home could not be confirmed';
 
@@ -399,6 +400,79 @@ test('facts helper keeps a small lock and drops an oversized or linked lock', ()
     assert.equal(JSON.parse(linked.stdout).lock, null);
   } finally {
     removeTemp(root);
+  }
+});
+
+const TCP_HEADER = '  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode';
+const TCP6_HEADER = '  sl  local_address                         remote_address                        st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode';
+
+function listenV4(inode) {
+  return `   0: 0100007F:1F9A 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 ${inode} 1 0000000000000000 100 0 0 10 0`;
+}
+
+function listenV6(inode) {
+  return `   0: 00000000000000000000000001000000:1F9A 00000000000000000000000000000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 ${inode} 1 0000000000000000 100 0 0 10 0`;
+}
+
+function writeFactsRoot(prefix, options = {}) {
+  const root = makeTemp(prefix);
+  const pid = 42;
+  const proc = path.join(root, 'proc', String(pid));
+  const fdDir = path.join(proc, 'fd');
+  fs.mkdirSync(fdDir, { recursive: true });
+  const tcp = [TCP_HEADER, listenV4('4242')].join('\n');
+  const tcp6 = [TCP6_HEADER, listenV6('4343')].join('\n');
+  const marker = options.marker || '';
+  const tcpBody = marker ? `${tcp}\n${marker}\n` : `${tcp}\n`;
+  if (options.linkNet) {
+    const outside = path.join(root, 'outside');
+    fs.mkdirSync(outside);
+    fs.writeFileSync(path.join(outside, 'tcp'), tcpBody);
+    fs.writeFileSync(path.join(outside, 'tcp6'), `${tcp6}\n`);
+    fs.symlinkSync(outside, path.join(proc, 'net'));
+  } else {
+    const net = path.join(proc, 'net');
+    fs.mkdirSync(net);
+    fs.writeFileSync(path.join(net, 'tcp'), tcpBody);
+    fs.writeFileSync(path.join(net, 'tcp6'), `${tcp6}\n`);
+  }
+  for (const [index, target] of (options.links || ['socket:[4242]', 'socket:[4343]']).entries()) {
+    fs.symlinkSync(target, path.join(fdDir, String(index + 3)));
+  }
+  fs.writeFileSync(path.join(proc, 'cmdline'), '/root/.local/bin/elastos\x00gateway\x00--addr\x00localhost:8090\x00');
+  fs.symlinkSync(String(pid), path.join(root, 'proc', 'self'));
+  fs.symlinkSync('self/net', path.join(root, 'proc', 'net'));
+  const lockDir = path.join(root, 'root', '.local', 'share', 'elastos');
+  fs.mkdirSync(lockDir, { recursive: true });
+  fs.writeFileSync(path.join(lockDir, 'host-process.lock'), JSON.stringify({
+    pid, role: 'gateway', addr: 'localhost:8090',
+  }));
+  return root;
+}
+
+test('facts helper reads the lock pid socket table when /proc/net is a symlink', () => {
+  python();
+  const ownedRoot = writeFactsRoot('elastos-facts-owned-');
+  const foreignRoot = writeFactsRoot('elastos-facts-foreign-', { links: ['socket:[9999]'] });
+  const linkedRoot = writeFactsRoot('elastos-facts-linked-net-', { linkNet: true, marker: 'OUTSIDE-MARKER' });
+  try {
+    const owned = runFacts(ownedRoot);
+    assert.equal(owned.status, 0, owned.stderr);
+    assert.equal(factsAreElastos(owned.stdout), true);
+    assert.equal(owned.stdout.includes('OUTSIDE-MARKER'), false);
+
+    const foreign = runFacts(foreignRoot);
+    assert.equal(foreign.status, 0, foreign.stderr);
+    assert.equal(factsAreElastos(foreign.stdout), false);
+
+    const linked = runFacts(linkedRoot);
+    assert.equal(linked.status, 0, linked.stderr);
+    assert.equal(factsAreElastos(linked.stdout), false);
+    assert.equal(linked.stdout.includes('OUTSIDE-MARKER'), false);
+  } finally {
+    removeTemp(ownedRoot);
+    removeTemp(foreignRoot);
+    removeTemp(linkedRoot);
   }
 });
 
