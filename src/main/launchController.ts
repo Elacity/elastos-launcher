@@ -164,6 +164,7 @@ export function createLaunchController(options: LaunchControllerOptions = {}): L
     env: options.env,
   });
   const active = createLaunchTarget(id);
+  let shuttingDown = false;
   let lastError = '';
   const statusListeners: Array<(status: TargetStatus) => void> = [];
   const logListeners: Array<(line: string) => void> = [];
@@ -197,6 +198,10 @@ export function createLaunchController(options: LaunchControllerOptions = {}): L
       emitStatus('error');
       throw err;
     }
+  }
+
+  function runWhileActive(action: () => Promise<void>): Promise<void> {
+    return shuttingDown ? Promise.resolve() : runRuntime(action, true);
   }
 
   function runRuntimeSync<T>(action: () => T, clearsError = false): T {
@@ -272,11 +277,11 @@ export function createLaunchController(options: LaunchControllerOptions = {}): L
       actionListeners.push(listener);
     },
     getStatus: () => currentStatus(),
-    start: () => runRuntime(() => active.start(), true),
+    start: () => runWhileActive(() => active.start()),
     stop: () => runRuntime(() => active.stop(), true),
-    restart: () => runRuntime(() => active.restart(), true),
+    restart: () => runWhileActive(() => active.restart()),
     install: (onProgress) => runRuntime(() => active.install(onProgress), true),
-    update: (onProgress) => runRuntime(() => active.update(onProgress), true),
+    update: (onProgress) => runWhileActive(() => active.update(onProgress)),
     // Windows preserves the Home in place, or exports and removes its environment after a second question.
     uninstall: (confirmRemoval, deleteData = false) => runRuntime<UninstallResult | void>(() => (process.platform === 'win32'
       ? (deleteData ? uninstallRuntimeInDistroOnThisComputer(() => active.stopForRemoval(), confirmRemoval ?? (async () => false)) : uninstallDistroProgramOnThisComputer(() => active.stopForRemoval()))
@@ -288,7 +293,7 @@ export function createLaunchController(options: LaunchControllerOptions = {}): L
     describeResetBackup: () => (process.platform === 'win32'
       ? describeDistroBackupOnThisComputer()
       : describeRuntimeBackupOnThisComputer()),
-    rollback: (onProgress) => runRuntime(() => active.rollback(onProgress), true),
+    rollback: (onProgress) => runWhileActive(() => active.rollback(onProgress)),
     getVersion: () => active.getVersion(),
     checkForUpdate: () => active.checkForUpdate(),
     openInBrowser: () => {
@@ -358,6 +363,8 @@ export function createLaunchController(options: LaunchControllerOptions = {}): L
       return readOpenAtLogin();
     },
     async shutdown() {
+      // Shutdown ends this controller's lifetime, even if stopping fails.
+      shuttingDown = true;
       try {
         await active.stop();
       } catch (err) {

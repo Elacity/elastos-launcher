@@ -1,6 +1,7 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
 const { mainFixture, tick } = require('./main-fixture');
+const { controllerFixture } = require('./controller-fixture');
 const statuses = ['running', 'stopped', 'starting', 'stopping', 'error', 'not-installed', 'other-home'];
 const labels = {
   running: 'Home is running', stopped: 'Home is stopped', starting: 'Home is starting',
@@ -56,10 +57,22 @@ test('real menu obeys the state table for every legal event ordering through dep
   let sequences = 0, steps = 0;
   const failures = new Map();
   for (const history of histories()) {
-    const f = await mainFixture({ status: 'running', ...(process.env.ELASTOS_MENU_ENTRY ? { entry: process.env.ELASTOS_MENU_ENTRY } : {}) });
+    const { launch, runtime } = controllerFixture();
+    const f = await mainFixture({ controller: launch, ...(process.env.ELASTOS_MENU_ENTRY ? { entry: process.env.ELASTOS_MENU_ENTRY } : {}) });
     let model = initial, observed = 'running', action, read, pending;
-    f.launch.getStatus = async () => observed;
-    f.launch.shutdown = async () => {}; // No host processes, including Quit.
+    let quitCallIndex;
+    f.launch.target.getStatus = async () => observed;
+    function checkLifetime(context) {
+      function check(name, fn) {
+        try { fn(); } catch (error) { if (!failures.has(name)) failures.set(name, `${context}: ${error.message}`); }
+      }
+      check('(f) after Quit no start reaches Runtime', () => {
+        if (model.quit) assert.equal(runtime.calls.slice(quitCallIndex).includes('start'), false);
+      });
+      check('(g) after app quit its Home stays stopped', () => {
+        if (f.calls.includes('quit')) assert.equal(runtime.running, false);
+      });
+    }
     async function armRead() {
       if (read || model.flight || model.quit) return;
       read = defer();
@@ -76,18 +89,17 @@ test('real menu obeys the state table for every legal event ordering through dep
       try {
         if (event in verbs) {
           action = defer();
+          runtime.wait = {};
           if (event === 'start' || event === 'stop') {
-            f.launch[event] = () => action.promise;
+            runtime.wait[event] = () => action.promise;
             await f.click(event === 'start' ? 'Start Home' : 'Stop Home');
           } else if (event === 'update') {
-            f.launch.update = () => action.promise;
-            // The post-update health check should not introduce a second deferred action.
-            f.launch.start = async () => {};
+            runtime.wait.update = () => action.promise;
             await f.click('Update to 2.0.1…');
             pending = f.invoke('update');
           } else if (event === 'open') {
             const normal = f.launch.getStatus;
-            f.launch.getStatus = () => action.promise.then(() => 'running');
+            f.launch.getStatus = () => action.promise.then(() => 'stopped');
             await f.click('Open Home');
             f.launch.getStatus = normal;
           } else {
@@ -105,7 +117,10 @@ test('real menu obeys the state table for every legal event ordering through dep
           else read.resolve(status);
           observed = model.observed;
           read = null;
-        } else f.app.emit('before-quit', { preventDefault() {} });
+        } else {
+          quitCallIndex = runtime.calls.length;
+          f.app.emit('before-quit', { preventDefault() {} });
+        }
       } catch (error) {
         failures.set('event dispatch', `${history.slice(0, index + 1).join(' > ')}: ${error.message}`);
         break;
@@ -132,6 +147,7 @@ test('real menu obeys the state table for every legal event ordering through dep
       check('successful action and read show observation', () => {
         if (!model.quit && !model.flight && !model.failure) assert.equal(label, labels[model.observed]);
       });
+      checkLifetime(context);
       steps++;
       await armRead();
     }
@@ -140,6 +156,8 @@ test('real menu obeys the state table for every legal event ordering through dep
     action?.resolve();
     await tick(); await tick();
     if (pending) await pending;
+    await tick(); await tick();
+    checkLifetime(`${history.join(' > ')} > drain`);
     sequences++;
   }
   t.diagnostic(`${sequences} histories, ${steps} checked steps, depth 4, ${failures.size} failed invariants`);
