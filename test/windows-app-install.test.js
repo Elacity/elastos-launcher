@@ -21,6 +21,7 @@ const {
   DISTRO_INSTALL_DIR,
   DISTRO_SETUP_FAILED,
   ensureElastosDistro,
+  installRuntimeInsideDistro,
   factsAreElastos,
   readDistroLockPid,
   signalDistroGateway,
@@ -28,7 +29,7 @@ const {
   wslSpawnEnv,
 } = require('../dist/main/targets/windowsRuntime');
 const { createGatewaySupervisor } = require('../dist/main/targets/runtimeGateway');
-const { importDistroArgs } = require('../dist/main/targets/windowsHost');
+const { applyWindowsFix, importDistroArgs } = require('../dist/main/targets/windowsHost');
 const { INSTALLER_ENV_NAMES } = require('../dist/main/targets/releaseHead');
 
 const HEAD = 'QmXuy56RTFzXaifTuyCbMb6Ky1p5wuM9iP8eFbMghHxWij';
@@ -174,6 +175,61 @@ test('ensuring the distro imports the pinned rootfs and hides command failures',
     assert.equal(/bash|true/.test(err.message), false);
     return true;
   });
+});
+
+const STOPPED_DISTRO = '  NAME      STATE           VERSION\n* ElastOS    Stopped         2\n';
+
+function importedDistroHost(runInDistro, extra = {}) {
+  return {
+    lookupWsl: async () => true,
+    listDistros: async () => STOPPED_DISTRO,
+    ensureRootfs: async () => { throw new Error('Install must not download the rootfs'); },
+    importDistro: async () => { throw new Error('Install must not import again'); },
+    runInDistro,
+    ...extra,
+  };
+}
+
+test('Install waits for first boot after Set up imported the distro', async () => {
+  const setup = [];
+  await applyWindowsFix(
+    { platform: 'win32', arch: 'x64', wslInstalled: true, distroReady: false },
+    {
+      spawnHidden: async (file, args) => {
+        setup.push([file, ...args]);
+        return { code: 0, stdout: '', stderr: '' };
+      },
+      ensureRootfs: async () => 'C:\\ElastOS\\ubuntu-noble-wsl.rootfs.tar.gz',
+      prepareImportDir() {},
+    },
+  );
+  assert.equal(setup.some((row) => row.includes('--import')), true);
+  assert.equal(setup.some((row) => row.includes('-d')), false);
+
+  const commands = [];
+  await installRuntimeInsideDistro(() => {}, importedDistroHost(
+    async (args, timeoutMs) => {
+      commands.push({ args: [...args], timeoutMs });
+      return { code: 0, stdout: '', stderr: '' };
+    },
+    { continueInstall: async () => { commands.push({ args: ['install-runtime'], timeoutMs: 0 }); } },
+  ));
+  assert.deepEqual(commands[0], { args: ['true'], timeoutMs: 3 * 60 * 1000 });
+  assert.match(commands[1].args.join(' '), /command -v python3/);
+  assert.equal(commands[1].timeoutMs, 20000);
+  assert.deepEqual(commands[2], { args: ['install-runtime'], timeoutMs: 0 });
+});
+
+test('Install stops when first boot of an imported distro does not finish', async () => {
+  let continued = false;
+  await assert.rejects(() => installRuntimeInsideDistro(() => {}, importedDistroHost(
+    async () => { throw new Error('timed out'); },
+    { continueInstall: async () => { continued = true; } },
+  )), (err) => {
+    assert.equal(err.message, DISTRO_SETUP_FAILED);
+    return true;
+  });
+  assert.equal(continued, false);
 });
 
 test('the distro gateway identity uses the lock pid socket and a positive wsl pid', () => {

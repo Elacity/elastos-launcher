@@ -416,11 +416,22 @@ function distroInstallDeps(): RuntimeInstallDeps {
 
 export async function installRuntimeInsideDistro(
   onProgress: (message: string) => void = () => {},
+  // Tests pass host so this function can run without wsl.exe. Production omits it.
+  host: {
+    lookupWsl?: () => Promise<boolean>;
+    listDistros?: () => Promise<string>;
+    ensureRootfs?: () => Promise<string>;
+    importDistro?: (installDir: string, rootfs: string) => Promise<number>;
+    prepareImportDir?: (dir: string) => void;
+    runInDistro?: (args: readonly string[], timeoutMs: number) => Promise<WslResult>;
+    continueInstall?: (onProgress: (message: string) => void) => Promise<void>;
+  } = {},
 ): Promise<void> {
+  const run = host.runInDistro ?? ((args: readonly string[], timeoutMs: number) => runWsl(args, timeoutMs));
   await ensureElastosDistro({
-    lookupWsl: () => lookupCommand('wsl.exe'),
-    listDistros,
-    ensureRootfs: () => ensureElastosRootfs({
+    lookupWsl: host.lookupWsl ?? (() => lookupCommand('wsl.exe')),
+    listDistros: host.listDistros ?? listDistros,
+    ensureRootfs: host.ensureRootfs ?? (() => ensureElastosRootfs({
       dest: path.join(os.homedir(), '.elastos-launcher', 'ubuntu-noble-wsl.rootfs.tar.gz'),
       exists: (file) => {
         try { return fs.statSync(file).isFile(); } catch { return false; }
@@ -428,12 +439,18 @@ export async function installRuntimeInsideDistro(
       download: downloadPinnedRootfs,
       read: (file) => fs.readFileSync(file),
       accept: assertPinnedRootfs,
-    }),
-    importDistro: (installDir, rootfs) => runHost(importDistroArgs(installDir, rootfs), 10 * 60 * 1000),
-    hasTools: async () => (await runWsl(distroToolCheckArgs(), 20000)).code === 0,
-    installTools: async () => (await runWsl(distroPackageArgs(), 10 * 60 * 1000)).code,
+    })),
+    importDistro: host.importDistro ?? ((installDir, rootfs) => runHost(importDistroArgs(installDir, rootfs), 10 * 60 * 1000)),
+    prepareImportDir: host.prepareImportDir,
+    runInDistro: run,
+    hasTools: async () => (await run(distroToolCheckArgs(), 20000)).code === 0,
+    installTools: async () => (await run(distroPackageArgs(), 10 * 60 * 1000)).code,
     onProgress,
   });
+  if (host.continueInstall) {
+    await host.continueInstall(onProgress);
+    return;
+  }
   await installRuntime(distroInstallDeps(), onProgress);
 }
 
