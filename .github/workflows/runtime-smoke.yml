@@ -1,6 +1,6 @@
 name: Runtime smoke
 
-# Linux x64, macOS arm64, and the ElastOS WSL2 distro are required.
+# Linux x64, Linux arm64, macOS arm64, and the ElastOS WSL2 distro are required.
 # A red run fails the pull request. Each job verifies the selected channel
 # against the maintainer DID and rollback floor. Failed verification means
 # install stops. The job then checks gateway /healthz and
@@ -21,6 +21,8 @@ jobs:
             platform: linux-x64
           - os: macos-14
             platform: darwin-arm64
+          - os: ubuntu-22.04-arm
+            platform: linux-arm64
     runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout code
@@ -54,15 +56,20 @@ jobs:
 
   electron-e2e:
     name: e2e (${{ matrix.platform }})
-    timeout-minutes: 40
+    timeout-minutes: 50
     strategy:
       fail-fast: false
       matrix:
         include:
           - os: ubuntu-24.04
             platform: linux-x64
+            packages: xvfb libnss3 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 libgbm1 libasound2t64 libgtk-3-0t64 libxss1
+          - os: ubuntu-22.04-arm
+            platform: linux-arm64
+            packages: xvfb libnss3 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 libgbm1 libasound2 libgtk-3-0 libxss1 libayatana-appindicator3-1
           - os: macos-14
             platform: darwin-arm64
+            packages: ""
     runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout code
@@ -78,7 +85,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y xvfb libnss3 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 libgbm1 libasound2t64 libgtk-3-0t64 libxss1
+          sudo apt-get install -y ${{ matrix.packages }}
 
       - name: Install dependencies
         env:

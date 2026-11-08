@@ -102,6 +102,7 @@ test('sign-in launch writes a desktop file and can remove it', () => {
   };
   const written = syncLinuxAutostart(true, '/home/tester', '/usr/bin/elastos', fs);
   assert.match(files.get(written), /Name=ElastOS/);
+  assert.match(files.get(written), /X-GNOME-Autostart-enabled=true/);
   assert.match(linuxAutostartFile('/usr/bin/elastos'), /Exec=\/usr\/bin\/elastos/);
   assert.equal(syncLinuxAutostart(false, '/home/tester', '/usr/bin/elastos', fs), null);
   assert.equal(files.size, 0);

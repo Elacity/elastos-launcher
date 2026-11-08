@@ -96,6 +96,7 @@ function createTray(): void {
   }
 
   tray = new Tray(icon.resize({ width: 16, height: 16 }));
+  (global as typeof globalThis & { __elastosTray?: true }).__elastosTray = true;
   tray.setToolTip('ElastOS');
   updateTrayMenu();
 
