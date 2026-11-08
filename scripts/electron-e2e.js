@@ -137,18 +137,20 @@ async function main() {
 
   try {
     const page = await electronApp.firstWindow();
-    if (process.platform === 'darwin') {
-      await electronApp.evaluate(({ shell }) => {
-        global.__installBrowserCalls = [];
-        shell.openExternal = async (url) => { global.__installBrowserCalls.push(url); };
-      });
-    }
     const readyDeadline = Date.now() + 60000;
     let clicked = '';
     while (Date.now() < readyDeadline && !clicked) {
       const label = (await page.locator('#open-label').innerText({ timeout: 5000 })).trim();
       const disabled = await page.locator('#open-btn').isDisabled();
       if (label === 'Install' && !disabled) {
+        // firstWindow can precede startup navigation. Instrument only after
+        // the real Install screen is ready, before its first control action.
+        if (process.platform === 'darwin') {
+          await electronApp.evaluate(({ shell }) => {
+            global.__installBrowserCalls = [];
+            shell.openExternal = async (url) => { global.__installBrowserCalls.push(url); };
+          });
+        }
         await page.click('#open-btn');
         clicked = label;
         break;
