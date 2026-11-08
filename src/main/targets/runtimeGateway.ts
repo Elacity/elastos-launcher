@@ -362,6 +362,19 @@ export function createGatewaySupervisor(deps: GatewaySupervisorDeps): GatewaySup
     proc?.onExit((code) => recordExit(proc, code));
   }
 
+  async function findInstalled(): Promise<GatewayProcess | null> {
+    const attempts = deps.adoptForControls ? 3 : 1;
+    for (let attempt = 0; attempt < attempts; attempt++) {
+      const proc = await (deps.adoptInstalled?.() ?? null);
+      if (proc) return proc;
+      if (attempt + 1 < attempts) {
+        note('Checking Home ownership again.');
+        await deps.sleep(pollMs);
+      }
+    }
+    return null;
+  }
+
   async function launchOnce(): Promise<'ready' | 'replaced' | 'already'> {
     intentionalStop = false;
     foreign = false;
@@ -511,7 +524,7 @@ export function createGatewaySupervisor(deps: GatewaySupervisorDeps): GatewaySup
             // localhost, so stop it once and start it again here.
             legacyStopped = true;
             note('An older ElastOS is running on 127.0.0.1:8090. Starting it again on localhost:8090.');
-            const adopted = await (deps.adoptInstalled?.() ?? null);
+            const adopted = await findInstalled();
             if (!adopted) {
               current = 'error';
               throw new Error(LEGACY_STILL_RUNNING_MESSAGE);
@@ -538,7 +551,7 @@ export function createGatewaySupervisor(deps: GatewaySupervisorDeps): GatewaySup
           }
           foreign = true;
           intentionalStop = false;
-          ownAdopted(deps.adoptForControls ? await (deps.adoptInstalled?.() ?? null) : null);
+          ownAdopted(deps.adoptForControls ? await findInstalled() : null);
           current = 'running';
           deps.openUrl(HOME_URL);
           return 'already-running';
@@ -549,7 +562,7 @@ export function createGatewaySupervisor(deps: GatewaySupervisorDeps): GatewaySup
     },
     async stop(options?: { adopt?: boolean }) {
       if (deps.adoptForControls && isHealthOk(await deps.fetchHealth())) {
-        const installed = await (deps.adoptInstalled?.() ?? null);
+        const installed = await findInstalled();
         if (!installed) throw new ForeignGatewayError();
         ownAdopted(installed);
       }
@@ -557,7 +570,7 @@ export function createGatewaySupervisor(deps: GatewaySupervisorDeps): GatewaySup
         const health = await deps.fetchHealth();
         if (isHealthOk(health)) {
           const adopted = (options?.adopt || deps.adoptForControls)
-            ? await (deps.adoptInstalled?.() ?? null)
+            ? await findInstalled()
             : null;
           if (!adopted) throw new ForeignGatewayError();
           ownAdopted(adopted);
@@ -965,10 +978,16 @@ export async function adoptInstalledGatewayProcess(
   platform: string = process.platform, homeDir: string = os.homedir(),
 ): Promise<GatewayProcess | null> {
   if (platform === 'win32') return null;
+  const refused = (reason: string): null => {
+    logSink(`Home ownership check: ${reason}`);
+    return null;
+  };
   const { text, pid } = readHostLock(platform, homeDir);
+  if (pid <= 0) return refused('host-lock');
   const hostIdentity = platform === 'darwin' ? macProcessIdentity(pid) : null;
-  if (pid <= 0 || !(await hostLockGatewayKind(text, pid, platform, homeDir))) return null;
-  if (platform === 'darwin' && (!hostIdentity || !sameMacProcess(hostIdentity, macProcessIdentity(pid)))) return null;
+  if (platform === 'darwin' && !hostIdentity) return refused('native-host');
+  if (!(await hostLockGatewayKind(text, pid, platform, homeDir))) return refused('host-proof');
+  if (platform === 'darwin' && (!hostIdentity || !sameMacProcess(hostIdentity, macProcessIdentity(pid)))) return refused('host-changed');
   let stopPid = pid;
   let stopIdentity = hostIdentity;
   if (platform === 'darwin') {
@@ -991,10 +1010,10 @@ export async function adoptInstalledGatewayProcess(
         // A stale controller record grants no authority over that controller.
         // The independently proved host can still be stopped after a crash.
       } else if (fs.existsSync(path.join(data, 'update-controller', 'status.json'))) {
-        return null;
+        return refused('controller-status');
       }
     } catch {
-      return null;
+      return refused('controller-metadata');
     }
   }
   let timer: ReturnType<typeof setInterval> | undefined;

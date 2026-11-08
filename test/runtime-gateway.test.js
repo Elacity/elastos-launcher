@@ -913,12 +913,14 @@ test('Mac controls adopt a proved Home and re-read its generation after a System
 });
 
 test('Mac adoption refuses an unproved listener without sending any signal', async () => {
+  let attempts = 0;
   const sup = createGatewaySupervisor({
     binary: '/bin/elastos', adoptForControls: true,
     spawn() { throw new Error('must not spawn'); },
     fetchHealth: async () => ({ status: 200, body: 'OK' }),
-    adoptInstalled: async () => null,
+    adoptInstalled: async () => { attempts++; return null; },
     now: () => 0, sleep: async () => {}, openUrl() {}, log() {},
   });
   await assert.rejects(() => sup.stop(), ForeignGatewayError);
+  assert.equal(attempts, 3, 'unknown ownership is retried only a bounded number of times');
 });

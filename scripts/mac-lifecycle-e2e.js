@@ -36,6 +36,10 @@ async function status(page, wanted) {
       10000, `Window status did not become ${wanted}`);
   } catch (error) {
     console.log(`Status failure wanted=${wanted} last=${last} window=${await page.locator('#status-text').innerText()} error=${await page.locator('#error-text').innerText()}`);
+    const logs = await page.locator('#logs-content').innerText();
+    for (const match of logs.matchAll(/Home ownership check: (host-lock|native-host|host-proof|host-changed|controller-status|controller-metadata)\b/g)) {
+      console.log(match[0]);
+    }
     throw error;
   }
 }

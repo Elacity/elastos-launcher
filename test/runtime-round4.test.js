@@ -458,3 +458,23 @@ test('Mac adoption stops a proved orphaned host without signaling the stale cont
   proc.signal('SIGTERM');
   assert.deepEqual(w.signals, [[701, 'SIGTERM']]);
 });
+
+test('Mac Stop retries a transient ownership gap and signals only the fully proved process', async () => {
+  const proc = processFixture(941);
+  let healthy = true;
+  let attempts = 0;
+  let clock = 0;
+  const signals = [];
+  proc.signal = (signal) => { signals.push([proc.pid, signal]); proc.exit(0); healthy = false; };
+  const sup = gateway.createGatewaySupervisor({
+    binary: '/installed/elastos', adoptForControls: true,
+    spawn() { throw new Error('must not start'); },
+    adoptInstalled: async () => ++attempts === 1 ? null : proc,
+    fetchHealth: async () => healthy ? { status: 200, body: 'OK' } : null,
+    now: () => clock, sleep: async (ms) => { clock += ms; }, openUrl() {}, log() {},
+  });
+  await sup.stop();
+  assert.equal(attempts, 2);
+  assert.deepEqual(signals, [[941, 'SIGTERM']]);
+  assert.equal(sup.phase(), 'stopped');
+});
