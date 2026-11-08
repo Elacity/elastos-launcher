@@ -66,6 +66,17 @@ def note(event):
 
 atexit.register(dump)
 
+jump = os.environ.get('ELASTOS_STOP_JUMP') or ''
+if jump:
+    real_time = time.time
+    def jumped_time():
+        try:
+            os.lstat(jump)
+        except OSError:
+            return real_time()
+        return real_time() + 61
+    time.time = jumped_time
+
 def sig_name(value):
     for name in ('SIGTERM', 'SIGKILL'):
         number = getattr(signal, name, None)
@@ -229,6 +240,7 @@ function runSession(helper, options) {
   const channel = makeTemp('elastos-stop-chan-');
   const events = path.join(channel, 'events.json');
   const stderr = path.join(channel, 'stderr');
+  const jumpFile = options.jump ? path.join(root, 'jump') : '';
   const stat = writeHome(root, options.home || {});
   const errFd = fs.openSync(stderr, 'w');
   const child = spawn('python3', ['-c', `${PRELUDE}\n${helper}`, root, channel], {
@@ -238,6 +250,7 @@ function runSession(helper, options) {
       ELASTOS_STOP_EVENTS: events,
       ELASTOS_STOP_RACE: options.race || '',
       ELASTOS_STOP_STAT: stat,
+      ELASTOS_STOP_JUMP: jumpFile,
     },
   });
   fs.closeSync(errFd);
@@ -245,7 +258,12 @@ function runSession(helper, options) {
     const first = waitFile(path.join(channel, 'reply-0'), child, 3000);
     const replies = [first];
     if (first === 'ready') {
+      const pause = new Int32Array(new SharedArrayBuffer(4));
       (options.commands || []).forEach((command, index) => {
+        if (options.jump && index > 0) {
+          fs.writeFileSync(jumpFile, '1\n');
+          Atomics.wait(pause, 0, 0, 400);
+        }
         const seq = index + 1;
         const tmp = path.join(channel, `cmd-${seq}.tmp`);
         fs.writeFileSync(tmp, `${command}\n`);
@@ -325,6 +343,55 @@ test('a pid replaced between the check and the signal is not signaled', () => {
   assert.equal(result.replies[1], 'errno ESRCH', `${result.stderr} ${JSON.stringify(result.events)}`);
   assert.equal(result.events.filter((event) => event.api === 'pidfd_open').length, 1);
   assert.equal(result.events.some((event) => event.api === 'delivered' || event.api === 'kill'), false);
+});
+
+test('a KILL after the idle window uses the original pidfd', () => {
+  python();
+  const result = runSession(STOP_HELPER, { commands: ['TERM', 'KILL'], jump: true });
+  assert.equal(result.replies[0], 'ready', result.stderr);
+  assert.deepEqual(result.replies.slice(1), ['sent', 'sent'], result.stderr);
+  assert.equal(result.events.filter((event) => event.api === 'pidfd_open').length, 1);
+  assert.deepEqual(
+    result.events.filter((event) => event.api === 'delivered').map((event) => [event.fd, event.sig]),
+    [[42, 'SIGTERM'], [42, 'SIGKILL']],
+  );
+});
+
+test('the helper exits when its command channel is removed', async () => {
+  python();
+  const root = makeTemp('elastos-stop-root-');
+  const channel = makeTemp('elastos-stop-chan-');
+  const stat = writeHome(root);
+  const child = spawn('python3', ['-c', `${PRELUDE}\n${STOP_HELPER}`, root, channel], {
+    stdio: 'ignore',
+    env: {
+      ...process.env,
+      ELASTOS_STOP_EVENTS: path.join(channel, 'events.json'),
+      ELASTOS_STOP_RACE: '',
+      ELASTOS_STOP_STAT: stat,
+    },
+  });
+  const exited = new Promise((resolve) => {
+    child.once('exit', (code) => resolve(code));
+  });
+  try {
+    assert.equal(waitFile(path.join(channel, 'reply-0'), child, 3000), 'ready');
+    removeTemp(channel);
+    const code = await Promise.race([
+      exited,
+      new Promise((resolve) => { setTimeout(() => resolve('still-running'), 2000); }),
+    ]);
+    assert.equal(code, 0);
+  } finally {
+    if (child.exitCode === null && child.signalCode === null) {
+      try {
+        child.kill('SIGKILL');
+      } catch (err) {
+        if (!err || err.code !== 'ESRCH') throw err;
+      }
+    }
+    removeTemp(root);
+  }
 });
 
 test('the launcher session reuses the pidfd for escalation', () => {
