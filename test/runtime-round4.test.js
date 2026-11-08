@@ -395,3 +395,17 @@ test('Mac adoption uses the real executable even when argv0 names the installed 
     await exited;
   }
 });
+
+test('a refused Stop signal reports error and keeps the existing supervisor available for retry', async () => {
+  const proc = processFixture(901);
+  proc.signal = () => { throw new Error('process identity changed'); };
+  const sup = gateway.createGatewaySupervisor({
+    binary: '/installed/elastos', args: ['home', '--browser'], adoptForControls: true,
+    spawn() { throw new Error('must not start'); }, adoptInstalled: async () => proc,
+    fetchHealth: async () => ({ status: 200, body: 'OK' }),
+    now: () => 0, sleep: async () => {}, openUrl() {}, log() {},
+  });
+  await assert.rejects(() => sup.stop(), /identity changed/);
+  assert.equal(sup.phase(), 'error');
+  await assert.rejects(() => sup.stop(), /identity changed/);
+});

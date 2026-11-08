@@ -566,7 +566,14 @@ export function createGatewaySupervisor(deps: GatewaySupervisorDeps): GatewaySup
           return;
         }
       }
-      if (owned) await stopProcess(owned);
+      if (owned) {
+        try {
+          await stopProcess(owned);
+        } catch (err) {
+          current = 'error';
+          throw err;
+        }
+      }
     },
     forceKill() {
       if (!owned) return;
