@@ -35,7 +35,7 @@ export function linuxAutostartFile(execPath: string): string {
     '[Desktop Entry]',
     'Type=Application',
     'Name=ElastOS',
-    'Comment=Start ElastOS when I log in',
+    'Comment=Start ElastOS when you log in to this computer',
     `Exec=${desktopExecValue(execPath)} --login`,
     'X-GNOME-Autostart-enabled=true',
     '',
