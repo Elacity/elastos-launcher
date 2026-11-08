@@ -197,3 +197,28 @@ test('Mac Update stops Home, runs the update and starts the current binary even 
   await assert.rejects(() => target.update(), /update failed/);
   assert.deepEqual(calls, ['stop', 'update', 'start-current-binary']);
 });
+
+test('Runtime 2.0.0 gets the #61 status record only after a successful check and signed head verification', async () => {
+  const fixture = require('./helpers/signed-release');
+  const { writeSignedUpdateCheck } = require('../dist/main/targets/runtimeUpdate');
+  const pin = { channel: 'stable', version: '2.0.0', headCid: null, publishable: true,
+    maintainerDid: fixture.FIXTURE_DID, publisherGateway: 'https://publisher.example' };
+  let raw;
+  const bridge = (head) => writeSignedUpdateCheck('ElastOS Runtime v2.0.0', pin,
+    async () => head, (value) => { raw = value; });
+  const result = await checkRuntimeUpdate(async () => ({ code: 0, stdout: 'update available 9.9.9', stderr: '' }),
+    () => raw, () => bridge(fixture.SIGNED_HEAD));
+  assert.equal(result.updateAvailable, false);
+  assert.equal(JSON.parse(raw).outcome, 'up_to_date');
+  await bridge(fixture.signedHead({ version: '2.0.1' }));
+  assert.equal(JSON.parse(raw).offered, true);
+  assert.equal(JSON.parse(raw).latest_version, '2.0.1');
+  raw = undefined;
+  await assert.rejects(() => bridge(fixture.SIGNED_HEAD.replace('2.0.0', '9.9.9')), /signature/);
+  assert.equal(raw, undefined);
+  await assert.rejects(() => bridge(fixture.signedHead({ version: '1.9.9' })), /version/);
+  await assert.rejects(() => bridge(fixture.signedHead({ channel: 'canary' })), /channel/);
+  await assert.rejects(() => checkRuntimeUpdate(async () => ({ code: 1, stdout: '', stderr: 'network failed' }),
+    () => raw, () => bridge(fixture.SIGNED_HEAD)), /network failed/);
+  assert.equal(raw, undefined);
+});

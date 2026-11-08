@@ -39,6 +39,11 @@ test('a missing runtime does not start', async (t) => {
   assert.equal(target.getVersion(), 'not installed');
 });
 
+test('the unit test runner cannot discover a host ElastOS installation', () => {
+  const { findRuntimeBinary } = require('../dist/main/targets/runtimeProbe');
+  assert.equal(findRuntimeBinary(require('node:os').homedir(), process.env.PATH ?? ''), null);
+});
+
 test('unknown target ids fail closed', () => {
   assert.throws(() => parseLaunchTargetId('serve'), /Unknown launch target/);
   assert.throws(() => currentLaunchTargetId({ [LAUNCH_TARGET_ENV]: 'gateway' }), /Unknown launch target/);

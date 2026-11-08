@@ -563,7 +563,7 @@ async function init() {
   } catch (err) {
     console.error('Init error:', err);
     updateStatus('error');
-    showError('Could not read this computer. Quit ElastOS and open it again.');
+    showError(err && err.message ? err.message : 'Could not read this computer. Quit ElastOS and open it again.');
     return;
   }
   await maybeResumeInstall();
