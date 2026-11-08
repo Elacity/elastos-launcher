@@ -77,9 +77,11 @@ module.exports = async function (app, page, home, options) {
   const checked = await page.evaluate(() => window.elastos.checkForUpdate());
   assert.equal(checked.updateAvailable, false);
   const data = path.join(home, 'Library', 'Application Support', 'elastos');
-  const update = JSON.parse(fs.readFileSync(path.join(data, 'update-check.json'), 'utf8'));
+  const nativeUpdate = path.join(data, 'update-check.json');
+  const update = JSON.parse(fs.readFileSync(fs.existsSync(nativeUpdate) ? nativeUpdate
+    : path.join(home, '.elastos-launcher', 'update-check.json'), 'utf8'));
   assert.equal(update.outcome, 'up_to_date');
-  console.log('PASS elastos update --check writes up_to_date');
+  console.log('PASS update check reads the Runtime record or launcher-owned signed fallback');
   // Stable has no newer signed release. Expose the existing button to exercise
   // its real handler and terminal command against the current signed release.
   await page.evaluate(() => document.querySelector('#update-btn').classList.remove('hidden'));

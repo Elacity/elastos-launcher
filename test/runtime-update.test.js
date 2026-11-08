@@ -207,7 +207,7 @@ test('Runtime 2.0.0 gets the #61 status record only after a successful check and
   const bridge = (head) => writeSignedUpdateCheck('ElastOS Runtime v2.0.0', pin,
     async () => head, (value) => { raw = value; });
   const result = await checkRuntimeUpdate(async () => ({ code: 0, stdout: 'update available 9.9.9', stderr: '' }),
-    () => raw, { stamp: () => null, refresh: () => bridge(fixture.SIGNED_HEAD) });
+    () => { throw new Error('Runtime record absent'); }, async () => { await bridge(fixture.SIGNED_HEAD); return raw; });
   assert.equal(result.updateAvailable, false);
   assert.equal(JSON.parse(raw).outcome, 'up_to_date');
   await bridge(fixture.signedHead({ version: '2.0.1' }));
@@ -219,7 +219,7 @@ test('Runtime 2.0.0 gets the #61 status record only after a successful check and
   await assert.rejects(() => bridge(fixture.signedHead({ version: '1.9.9' })), /version/);
   await assert.rejects(() => bridge(fixture.signedHead({ channel: 'canary' })), /channel/);
   await assert.rejects(() => checkRuntimeUpdate(async () => ({ code: 1, stdout: '', stderr: 'network failed' }),
-    () => raw, { stamp: () => null, refresh: () => bridge(fixture.SIGNED_HEAD) }), /network failed/);
+    () => raw, async () => { await bridge(fixture.SIGNED_HEAD); return raw; }), /network failed/);
   assert.equal(raw, undefined);
 });
 
@@ -268,24 +268,114 @@ test('a Mac status query overlapping Stop preserves the completed stop transitio
   assert.equal(await target.getStatus(), 'stopped');
 });
 
-test('newer runtimes keep a freshly written native status and bridge an unchanged one', async () => {
-  let stamp = 'before';
-  let raw = status('update_available', true, '2.0.2', '2.0.1');
-  let refreshed = false;
-  const options = { stamp: () => stamp, refresh: async () => { refreshed = true; raw = status('up_to_date', false, '2.0.1', '2.0.1'); } };
-  const native = await checkRuntimeUpdate(async () => {
-    stamp = 'after';
-    return { code: 0, stdout: '', stderr: '' };
-  }, () => raw, options);
-  assert.equal(native.updateAvailable, true);
-  assert.equal(refreshed, false);
-  const bridged = await checkRuntimeUpdate(async () => ({ code: 0, stdout: '', stderr: '' }), () => raw, options);
-  assert.equal(bridged.updateAvailable, false);
-  assert.equal(refreshed, true);
-  refreshed = false;
-  await assert.rejects(() => checkRuntimeUpdate(async () => {
-    stamp = 'malformed'; raw = '{}';
-    return { code: 0, stdout: '', stderr: '' };
-  }, () => raw, options), /not readable/);
-  assert.equal(refreshed, false);
+test('an existing valid Runtime record wins, including offered=false and unchanged records', async () => {
+  for (const offered of [true, false]) {
+    const result = await checkRuntimeUpdate(async () => ({ code: 0, stdout: '', stderr: '' }),
+      () => status('update_available', offered, '2.0.2', '2.0.1'),
+      async () => { throw new Error('must not replace a Runtime decision'); });
+    assert.equal(result.updateAvailable, offered);
+    assert.equal(result.latest, '2.0.2');
+  }
 });
+
+test('missing or invalid Runtime records fall back and a Runtime record arriving during fallback wins', async () => {
+  for (const initial of [undefined, '{}', 'not JSON']) {
+    let native = initial;
+    let calls = 0;
+    const fallback = async () => { calls++; return status('update_available', true, '2.0.1', '2.0.0'); };
+    const result = await checkRuntimeUpdate(async () => ({ code: 0, stdout: '', stderr: '' }),
+      () => { if (native === undefined) throw new Error('ENOENT'); return native; }, fallback);
+    assert.equal(calls, 1);
+    assert.equal(result.updateAvailable, true);
+    const refused = await checkRuntimeUpdate(async () => ({ code: 0, stdout: '', stderr: '' }),
+      () => native, async () => {
+        native = status('update_available', false, '2.0.2', '2.0.0');
+        return fallback();
+      });
+    assert.equal(refused.updateAvailable, false);
+    assert.equal(refused.latest, '2.0.2');
+  }
+});
+
+test('concurrent signed checks atomically write only the launcher data directory', async (t) => {
+  const fs = require('node:fs');
+  const os = require('node:os');
+  const path = require('node:path');
+  const fixture = require('./helpers/signed-release');
+  const { launcherUpdateStatusStore, writeSignedUpdateCheck } = require('../dist/main/targets/runtimeUpdate');
+  const home = fs.mkdtempSync(path.join(os.homedir(), 'update-concurrent-'));
+  const store = launcherUpdateStatusStore(home);
+  const pin = { channel: 'stable', version: '2.0.0', headCid: null, publishable: true,
+    maintainerDid: fixture.FIXTURE_DID, publisherGateway: 'https://publisher.example' };
+  const writes = [];
+  const write = fs.writeFileSync;
+  t.mock.method(fs, 'writeFileSync', (file, raw, options) => {
+    writes.push(String(file));
+    assert.equal(options.flag, 'wx');
+    assert.equal(options.mode, 0o600);
+    return write(file, raw, options);
+  });
+  const results = await Promise.all(Array.from({ length: 12 }, () => checkRuntimeUpdate(
+    async () => ({ code: 0, stdout: 'untrusted update text', stderr: '' }),
+    () => { throw new Error('Runtime record absent'); },
+    async () => {
+      await writeSignedUpdateCheck('2.0.0', pin, async () => fixture.signedHead({ version: '2.0.1' }), store.write);
+      return store.read();
+    })));
+  assert.equal(results.every((result) => result.updateAvailable), true);
+  assert.equal(JSON.parse(store.read()).latest_version, '2.0.1');
+  assert.equal(new Set(writes).size, 12);
+  assert.equal(writes.every((file) => path.dirname(file) === path.join(home, '.elastos-launcher')), true);
+  assert.deepEqual(fs.readdirSync(path.join(home, '.elastos-launcher')), ['update-check.json']);
+});
+
+for (const platform of ['darwin', 'linux', 'win32']) {
+  test(`${platform} checks use the launcher store and preserve a Runtime refusal`, async (t) => {
+    const fs = require('node:fs');
+    const os = require('node:os');
+    const path = require('node:path');
+    const child = require('node:child_process');
+    const updates = require('../dist/main/targets/runtimeUpdate');
+    const install = require('../dist/main/targets/runtimeInstall');
+    const windows = require('../dist/main/targets/windowsRuntime');
+    const probe = require('../dist/main/targets/runtimeProbe');
+    const pins = require('../dist/main/targets/runtimePin');
+    const fixture = require('./helpers/signed-release');
+    const { runtimeDataDir, runtimeUpdateCheckPath } = require('../dist/main/targets/runtimePaths');
+    const home = fs.mkdtempSync(path.join(os.homedir(), `update-${platform}-`));
+    const xdg = process.env.XDG_DATA_HOME;
+    process.env.XDG_DATA_HOME = path.join(home, '.local', 'share');
+    t.after(() => { if (xdg === undefined) delete process.env.XDG_DATA_HOME; else process.env.XDG_DATA_HOME = xdg; });
+    t.mock.method(os, 'homedir', () => home);
+    t.mock.method(probe, 'findRuntimeBinary', () => '/fixture/elastos');
+    t.mock.method(child, 'execFileSync', () => 'ElastOS Runtime v2.0.0');
+    t.mock.method(windows, 'distroIsInstalled', () => true);
+    t.mock.method(windows, 'readDistroVersion', () => '2.0.0');
+    const run = async () => ({ code: 0, stdout: 'untrusted update text', stderr: '' });
+    t.mock.method(updates, 'runRuntimeCommand', run);
+    t.mock.method(windows, 'runDistroRuntimeCommand', run);
+    t.mock.method(pins, 'loadActiveRuntimePin', () => ({ channel: 'stable', version: '2.0.0', publishable: true,
+      maintainerDid: fixture.FIXTURE_DID, publisherGateway: 'https://publisher.example' }));
+    let fetched = 0;
+    t.mock.method(install, 'fetchRuntimeText', async () => { fetched++; return fixture.signedHead({ version: '2.0.1' }); });
+    let native;
+    t.mock.method(windows, 'readDistroUpdateStatus', () => { if (!native) throw new Error('ENOENT'); return native; });
+    const target = require('../dist/main/targets/runtimeTarget').createRuntimeTarget(platform);
+    assert.equal((await target.checkForUpdate()).updateAvailable, true);
+    const file = path.join(home, '.elastos-launcher', 'update-check.json');
+    const saved = fs.readFileSync(file, 'utf8');
+    const runtimeFile = runtimeUpdateCheckPath(runtimeDataDir(platform, home, process.env));
+    assert.equal(fs.existsSync(runtimeFile), false);
+    native = status('update_available', false, '2.0.2', '2.0.0');
+    if (platform !== 'win32') {
+      fs.mkdirSync(path.dirname(runtimeFile), { recursive: true });
+      fs.writeFileSync(runtimeFile, native);
+    }
+    const result = await target.checkForUpdate();
+    assert.equal(result.updateAvailable, false);
+    assert.equal(result.latest, '2.0.2');
+    assert.equal(fetched, 1);
+    assert.equal(fs.readFileSync(file, 'utf8'), saved);
+    if (platform !== 'win32') assert.equal(fs.readFileSync(runtimeFile, 'utf8'), native);
+  });
+}

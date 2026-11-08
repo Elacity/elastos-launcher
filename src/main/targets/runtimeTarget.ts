@@ -1,5 +1,4 @@
 import { execFileSync } from 'child_process';
-import { randomUUID } from 'crypto';
 import * as fs from 'fs';
 import * as os from 'os';
 import { RUNTIME_TARGET } from './descriptors';
@@ -21,6 +20,7 @@ import {
   applyRuntimeUpdate,
   checkRuntimeUpdate,
   HeadVerify,
+  launcherUpdateStatusStore,
   rollbackRuntime,
   RuntimeCommand,
   runRuntimeCommand,
@@ -145,8 +145,8 @@ export function createRuntimeTarget(platform: NodeJS.Platform = process.platform
     },
     // On Windows the launch controller runs uninstallRuntimeInDistro (windowsUninstall.ts) with the two answers.
     uninstall: () => (platform === 'win32' ? Promise.reject(new Error('Uninstall on Windows needs your answer in the Uninstall window. Nothing was removed.')) : runtimeUninstall(() => stopGateway(true))),
-    getVersion: () => (platform === 'win32' ? readDistroVersion() : readRuntimeVersion()),
-    checkForUpdate: () => runtimeCheckForUpdate(),
+    getVersion: () => (platform === 'win32' ? readDistroVersion() : readRuntimeVersion(platform)),
+    checkForUpdate: () => runtimeCheckForUpdate(platform),
     openInBrowser: () => openRuntimeHome(),
     getLogs: async (lines) => supervisor?.getLogs(lines) ?? '',
   };
@@ -156,34 +156,12 @@ function runtimeCommand(): RuntimeCommand {
   return process.platform === 'win32' ? runDistroRuntimeCommand : runRuntimeCommand;
 }
 
-function readHostUpdateStatus(): string {
+function readHostUpdateStatus(platform: NodeJS.Platform): string {
   const home = os.homedir();
-  return fs.readFileSync(runtimeUpdateCheckPath(runtimeDataDir(process.platform, home, process.env)), 'utf8');
+  return fs.readFileSync(runtimeUpdateCheckPath(runtimeDataDir(platform, home, process.env)), 'utf8');
 }
 
-function hostUpdateStatusStamp(): string | null {
-  const file = runtimeUpdateCheckPath(runtimeDataDir(process.platform, os.homedir(), process.env));
-  try {
-    const stat = fs.statSync(file, { bigint: true });
-    return [stat.dev, stat.ino, stat.size, stat.mtimeNs, stat.ctimeNs].join(':');
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
-    throw error;
-  }
-}
-
-function writeHostUpdateStatus(raw: string): void {
-  const file = runtimeUpdateCheckPath(runtimeDataDir(process.platform, os.homedir(), process.env));
-  const temporary = `${file}.${randomUUID()}.tmp`;
-  fs.writeFileSync(temporary, raw, { flag: 'wx', mode: 0o600 });
-  try {
-    fs.renameSync(temporary, file);
-  } finally {
-    if (fs.existsSync(temporary)) removeVerifiedTarget(temporary);
-  }
-}
-
-async function runtimeCheckForUpdate(): Promise<UpdateCheck> {
+async function runtimeCheckForUpdate(platform: NodeJS.Platform): Promise<UpdateCheck> {
   let releaseUrl = '';
   try {
     releaseUrl = loadActiveRuntimePin().publisherGateway;
@@ -195,19 +173,17 @@ async function runtimeCheckForUpdate(): Promise<UpdateCheck> {
     detail: 'not installed',
     latest: null,
   }, releaseUrl);
-  if (process.platform === 'win32') {
-    if (!distroIsInstalled()) return notInstalled;
-    const parsed = await checkRuntimeUpdate(runDistroRuntimeCommand, readDistroUpdateStatus);
-    return toUpdateCheck(readDistroVersion(), parsed, releaseUrl);
-  }
-  if (runtimeInstallBlock(process.platform, process.arch)) return notInstalled;
-  if (!findRuntimeBinary(os.homedir(), process.env.PATH ?? '')) return notInstalled;
-  const current = readRuntimeVersion();
-  const compatibilityRecord = {
-    stamp: hostUpdateStatusStamp,
-    refresh: () => writeSignedUpdateCheck(current, loadActiveRuntimePin(), runtimeInstall.fetchRuntimeText, writeHostUpdateStatus),
+  const windows = platform === 'win32';
+  if (windows ? !distroIsInstalled() : runtimeInstallBlock(platform, process.arch)
+    || !findRuntimeBinary(os.homedir(), process.env.PATH ?? '')) return notInstalled;
+  const current = windows ? readDistroVersion() : readRuntimeVersion(platform);
+  const store = launcherUpdateStatusStore(os.homedir());
+  const fallback = async () => {
+    await writeSignedUpdateCheck(current, loadActiveRuntimePin(), runtimeInstall.fetchRuntimeText, store.write);
+    return store.read();
   };
-  const parsed = await checkRuntimeUpdate(runRuntimeCommand, readHostUpdateStatus, compatibilityRecord);
+  const parsed = await checkRuntimeUpdate(windows ? runDistroRuntimeCommand : runRuntimeCommand,
+    windows ? readDistroUpdateStatus : () => readHostUpdateStatus(platform), fallback);
   return toUpdateCheck(current, parsed, releaseUrl);
 }
 
@@ -232,8 +208,8 @@ function headVerify(): HeadVerify {
   };
 }
 
-function readRuntimeVersion(): string {
-  const block = runtimeInstallBlock(process.platform, process.arch);
+function readRuntimeVersion(platform: NodeJS.Platform = process.platform): string {
+  const block = runtimeInstallBlock(platform, process.arch);
   if (block) return block;
   const file = findRuntimeBinary(os.homedir(), process.env.PATH ?? '');
   if (!file) return 'not installed';

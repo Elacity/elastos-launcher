@@ -74,10 +74,11 @@ test('the smoke passes the pinned head the way the pinned installer accepts it',
   assert.equal(/--head-cid/.test(script), false);
 });
 
-test('rollback uses the real binary between alpha.21 and alpha.22', () => {
+test('rollback uses the real binary and follows the selected signed channel', () => {
   const script = fs.readFileSync(path.join(root, 'scripts/runtime-rollback.sh'), 'utf8');
-  assert.match(script, /0\.8\.0-alpha\.21/);
-  assert.match(script, /0\.8\.0-alpha\.22/);
+  assert.doesNotMatch(script, /0\.8\.0-alpha\./);
+  assert.match(script, /require_version "\$\{PREV_VERSION\}"/);
+  assert.match(script, /require_version "\$\{CURRENT_VERSION\}"/);
   assert.match(script, /update --rollback-to "\$\{PREV_CID\}" --yes/);
   assert.match(script, /update --yes/);
   assert.match(script, /\/healthz is OK/);

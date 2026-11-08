@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Install the pinned runtime (0.8.0-alpha.22), roll back to the publisher's
-# previous signed head (0.8.0-alpha.21), require /healthz OK, then update
+# Install the selected channel (at least the pinned version floor), roll back
+# to its linked previous signed head, require /healthz OK, then update
 # forward again and require /healthz OK. This runs the real elastos binary.
 set -euo pipefail
 
@@ -59,30 +59,43 @@ def unixfs_cid(raw):
 pin = json.load(open(sys.argv[1]))
 channel = pin["channels"][pin["active"]]
 gateway = pin["publisherGateway"].rstrip("/")
-current = urllib.request.urlopen(gateway + "/release-head.json", timeout=60).read()
+def fetch(url):
+    with urllib.request.urlopen(url, timeout=60) as response:
+        raw = response.read(256 * 1024 + 1)
+    if len(raw) > 256 * 1024:
+        sys.exit("Signed release metadata exceeds its limit")
+    return raw
+
+current = fetch(gateway + "/release-head.json")
 open(sys.argv[2], "wb").write(current)
 current_doc = json.loads(current.decode())
 current_cid = unixfs_cid(current)
-if current_doc["payload"]["version"] != "0.8.0-alpha.22":
-    sys.exit("publisher release-head.json is not 0.8.0-alpha.22")
-if current_cid != channel["headCid"]:
-    sys.exit(f"publisher head {current_cid} is not the pin {channel['headCid']}")
+payload = current_doc["payload"]
+version = payload.get("version", "")
+if (payload.get("channel") != pin["active"]
+        or not re.fullmatch(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)", version)
+        or tuple(map(int, version.split("."))) < tuple(map(int, channel["version"].split(".")))
+        or tuple(map(int, version.split("."))) < (2, 0, 0)
+        or current_doc.get("signer_did") != pin["maintainerDid"]):
+    sys.exit("publisher head does not match the selected channel, maintainer and version floor")
 prev = current_doc["payload"].get("prev_head_cid") or ""
 if not re.fullmatch(r"Qm[1-9A-HJ-NP-Za-km-z]{20,}", prev):
     sys.exit("publisher release head has no previous head CID")
-prev_raw = urllib.request.urlopen(gateway + "/ipfs/" + prev, timeout=60).read()
+prev_raw = fetch(gateway + "/ipfs/" + prev)
 open(sys.argv[3], "wb").write(prev_raw)
 prev_doc = json.loads(prev_raw.decode())
 prev_cid = unixfs_cid(prev_raw)
 if prev_cid != prev:
     sys.exit(f"previous object CID {prev_cid} is not {prev}")
-if prev_doc["payload"]["version"] != "0.8.0-alpha.21":
-    sys.exit(f"previous head is {prev_doc['payload'].get('version')}, not 0.8.0-alpha.21")
+prev_version = prev_doc["payload"].get("version", "")
+if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?", prev_version):
+    sys.exit("previous head has no valid release version")
 open(sys.argv[4], "w").write(
-    f"PREV_CID={prev}\nPIN_CID={channel['headCid']}\nMAINTAINER={pin['maintainerDid']}\n"
+    f"PREV_CID={prev}\nPIN_CID={current_cid}\nMAINTAINER={pin['maintainerDid']}\n"
+    f"PREV_VERSION={prev_version}\nCURRENT_VERSION={version}\n"
 )
-print(f"previous head {prev} is 0.8.0-alpha.21")
-print(f"pinned head {channel['headCid']} is 0.8.0-alpha.22")
+print(f"previous head {prev} is {prev_version}")
+print(f"selected channel head {current_cid} is {version}")
 PY
 
 # shellcheck disable=SC1090
@@ -181,14 +194,14 @@ run_update() {
   fi
 }
 
-echo "Rolling back to 0.8.0-alpha.21 ${PREV_CID}"
+echo "Rolling back to ${PREV_VERSION} ${PREV_CID}"
 run_update update --rollback-to "${PREV_CID}" --yes
-require_version "0.8.0-alpha.21"
+require_version "${PREV_VERSION}"
 require_health
 
 echo "Updating back to the pinned release ${PIN_CID}"
 run_update update --yes
-require_version "0.8.0-alpha.22"
+require_version "${CURRENT_VERSION}"
 require_health
 echo "Rollback returned to the pinned release"
 trap - EXIT
