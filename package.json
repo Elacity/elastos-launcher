@@ -10,7 +10,7 @@
   "license": "AGPL-3.0",
   "scripts": {
     "dev": "electron .",
-    "build:ts": "node scripts/build-mac-process-info.js && tsc",
+    "build:ts": "node scripts/build-mac-process-info.js && node scripts/build-linux-pidfd.js && tsc",
     "build": "npm run build:ts && electron-builder",
     "build:mac": "npm run build:ts && electron-builder --mac",
     "build:win": "npm run build:ts && electron-builder --win",
@@ -84,7 +84,7 @@
         "libayatana-appindicator3-1"
       ]
     },
-    "asarUnpack": ["dist/native/mac-process-info"],
+    "asarUnpack": ["dist/native/mac-process-info", "dist/native/linux-pidfd"],
     "afterAllArtifactBuild": "scripts/notarize.js",
     "extraResources": [
       {

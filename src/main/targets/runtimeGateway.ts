@@ -1,4 +1,4 @@
-import { execFile, execFileSync, spawn } from 'child_process';
+import { ChildProcess, execFile, execFileSync, spawn, spawnSync } from 'child_process';
 import * as dns from 'dns';
 import * as fs from 'fs';
 import * as http from 'http';
@@ -482,6 +482,16 @@ export interface ControllerObservation {
   allowedExes: readonly string[];
 }
 
+export type ControllerRecord = Pick<ControllerObservation, 'statusText' | 'lockText' | 'bootId' | 'allowedExes'>;
+
+export type ControllerProcView = Pick<ControllerObservation, 'controllerStat' | 'exePath'>;
+
+/** A pidfd for one process. `send` cannot target a later occupant of the same pid number. */
+export interface Pidfd {
+  send(signal: NodeJS.Signals): void;
+  close(): void;
+}
+
 /**
  * The update controller pid, or null. The start time, the exe, and the host
  * lock generation must all match this read. A host pid is not a target.
@@ -501,16 +511,52 @@ export function confirmedControllerPid(observed: ControllerObservation): number 
   return status.controllerPid;
 }
 
-/** Read the controller, then signal that pid. A mismatch signals nothing. */
 export function signalRecordedController(
   signal: NodeJS.Signals,
-  read: () => ControllerObservation,
-  kill: (pid: number, signal: NodeJS.Signals) => void = process.kill,
+  io: {
+    readRecord: () => ControllerRecord;
+    readProc: (pid: number) => ControllerProcView;
+    openPidfd: (pid: number) => Pidfd;
+  },
+  held: { pidfd: Pidfd | null },
 ): void {
-  const target = confirmedControllerPid(read());
-  if (!target) throw new Error(HOME_UNCONFIRMED_MESSAGE);
+  if (!held.pidfd) {
+    const record = io.readRecord();
+    const status = parseLinuxHomeStatus(record.statusText);
+    const lock = parseHostLockRecord(record.lockText);
+    if (!status || !lock || lock.role !== 'gateway' || lock.addr !== GATEWAY_ADDR
+      || !status.generation || lock.generation !== status.generation) {
+      throw new Error(HOME_UNCONFIRMED_MESSAGE);
+    }
+    let pidfd: Pidfd;
+    try {
+      pidfd = io.openPidfd(status.controllerPid);
+    } catch {
+      throw new Error(HOME_UNCONFIRMED_MESSAGE);
+    }
+    let proc: ControllerProcView;
+    try {
+      proc = io.readProc(status.controllerPid);
+    } catch {
+      pidfd.close();
+      throw new Error(HOME_UNCONFIRMED_MESSAGE);
+    }
+    const confirmed = confirmedControllerPid({
+      statusText: record.statusText,
+      lockText: record.lockText,
+      bootId: record.bootId,
+      allowedExes: record.allowedExes,
+      controllerStat: proc.controllerStat,
+      exePath: proc.exePath,
+    });
+    if (confirmed !== status.controllerPid) {
+      pidfd.close();
+      throw new Error(HOME_UNCONFIRMED_MESSAGE);
+    }
+    held.pidfd = pidfd;
+  }
   try {
-    kill(target, signal);
+    held.pidfd.send(signal);
   } catch (err) {
     if (signalErrorCode(err) === 'ESRCH') return;
     const message = err instanceof Error ? err.message : String(err);
@@ -518,22 +564,193 @@ export function signalRecordedController(
   }
 }
 
-/** Every signal re-reads the controller. The pid field is not a signal target. */
 export function controllerGateway(
-  read: () => ControllerObservation,
-  kill?: (pid: number, signal: NodeJS.Signals) => void,
+  readRecord: () => ControllerRecord,
+  readProc: (pid: number) => ControllerProcView,
+  openPidfd: (pid: number) => Pidfd,
 ): GatewayProcess {
+  const held: { pidfd: Pidfd | null } = { pidfd: null };
+  function observation(): ControllerObservation | null {
+    const record = readRecord();
+    const status = parseLinuxHomeStatus(record.statusText);
+    if (!status) return null;
+    const proc = readProc(status.controllerPid);
+    return {
+      statusText: record.statusText,
+      lockText: record.lockText,
+      bootId: record.bootId,
+      allowedExes: record.allowedExes,
+      controllerStat: proc.controllerStat,
+      exePath: proc.exePath,
+    };
+  }
   return {
     pid: -1,
     onOutput() {},
     onExit() {},
     hasExited() {
-      return confirmedControllerPid(read()) === null;
+      let gone = false;
+      try {
+        const observed = observation();
+        gone = observed === null || confirmedControllerPid(observed) === null;
+      } catch {
+        return false;
+      }
+      if (gone && held.pidfd) {
+        held.pidfd.close();
+        held.pidfd = null;
+      }
+      return gone;
     },
     signal(signal) {
-      signalRecordedController(signal, read, kill);
+      signalRecordedController(signal, { readRecord, readProc, openPidfd }, held);
     },
   };
+}
+
+function throwSignalCode(code: string, message: string): never {
+  throw Object.assign(new Error(message), { code });
+}
+
+function linuxPidfdHelperPath(): string {
+  return path.join(__dirname, '../../native/linux-pidfd')
+    .replace(`${path.sep}app.asar${path.sep}`, `${path.sep}app.asar.unpacked${path.sep}`);
+}
+
+function makeFifo(file: string): void {
+  const result = spawnSync('mkfifo', ['-m', '600', file], { timeout: 1000 });
+  if (result.error || result.status !== 0) throwSignalCode('ENOSYS', 'pidfd is unavailable');
+}
+
+function waitBriefly(): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
+}
+
+function readPidfdLine(fd: number, deadline: number): string {
+  const buf = Buffer.alloc(64);
+  let text = '';
+  while (!text.includes('\n')) {
+    if (text.length > 64) throwSignalCode('EIO', 'pidfd reply is too long');
+    if (Date.now() >= deadline) throwSignalCode('ETIMEDOUT', 'pidfd helper timed out');
+    try {
+      const n = fs.readSync(fd, buf, 0, buf.length, null);
+      if (n === 0) {
+        waitBriefly();
+        continue;
+      }
+      text += buf.toString('utf8', 0, n);
+    } catch (err) {
+      const code = signalErrorCode(err);
+      if (code === 'EAGAIN' || code === 'EWOULDBLOCK') {
+        waitBriefly();
+        continue;
+      }
+      throw err;
+    }
+  }
+  return text.slice(0, text.indexOf('\n'));
+}
+
+function openFifoWrite(file: string, deadline: number): number {
+  const flags = fs.constants.O_WRONLY | fs.constants.O_NONBLOCK | fs.constants.O_NOFOLLOW;
+  for (;;) {
+    if (Date.now() >= deadline) throwSignalCode('ETIMEDOUT', 'pidfd helper timed out');
+    try {
+      return fs.openSync(file, flags);
+    } catch (err) {
+      if (signalErrorCode(err) === 'ENXIO') {
+        waitBriefly();
+        continue;
+      }
+      throw err;
+    }
+  }
+}
+
+export function openLinuxPidfd(pid: number, options?: { helper?: string }): Pidfd {
+  if (!Number.isInteger(pid) || pid <= 0) throwSignalCode('EINVAL', 'bad pid');
+  const helper = options?.helper ?? linuxPidfdHelperPath();
+  if (!options?.helper && process.platform !== 'linux') throwSignalCode('ENOSYS', 'pidfd is unavailable');
+  if (!fs.existsSync(helper)) throwSignalCode('ENOENT', 'pidfd helper is missing');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'elastos-pidfd-'));
+  fs.chmodSync(dir, 0o700);
+  const replyPath = path.join(dir, 'reply');
+  const cmdPath = path.join(dir, 'cmd');
+  let child: ChildProcess | null = null;
+  let replyFd: number | null = null;
+  let cmdFd: number | null = null;
+  let settled = false;
+  const cleanup = (): void => {
+    if (settled) return;
+    settled = true;
+    if (cmdFd === null) {
+      try {
+        cmdFd = fs.openSync(cmdPath, fs.constants.O_WRONLY | fs.constants.O_NONBLOCK | fs.constants.O_NOFOLLOW);
+      } catch (err) {
+        const code = signalErrorCode(err);
+        if (code !== 'ENXIO' && code !== 'ENOENT') throw err;
+      }
+    }
+    const command = cmdFd;
+    const reply = replyFd;
+    cmdFd = null;
+    replyFd = null;
+    let closeError: unknown = null;
+    if (command !== null) {
+      try { fs.closeSync(command); } catch (err) { closeError = err; }
+    }
+    if (reply !== null) {
+      try { fs.closeSync(reply); } catch (err) { if (!closeError) closeError = err; }
+    }
+    child?.unref();
+    fs.rmSync(dir, { recursive: true, force: true });
+    if (closeError) throw closeError;
+  };
+  try {
+    makeFifo(replyPath);
+    makeFifo(cmdPath);
+    child = spawn(helper, [String(pid), replyPath, cmdPath], { stdio: 'ignore' });
+    // Node crashes when the spawn error event has no listener.
+    child.on('error', () => {});
+    if (!child.pid) throwSignalCode('ENOENT', 'pidfd helper is missing');
+    const replyFlags = fs.constants.O_RDONLY | fs.constants.O_NONBLOCK | fs.constants.O_NOFOLLOW;
+    replyFd = fs.openSync(replyPath, replyFlags);
+    const ready = readPidfdLine(replyFd, Date.now() + 2000);
+    if (ready.startsWith('errno ')) throwSignalCode(ready.slice('errno '.length), ready);
+    if (ready !== 'ready') throwSignalCode('EIO', 'pidfd helper did not become ready');
+    cmdFd = openFifoWrite(cmdPath, Date.now() + 2000);
+    const reply = replyFd;
+    const cmd = cmdFd;
+    let closed = false;
+    return {
+      send(signal: NodeJS.Signals): void {
+        if (closed) throwSignalCode('EBADF', 'pidfd is closed');
+        if (signal !== 'SIGTERM' && signal !== 'SIGKILL') throwSignalCode('EINVAL', 'unsupported signal');
+        fs.writeSync(cmd, `${signal}\n`);
+        const line = readPidfdLine(reply, Date.now() + 2000);
+        if (line === 'sent') return;
+        if (line.startsWith('errno ')) throwSignalCode(line.slice('errno '.length), line);
+        throwSignalCode('EIO', 'pidfd helper reply was not a signal result');
+      },
+      close(): void {
+        if (closed) return;
+        closed = true;
+        try {
+          fs.writeSync(cmd, 'close\n');
+        } catch (err) {
+          const code = signalErrorCode(err);
+          if (code !== 'EPIPE' && code !== 'EBADF') {
+            cleanup();
+            throw err;
+          }
+        }
+        cleanup();
+      },
+    };
+  } catch (err) {
+    cleanup();
+    throw err;
+  }
 }
 
 /**
@@ -1426,21 +1643,25 @@ function allowedControllerExes(homeDir: string, dataDir: string): string[] {
   return allowed;
 }
 
-function observeRecordedController(homeDir: string): ControllerObservation {
+function observeControllerRecord(homeDir: string): ControllerRecord {
   const data = runtimeDataDir('linux', homeDir, process.env);
   const statusText = readRegularText(`${data}/update-controller/status.json`, HOME_RECORD_MAX);
   const lockText = readRegularText(runtimeHostLockPath(data), HOME_RECORD_MAX);
   const boot = readProcOptional('/proc/sys/kernel/random/boot_id', 128);
-  const status = parseLinuxHomeStatus(statusText);
-  const pid = status ? status.controllerPid : 0;
-  const stat = pid > 0 ? readProcOptional(`/proc/${pid}/stat`, PROC_STAT_MAX) : null;
   return {
     statusText,
     lockText,
     bootId: boot ?? null,
-    controllerStat: stat ?? null,
-    exePath: pid > 0 ? controllerExeFromProc(pid) : null,
     allowedExes: allowedControllerExes(homeDir, data),
+  };
+}
+
+function observeControllerProc(pid: number): ControllerProcView {
+  if (!Number.isInteger(pid) || pid <= 0) return { controllerStat: null, exePath: null };
+  const stat = readProcOptional(`/proc/${pid}/stat`, PROC_STAT_MAX);
+  return {
+    controllerStat: stat ?? null,
+    exePath: controllerExeFromProc(pid),
   };
 }
 
@@ -1458,7 +1679,11 @@ async function adoptLinuxGatewayProcess(homeDir: string): Promise<GatewayProcess
   const data = runtimeDataDir('linux', homeDir, process.env);
   const lockText = readRegularText(runtimeHostLockPath(data), HOME_RECORD_MAX);
   if (linuxControllerAdopt(lockText) !== 'controller') return null;
-  return controllerGateway(() => observeRecordedController(homeDir));
+  return controllerGateway(
+    () => observeControllerRecord(homeDir),
+    (pid) => observeControllerProc(pid),
+    openLinuxPidfd,
+  );
 }
 
 export async function adoptInstalledGatewayProcess(

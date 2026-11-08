@@ -9,6 +9,7 @@ const {
   controllerGateway,
   confirmedControllerPid,
   signalRecordedController,
+  openLinuxPidfd,
   signalProcessGroup,
   isHealthOk,
   scrubRuntimeLog,
@@ -834,14 +835,88 @@ function controllerView(overrides = {}) {
   };
 }
 
+const RUNTIME_EXE = '/home/user/.local/share/elastos/update-controller/runtime';
+
+function signalIo(observed, delivered) {
+  return {
+    readRecord: () => observed,
+    readProc: () => ({ controllerStat: observed.controllerStat, exePath: observed.exePath }),
+    openPidfd(pid) {
+      return {
+        send(signal) { delivered.push([pid, signal]); },
+        close() {},
+      };
+    },
+  };
+}
+
 function refusedSignal(observed) {
-  const kills = [];
+  const delivered = [];
   assert.equal(confirmedControllerPid(observed), null);
   assert.throws(
-    () => signalRecordedController('SIGTERM', () => observed, (pid, signal) => kills.push([pid, signal])),
+    () => signalRecordedController('SIGTERM', signalIo(observed, delivered), { pidfd: null }),
     { message: HOME_UNCONFIRMED_MESSAGE },
   );
-  assert.deepEqual(kills, []);
+  assert.deepEqual(delivered, []);
+}
+
+function errno(code) {
+  return Object.assign(new Error(code), { code });
+}
+
+function controllerKernel(replaceOn) {
+  let live = { birth: 100, exe: RUNTIME_EXE };
+  const delivered = [];
+  let opens = 0;
+  const replace = () => { live = { birth: 999, exe: '/usr/bin/foreign' }; };
+  return {
+    delivered,
+    opens: () => opens,
+    replace,
+    readRecord() {
+      if (replaceOn === 'after-record') replace();
+      return controllerView();
+    },
+    readProc(pid) {
+      const statBirth = live.birth;
+      if (replaceOn === 'during-proc') replace();
+      const exe = live.exe;
+      const snap = { controllerStat: procStat(pid, 1, statBirth), exePath: exe };
+      if (replaceOn === 'after-proc') replace();
+      return snap;
+    },
+    openPidfd(pid) {
+      opens += 1;
+      const bound = { pid, birth: live.birth, exe: live.exe };
+      return {
+        send(signal) {
+          if (bound.birth !== live.birth || bound.exe !== live.exe) throw errno('ESRCH');
+          delivered.push({ pid: bound.pid, signal, birth: live.birth, exe: live.exe });
+        },
+        close() {},
+      };
+    },
+  };
+}
+
+function boundController(getView, onDelivered) {
+  return controllerGateway(
+    () => getView(),
+    () => {
+      const view = getView();
+      return { controllerStat: view.controllerStat, exePath: view.exePath };
+    },
+    (pid) => {
+      const bound = getView().controllerStat;
+      return {
+        send(signal) {
+          if (getView().controllerStat !== bound) throw errno('ESRCH');
+          onDelivered(pid, signal);
+        },
+        close() {},
+      };
+    },
+  );
 }
 
 test('a controller pid reused before the first read is not signaled', () => {
@@ -863,20 +938,123 @@ test('a controller pid reused between the check and the signal is not signaled',
   observed = controllerView({ controllerStat: procStat(10, 1, 999) });
   const kills = [];
   assert.throws(
-    () => signalRecordedController('SIGKILL', () => observed, (pid, signal) => kills.push([pid, signal])),
+    () => signalRecordedController('SIGKILL', signalIo(observed, kills), { pidfd: null }),
     { message: HOME_UNCONFIRMED_MESSAGE },
   );
   assert.deepEqual(kills, []);
   const host = [];
-  signalRecordedController('SIGTERM', () => controllerView(), (pid, signal) => host.push([pid, signal]));
+  signalRecordedController('SIGTERM', signalIo(controllerView(), host), { pidfd: null });
   assert.deepEqual(host, [[10, 'SIGTERM']]);
   assert.equal(host.some((row) => row[0] === 20 || row[0] < 0), false);
+});
+
+test('a controller replaced during the proc read is not signaled', () => {
+  const kernel = controllerKernel('during-proc');
+  assert.throws(
+    () => signalRecordedController('SIGTERM', kernel, { pidfd: null }),
+    { message: HOME_UNCONFIRMED_MESSAGE },
+  );
+  assert.deepEqual(kernel.delivered, []);
+});
+
+test('a controller replaced after the proc reads and before the signal is not signaled', () => {
+  const kernel = controllerKernel('after-proc');
+  signalRecordedController('SIGTERM', kernel, { pidfd: null });
+  assert.deepEqual(kernel.delivered, []);
+  assert.equal(kernel.opens(), 1);
+});
+
+test('a pid reused before pidfd_open fails the identity check', () => {
+  const kernel = controllerKernel('after-record');
+  assert.throws(
+    () => signalRecordedController('SIGTERM', kernel, { pidfd: null }),
+    { message: HOME_UNCONFIRMED_MESSAGE },
+  );
+  assert.deepEqual(kernel.delivered, []);
+});
+
+test('escalation sends SIGKILL through the pidfd opened for SIGTERM', () => {
+  const kernel = controllerKernel();
+  const gateway = controllerGateway(kernel.readRecord, kernel.readProc, kernel.openPidfd);
+  gateway.signal('SIGTERM');
+  gateway.signal('SIGKILL');
+  assert.equal(kernel.opens(), 1);
+  assert.deepEqual(kernel.delivered.map((row) => row.signal), ['SIGTERM', 'SIGKILL']);
+  assert.deepEqual(kernel.delivered.map((row) => row.birth), [100, 100]);
+  assert.deepEqual(kernel.delivered.map((row) => row.exe), [RUNTIME_EXE, RUNTIME_EXE]);
+});
+
+test('escalation does not signal a pid reused after SIGTERM', () => {
+  const kernel = controllerKernel();
+  const gateway = controllerGateway(kernel.readRecord, kernel.readProc, kernel.openPidfd);
+  gateway.signal('SIGTERM');
+  kernel.replace();
+  gateway.signal('SIGKILL');
+  assert.equal(kernel.opens(), 1);
+  assert.deepEqual(kernel.delivered, [{ pid: 10, signal: 'SIGTERM', birth: 100, exe: RUNTIME_EXE }]);
+});
+
+test('a missing pidfd does not signal the recorded pid', () => {
+  const delivered = [];
+  assert.throws(
+    () => signalRecordedController('SIGTERM', {
+      readRecord: () => controllerView(),
+      readProc: () => ({ controllerStat: procStat(10, 1, 100), exePath: RUNTIME_EXE }),
+      openPidfd() { throw errno('ENOSYS'); },
+    }, { pidfd: null }),
+    { message: HOME_UNCONFIRMED_MESSAGE },
+  );
+  assert.deepEqual(delivered, []);
+  if (process.platform !== 'linux') {
+    assert.throws(() => openLinuxPidfd(10), (err) => err.code === 'ENOSYS');
+  }
+});
+
+test('the linux package unpacks the pidfd helper', () => {
+  const pkg = require('../package.json');
+  assert.equal(pkg.build.asarUnpack.includes('dist/native/linux-pidfd'), true);
+  assert.equal(pkg.scripts['build:ts'].includes('scripts/build-linux-pidfd.js'), true);
+});
+
+test('the pidfd helper command is the pid and two fifo paths', { timeout: 5000 }, () => {
+  const fs = require('node:fs');
+  const os = require('node:os');
+  const path = require('node:path');
+  const dir = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'pidfd-client-'));
+  const log = path.join(dir, 'log');
+  const helper = path.join(dir, 'helper');
+  fs.writeFileSync(helper, `#!/bin/sh
+printf '%s\\n' "$#" >> '${log}'
+printf '%s\\n' "$1" >> '${log}'
+exec 3>"$2"
+printf '%s\\n' ready >&3
+exec 4<"$3"
+while IFS= read -r line <&4; do
+  printf '%s\\n' "$line" >> '${log}'
+  case $line in
+    SIGTERM|SIGKILL) printf '%s\\n' sent >&3 ;;
+    close) exit 0 ;;
+    *) printf '%s\\n' 'errno EINVAL' >&3 ;;
+  esac
+done
+`, { mode: 0o755 });
+  const pidfd = openLinuxPidfd(10, { helper });
+  try {
+    pidfd.send('SIGTERM');
+    pidfd.send('SIGKILL');
+  } finally {
+    pidfd.close();
+  }
+  const lines = fs.readFileSync(log, 'utf8').split('\n').filter(Boolean);
+  assert.deepEqual(lines.filter((line) => line !== 'close'), ['3', '10', 'SIGTERM', 'SIGKILL']);
+  assert.equal(lines.every((line) => ['3', '10', 'SIGTERM', 'SIGKILL', 'close'].includes(line)), true);
+  fs.rmSync(dir, { recursive: true, force: true });
 });
 
 test('Quit and stop after a retained Home signals only the confirmed controller', async () => {
   let observed = controllerView();
   const kills = [];
-  const adopted = controllerGateway(() => observed, (pid, signal) => {
+  const adopted = boundController(() => observed, (pid, signal) => {
     kills.push([pid, signal]);
     if (signal === 'SIGTERM') observed = controllerView({ controllerStat: null });
   });
@@ -907,10 +1085,10 @@ test('Quit and stop after a retained Home signals only the confirmed controller'
 
   observed = controllerView();
   const later = [];
-  const again = controllerGateway(() => observed, (pid, signal) => later.push([pid, signal]));
+  const again = boundController(() => observed, (pid, signal) => later.push([pid, signal]));
   again.signal('SIGTERM');
   observed = controllerView({ controllerStat: procStat(10, 1, 999) });
-  assert.throws(() => again.signal('SIGKILL'), { message: HOME_UNCONFIRMED_MESSAGE });
+  again.signal('SIGKILL');
   assert.deepEqual(later, [[10, 'SIGTERM']]);
 });
 
