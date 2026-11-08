@@ -6,6 +6,7 @@ const path = require('node:path');
 const test = require('node:test');
 
 const windowsRuntime = require('../dist/main/targets/windowsRuntime');
+const { createGatewaySupervisor } = require('../dist/main/targets/runtimeGateway');
 
 const STOP_HELPER = windowsRuntime.STOP_HELPER;
 const FACTS_HELPER = windowsRuntime.FACTS_HELPER;
@@ -42,7 +43,7 @@ function removeTemp(dir) {
 }
 
 const PRELUDE = `
-import atexit, errno, json, os, signal
+import atexit, errno, json, os, signal, time
 events = []
 bound = {}
 real_readlink = os.readlink
@@ -120,9 +121,14 @@ def pidfd_open(pid, flags=0):
     return 42
 
 def pidfd_send_signal(fd, sig, siginfo=None, flags=0):
+    fault = os.environ.get('ELASTOS_STOP_FAULT') or ''
+    if fault == 'timeout':
+        time.sleep(30)
     birth = birth_of(open(stat_path()).read()) if stat_path() else None
     exe = current_exe()
     note({'api': 'pidfd_send_signal', 'fd': int(fd), 'sig': sig_name(sig), 'birth': birth})
+    if fault == 'eperm':
+        raise OSError(errno.EPERM, 'eperm')
     if (not bound) or int(fd) != bound.get('fd') or birth != bound.get('birth') or exe != bound.get('exe'):
         raise OSError(errno.ESRCH, 'esrch')
     note({'api': 'delivered', 'fd': int(fd), 'pid': bound.get('pid'), 'sig': sig_name(sig), 'birth': bound.get('birth')})
@@ -461,4 +467,168 @@ test('WSL output accumulation stops at the cap', () => {
   total = appendCappedOutput(chunks, total, Buffer.from('more'));
   assert.equal(total, WSL_OUTPUT_MAX);
   assert.equal(Buffer.concat(chunks).length, WSL_OUTPUT_MAX);
+});
+
+function resourceCounts(tracked) {
+  let helpers = 0;
+  let pidfds = 0;
+  for (const pid of tracked.pids) {
+    try {
+      process.kill(pid, 0);
+    } catch (err) {
+      if (err && err.code === 'ESRCH') continue;
+    }
+    helpers += 1;
+    const events = readEvents(tracked.eventsByPid.get(pid));
+    const opened = events.filter((event) => event.api === 'pidfd_open').length;
+    const closed = events.filter((event) => event.api === 'pidfd_close').length;
+    if (opened > closed) pidfds += opened - closed;
+  }
+  let channels = 0;
+  for (const dir of tracked.channels) {
+    try {
+      const info = fs.lstatSync(dir);
+      if (!info.isSymbolicLink() && info.isDirectory()) channels += 1;
+    } catch {
+      // already removed
+    }
+  }
+  return { helpers, channels, pidfds };
+}
+
+function openedPidfds(tracked) {
+  let count = 0;
+  for (const file of tracked.eventFiles) {
+    count += readEvents(file).filter((event) => event.api === 'pidfd_open').length;
+  }
+  return count;
+}
+
+async function waitForBaseline(tracked, before) {
+  const deadline = Date.now() + 2000;
+  let after = resourceCounts(tracked);
+  while (Date.now() < deadline) {
+    if (after.helpers === before.helpers && after.channels === before.channels && after.pidfds === before.pidfds) {
+      return after;
+    }
+    await new Promise((resolve) => { setTimeout(resolve, 20); });
+    after = resourceCounts(tracked);
+  }
+  return after;
+}
+
+function releaseTracked(tracked, root) {
+  for (const pid of tracked.pids) {
+    try {
+      process.kill(pid, 'SIGKILL');
+    } catch {
+      // already exited
+    }
+  }
+  for (const dir of tracked.channels) {
+    try {
+      const info = fs.lstatSync(dir);
+      if (!info.isSymbolicLink() && info.isDirectory()) fs.rmSync(dir, { recursive: true, force: true });
+    } catch {
+      // already removed
+    }
+  }
+  removeTemp(root);
+}
+
+async function withLeakSupervisor(fault, check) {
+  python();
+  const root = makeTemp('elastos-stop-leak-');
+  const stat = writeHome(root);
+  const tracked = {
+    pids: [],
+    channels: [],
+    eventFiles: [],
+    eventsByPid: new Map(),
+  };
+  let spawnCount = 0;
+  const sup = createGatewaySupervisor({
+    binary: '/root/.local/bin/elastos',
+    args: ['home', '--browser'],
+    adoptForControls: true,
+    spawn() { throw new Error('a retained Home is not spawned'); },
+    fetchHealth: async () => ({ status: 200, body: 'OK' }),
+    adoptInstalled: () => windowsRuntime.adoptDistroGatewayProcess({
+      readPid: () => 7,
+      alive: () => true,
+      root,
+      spawn(args) {
+        assert.equal(args[0], 'python3');
+        assert.equal(args[1], '-c');
+        assert.equal(args[2], STOP_HELPER);
+        assert.equal(args[3], root);
+        const channel = args[4];
+        const events = path.join(root, `events-${spawnCount}.json`);
+        spawnCount += 1;
+        tracked.channels.push(channel);
+        tracked.eventFiles.push(events);
+        const child = spawn('python3', ['-c', `${PRELUDE}\n${args[2]}`, args[3], args[4]], {
+          stdio: 'ignore',
+          env: {
+            ...process.env,
+            ELASTOS_STOP_EVENTS: events,
+            ELASTOS_STOP_FAULT: fault,
+            ELASTOS_STOP_RACE: '',
+            ELASTOS_STOP_STAT: stat,
+          },
+        });
+        child.on('error', () => {});
+        if (child.pid) {
+          tracked.pids.push(child.pid);
+          tracked.eventsByPid.set(child.pid, events);
+        }
+        return child;
+      },
+    }),
+    now: () => Date.now(),
+    sleep: async () => {},
+    openUrl() {},
+    log() {},
+    graceMs: 30,
+    pollMs: 10,
+  });
+  const before = resourceCounts(tracked);
+  try {
+    await check({ sup, tracked, before });
+  } finally {
+    releaseTracked(tracked, root);
+  }
+}
+
+async function failStopTwice(fault) {
+  await withLeakSupervisor(fault, async ({ sup, tracked, before }) => {
+    await assert.rejects(() => sup.stop(), new RegExp(HOME_UNCONFIRMED_MESSAGE));
+    await assert.rejects(() => sup.stop(), new RegExp(HOME_UNCONFIRMED_MESSAGE));
+    assert.equal(sup.phase(), 'error');
+    assert.equal(openedPidfds(tracked), 2);
+    const after = await waitForBaseline(tracked, before);
+    assert.deepEqual(after, before);
+  });
+}
+
+test('repeated Stop after a send error returns helper, channel, and pidfd counts to baseline', async () => {
+  await failStopTwice('eperm');
+});
+
+test('TERM and KILL during one Stop share one pidfd', async () => {
+  await withLeakSupervisor('', async ({ sup, tracked, before }) => {
+    await assert.rejects(() => sup.stop(), /ElastOS is still running/);
+    assert.equal(openedPidfds(tracked), 1);
+    const events = readEvents(tracked.eventFiles[0]);
+    assert.deepEqual(
+      events.filter((event) => event.api === 'delivered').map((event) => event.sig),
+      ['SIGTERM', 'SIGKILL'],
+    );
+    const after = await waitForBaseline(tracked, before);
+    assert.deepEqual(after, before);
+  });
+});
+
+test('repeated Stop after a timeout returns helper, channel, and pidfd counts to baseline', { timeout: 60000 }, async () => {
+  await failStopTwice('timeout');
 });

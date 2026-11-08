@@ -1456,12 +1456,14 @@ export function adoptDistroGatewayProcess(deps: {
   readPid?: () => number | null;
   alive?: (pid: number) => boolean | Promise<boolean>;
   stop?: (name: 'TERM' | 'KILL') => void;
+  root?: string;
+  spawn?: (args: readonly string[]) => ChildProcess;
 } = {}): GatewayProcess | null {
   const readPid = deps.readPid ?? (() => readDistroLockPid());
   const alive = deps.alive ?? ((pid: number) => distroPidAlive(pid));
   let session: DistroStopSession | null = null;
   const stop = deps.stop ?? ((name: 'TERM' | 'KILL') => {
-    if (!session) session = createDistroStopSession();
+    if (!session) session = createDistroStopSession({ root: deps.root, spawn: deps.spawn });
     session.signal(name);
   });
   const pid = readPid();
