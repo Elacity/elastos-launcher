@@ -315,6 +315,34 @@ test('Windows controller exit before readiness reports error and does not start 
   assert.equal(argv.includes('--browser'), true);
 });
 
+test('Windows update status read asks for at most 16384 bytes and refuses a larger file', (t) => {
+  const child = require('node:child_process');
+  const fs = require('node:fs');
+  const os = require('node:os');
+  const path = require('node:path');
+  const windows = require('../dist/main/targets/windowsRuntime');
+  const spawnSync = child.spawnSync;
+  let args;
+  t.mock.method(child, 'spawnSync', (_cmd, argv) => {
+    args = argv;
+    return { status: 1, stdout: '', stderr: '', error: undefined };
+  });
+  assert.throws(() => windows.readDistroUpdateStatus(), /could not read a file/);
+  assert.equal(args.at(-1), '16384');
+  assert.equal(args.includes('/root/.local/share/elastos/update-check.json'), true);
+  const script = args[args.indexOf('-c') + 1];
+  const dir = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'update-cap-'));
+  const file = path.join(dir, 'update-check.json');
+  fs.writeFileSync(file, 'x'.repeat(16385));
+  const probed = script.replace("pathlib.PurePosixPath('/root')", `pathlib.PurePosixPath(${JSON.stringify(dir)})`);
+  const refused = spawnSync('python3', ['-c', probed, 'read', file, '16384'], { encoding: 'utf8' });
+  assert.equal(refused.status, 2);
+  fs.writeFileSync(file, '{"ok":true}');
+  const allowed = spawnSync('python3', ['-c', probed, 'read', file, '16384'], { encoding: 'utf8' });
+  assert.equal(allowed.status, 0);
+  assert.equal(Buffer.from(allowed.stdout.trim(), 'base64').toString('utf8'), '{"ok":true}');
+});
+
 test('Runtime 2.0.0 gets the #61 status record only after a successful check and signed head verification', async () => {
   const fixture = require('./helpers/signed-release');
   const { writeSignedUpdateCheck } = require('../dist/main/targets/runtimeUpdate');

@@ -39,7 +39,7 @@ export const DISTRO_SETUP_FAILED = 'ElastOS could not finish setting up its Linu
 export const DISTRO_INSTALL_FAILED = 'ElastOS could not be installed. Click Install to try again.';
 
 const FILE_HELPER = `
-import base64, sys, pathlib
+import base64, os, stat, sys, pathlib
 op, raw = sys.argv[1], sys.argv[2]
 root = pathlib.PurePosixPath('/root')
 target = pathlib.PurePosixPath(raw)
@@ -53,7 +53,21 @@ elif op == 'write':
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(data)
 elif op == 'read':
-    sys.stdout.write(base64.b64encode(path.read_bytes()).decode('ascii'))
+    limit = int(sys.argv[3]) if len(sys.argv) > 3 else None
+    if limit is not None:
+        info = path.lstat()
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode) or info.st_size > limit:
+            raise SystemExit(2)
+        fd = os.open(raw, os.O_RDONLY | os.O_NOFOLLOW)
+        try:
+            data = os.read(fd, limit + 1)
+        finally:
+            os.close(fd)
+        if len(data) > limit:
+            raise SystemExit(2)
+    else:
+        data = path.read_bytes()
+    sys.stdout.write(base64.b64encode(data).decode('ascii'))
 elif op == 'exists':
     raise SystemExit(0 if path.is_file() else 1)
 else:
@@ -425,8 +439,14 @@ export function runDistroRuntimeCommand(args: readonly string[]): Promise<Runtim
   return runWsl(distroRuntimeArgs(args), 15 * 60 * 1000);
 }
 
+/** Same byte cap as the controller status read in DISTRO_STOP_READER. */
+const DISTRO_STATUS_READ_LIMIT = 16384;
+
 export function readDistroUpdateStatus(): string {
-  return readDistroFile(runtimeUpdateCheckPath(runtimeDataDir('linux', DISTRO_HOME, {})));
+  return readDistroFile(
+    runtimeUpdateCheckPath(runtimeDataDir('linux', DISTRO_HOME, {})),
+    DISTRO_STATUS_READ_LIMIT,
+  );
 }
 
 export function distroPackageArgs(): readonly string[] {
@@ -497,12 +517,14 @@ function runWsl(args: readonly string[], timeoutMs: number, input?: Buffer): Pro
   });
 }
 
-function fileArgs(op: string, file: string): string[] {
-  return ['python3', '-c', FILE_HELPER, op, assertDistroPath(file)];
+function fileArgs(op: string, file: string, limit?: number): string[] {
+  const args = ['python3', '-c', FILE_HELPER, op, assertDistroPath(file)];
+  if (limit !== undefined) args.push(String(limit));
+  return args;
 }
 
-function readDistroFile(file: string): string {
-  const result = runWslSync(fileArgs('read', file));
+function readDistroFile(file: string, limit?: number): string {
+  const result = runWslSync(fileArgs('read', file, limit));
   if (result.code !== 0) {
     throw new Error('ElastOS could not read a file in its Linux environment. Click Install to try again.');
   }
