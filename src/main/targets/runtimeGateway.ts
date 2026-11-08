@@ -351,8 +351,10 @@ export function createGatewaySupervisor(deps: GatewaySupervisorDeps): GatewaySup
     owned = null;
     foreign = false;
     if (intentionalStop || current !== 'running') return;
-    current = code === 0 || code === null ? 'stopped' : 'error';
-    note(code === 0 || code === null ? 'ElastOS stopped.' : `ElastOS stopped (exit ${code}). Click Start to try again.`);
+    current = code === 0 ? 'stopped' : 'error';
+    note(code === 0 ? 'ElastOS stopped.' : code === null
+      ? 'ElastOS stopped unexpectedly. Click Start to try again.'
+      : `ElastOS stopped (exit ${code}). Click Start to try again.`);
   }
 
   function ownAdopted(proc: GatewayProcess | null): void {
@@ -979,12 +981,15 @@ export async function adoptInstalledGatewayProcess(
         const lock = JSON.parse(text ?? '{}');
         const controller = status.controller_pid;
         const identity = macProcessIdentity(controller);
-        if (status.host_pid !== pid || typeof lock.generation !== 'string' || status.generation !== lock.generation
-          || !identity || identity.executable !== path.join(data, 'update-controller', 'runtime')
-          || !processCommand(controller, platform)?.startsWith(`${identity.executable} __update-controller `)
-          || Number(psField(pid, 'ppid')) !== controller) return null;
-        stopPid = controller;
-        stopIdentity = identity;
+        if (status.host_pid === pid && typeof lock.generation === 'string' && status.generation === lock.generation
+          && identity && identity.executable === path.join(data, 'update-controller', 'runtime')
+          && processCommand(controller, platform)?.startsWith(`${identity.executable} __update-controller `)
+          && Number(psField(pid, 'ppid')) === controller) {
+          stopPid = controller;
+          stopIdentity = identity;
+        }
+        // A stale controller record grants no authority over that controller.
+        // The independently proved host can still be stopped after a crash.
       } else if (fs.existsSync(path.join(data, 'update-controller', 'status.json'))) {
         return null;
       }
@@ -1004,7 +1009,7 @@ export async function adoptInstalledGatewayProcess(
     if (gone(stopPid, stopIdentity) && !notified) {
       notified = true;
       if (timer) clearInterval(timer);
-      for (const listener of exitListeners) listener(null);
+      for (const listener of exitListeners) listener(gone(pid, hostIdentity) ? 0 : null);
     }
   }
   function hasExited(): boolean {

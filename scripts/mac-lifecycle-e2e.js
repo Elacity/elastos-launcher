@@ -79,13 +79,16 @@ module.exports = async function (app, page, home, options) {
   const controllerStatus = path.join(data, 'update-controller', 'status.json');
   // This controller was started by this test's launcher on the disposable runner.
   const startedController = JSON.parse(fs.readFileSync(controllerStatus, 'utf8')).controller_pid;
-  process.kill(startedController, 'SIGTERM');
+  process.kill(startedController, 'SIGKILL');
+  await status(page, 'error');
+  console.log(`Home retained after controller crash: ${isHealthOk(await probeGatewayHealth())}`);
+  await page.evaluate(() => window.elastos.stop());
   await health(false);
   await status(page, 'stopped');
   await page.click('#open-btn');
   await status(page, 'running');
   await health(true);
-  console.log('PASS spawned controller exit reports Stopped and explicit Start starts Home again');
+  console.log('PASS controller crash reports Error; Stop and explicit Start recover a healthy Home');
 
   const checked = await page.evaluate(() => window.elastos.checkForUpdate());
   assert.equal(checked.updateAvailable, false);

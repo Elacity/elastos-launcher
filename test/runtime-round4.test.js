@@ -61,7 +61,7 @@ for (const adopted of [false, true]) {
       proc.output('host executable was replaced on disk');
       health = false;
       proc.exit(code);
-      assert.equal(sup.phase(), code === 0 || code === null ? 'stopped' : 'error');
+      assert.equal(sup.phase(), code === 0 ? 'stopped' : 'error');
       assert.equal(spawned, firstCount, 'the launcher must not restart the Home controller');
       health = true;
       await sup.start();
@@ -410,6 +410,11 @@ test('a refused Stop signal reports error and keeps the existing supervisor avai
 
 test('Mac adoption accepts the native executable path of a hardened process in a private directory', async (t) => {
   if (process.platform !== 'darwin') return t.skip('native macOS executable identity');
+  const helper = path.join(__dirname, '../dist/native/mac-process-info');
+  const headers = child.execFileSync('otool', ['-l', helper], { encoding: 'utf8', timeout: 5000 });
+  const versions = [...headers.matchAll(/\bminos\s+(\S+)/g)].map((match) => match[1]);
+  assert.equal(versions.length, 2, 'both native helper architectures are built');
+  assert.equal(versions.every((version) => version === '11.0'), true, 'helper must not inherit this build host’s OS floor');
   const home = fs.mkdtempSync(path.join(fs.realpathSync(os.homedir()), 'round4 native home-'));
   t.mock.method(os, 'homedir', () => home);
   const data = path.join(home, 'Library', 'Application Support', 'elastos');
@@ -439,4 +444,17 @@ test('Mac adoption accepts the native executable path of a hardened process in a
     if (proc.exitCode === null && proc.signalCode === null) proc.kill('SIGTERM');
     await exited;
   }
+});
+
+test('Mac adoption stops a proved orphaned host without signaling the stale controller record', async (t) => {
+  const w = adoption(t);
+  fs.mkdirSync(path.join(w.data, 'update-controller'));
+  fs.writeFileSync(path.join(w.data, 'update-controller', 'status.json'), JSON.stringify({
+    host_pid: 701, generation: 'g1', controller_pid: 702,
+  }));
+  w.parent(1); // The original controller exited; the host is still independently proved.
+  const proc = await w.adopt();
+  assert.ok(proc);
+  proc.signal('SIGTERM');
+  assert.deepEqual(w.signals, [[701, 'SIGTERM']]);
 });
