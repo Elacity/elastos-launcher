@@ -25,7 +25,7 @@ async function main() {
       const f=global.__fixture;
       launch.getStatus=async()=>f.status;
       launch.getOpenAtLogin=()=>false; launch.setOpenAtLogin=v=>f.calls.push(['login',v]);
-      launch.install=async progress=>{f.calls.push(['install']);progress('Starting Home');f.status='running';};
+      launch.install=async progress=>{f.calls.push(['install']);progress('Setting up');f.status='stopped';};
       launch.start=async()=>{f.calls.push(['start']);f.status='running';};
       launch.stop=async()=>{f.calls.push(['stop']);f.status='stopped';};
       launch.shutdown=async()=>{};
@@ -46,6 +46,7 @@ async function main() {
     const native=nativeControls(app,page);
     await native.drag();
     await native.click('#login');
+    await waitFor(async()=>!(await page.locator('#login').isChecked()),10000,'Native login click did not uncheck Open at Login');
     await native.click('#primary');
     await waitFor(async()=>await page.locator('#primary').innerText()==='Open Home',10000,'No ready screen');
     assert.equal(await page.locator('#message').innerText(),'Home is ready.');

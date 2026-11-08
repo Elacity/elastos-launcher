@@ -215,6 +215,10 @@ async function install(login: boolean): Promise<void> {
     launch.setOpenAtLogin(login);
     showWindow({ kind: 'progress', message: 'Downloading' });
     await launch.install(step);
+    if (homeState.quitting || generation !== actionGeneration) return;
+    step('Starting Home');
+    await launch.start();
+    if (homeState.quitting || generation !== actionGeneration) return;
     setWindowState({ kind: 'install', ready: true, message: 'Home is ready.' });
     void refreshMaintenance(generation);
   });

@@ -13,8 +13,19 @@ function nativeControls(app, page) {
   async function bounds() {return app.evaluate(({BrowserWindow})=>BrowserWindow.getAllWindows()[0].getContentBounds());}
   return {
     async click(selector) {
-      const box=await page.locator(selector).boundingBox(); assert.ok(box);
-      const win=await bounds(); event([win.x+box.x+box.width/2,win.y+box.y+box.height/2]);
+      const deadline = Date.now() + 10000;
+      let before = await bounds();
+      while (Date.now() < deadline) {
+        await new Promise(resolve => setTimeout(resolve, 100));
+        const win = await bounds();
+        if (['x', 'y', 'width', 'height'].every(key => win[key] === before[key])) {
+          const box = await page.locator(selector).boundingBox(); assert.ok(box);
+          event([win.x+box.x+box.width/2,win.y+box.y+box.height/2]);
+          return;
+        }
+        before = win;
+      }
+      throw new Error(`Window content bounds did not stabilize: ${JSON.stringify(before)}`);
     },
     async drag() {
       const before=await bounds(); const strip=await page.locator('.title-bar').boundingBox();
