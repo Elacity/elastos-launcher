@@ -222,3 +222,63 @@ test('Runtime 2.0.0 gets the #61 status record only after a successful check and
     () => raw, () => bridge(fixture.SIGNED_HEAD)), /network failed/);
   assert.equal(raw, undefined);
 });
+
+test('Windows 2.0.0 update check writes the signed record and ignores the command text', async () => {
+  const fixture = require('./helpers/signed-release');
+  const { checkDistroRuntimeUpdate } = require('../dist/main/targets/runtimeTarget');
+  const pin = { channel: 'stable', version: '2.0.0', headCid: null, publishable: true,
+    maintainerDid: fixture.FIXTURE_DID, publisherGateway: 'https://publisher.example' };
+  let raw;
+  let ran = false;
+  const absent = () => { throw new Error('missing'); };
+  const result = await checkDistroRuntimeUpdate({
+    installed: () => true,
+    current: () => 'ElastOS Runtime v2.0.0',
+    run: async (args) => {
+      ran = true;
+      assert.deepEqual(args, ['update', '--check']);
+      return { code: 0, stdout: 'update available 9.9.9\n', stderr: '' };
+    },
+    readStatus: () => {
+      if (raw === undefined) throw new Error('missing');
+      return raw;
+    },
+    writeStatus: (value) => { raw = value; },
+    fetchText: async () => fixture.SIGNED_HEAD,
+    pin,
+    releaseUrl: 'https://publisher.example',
+  });
+  assert.equal(ran, true);
+  assert.equal(result.updateAvailable, false);
+  assert.equal(result.current, 'ElastOS Runtime v2.0.0');
+  assert.equal(JSON.parse(raw).outcome, 'up_to_date');
+
+  raw = undefined;
+  ran = false;
+  const missing = await checkDistroRuntimeUpdate({
+    installed: () => false,
+    current: () => 'ElastOS Runtime v2.0.0',
+    run: async () => { ran = true; return { code: 0, stdout: '', stderr: '' }; },
+    readStatus: absent,
+    writeStatus: () => { raw = 'written'; },
+    fetchText: async () => fixture.SIGNED_HEAD,
+    pin,
+    releaseUrl: 'https://publisher.example',
+  });
+  assert.equal(ran, false);
+  assert.equal(raw, undefined);
+  assert.equal(missing.updateAvailable, false);
+  assert.equal(missing.current, 'not installed');
+
+  await assert.rejects(() => checkDistroRuntimeUpdate({
+    installed: () => true,
+    current: () => 'ElastOS Runtime v2.0.0',
+    run: async () => ({ code: 1, stdout: '', stderr: 'network failed' }),
+    readStatus: absent,
+    writeStatus: (value) => { raw = value; },
+    fetchText: async () => fixture.SIGNED_HEAD,
+    pin,
+    releaseUrl: 'https://publisher.example',
+  }), /network failed/);
+  assert.equal(raw, undefined);
+});

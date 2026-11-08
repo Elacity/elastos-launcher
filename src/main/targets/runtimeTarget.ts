@@ -35,6 +35,7 @@ import {
   readDistroUpdateStatus,
   readDistroVersion,
   runDistroRuntimeCommand,
+  writeDistroUpdateStatus,
 } from './windowsRuntime';
 import { LaunchTarget, UpdateCheck } from './types';
 
@@ -175,9 +176,15 @@ async function runtimeCheckForUpdate(): Promise<UpdateCheck> {
     latest: null,
   }, releaseUrl);
   if (process.platform === 'win32') {
-    if (!distroIsInstalled()) return notInstalled;
-    const parsed = await checkRuntimeUpdate(runDistroRuntimeCommand, readDistroUpdateStatus);
-    return toUpdateCheck(readDistroVersion(), parsed, releaseUrl);
+    return checkDistroRuntimeUpdate({
+      installed: distroIsInstalled,
+      current: readDistroVersion,
+      run: runDistroRuntimeCommand,
+      readStatus: readDistroUpdateStatus,
+      writeStatus: writeDistroUpdateStatus,
+      fetchText: runtimeInstall.fetchRuntimeText,
+      releaseUrl,
+    });
   }
   if (runtimeInstallBlock(process.platform, process.arch)) return notInstalled;
   if (!findRuntimeBinary(os.homedir(), process.env.PATH ?? '')) return notInstalled;
@@ -187,6 +194,35 @@ async function runtimeCheckForUpdate(): Promise<UpdateCheck> {
     : undefined;
   const parsed = await checkRuntimeUpdate(runRuntimeCommand, readHostUpdateStatus, compatibilityRecord);
   return toUpdateCheck(current, parsed, releaseUrl);
+}
+
+export async function checkDistroRuntimeUpdate(deps: {
+  installed: () => boolean;
+  current: () => string;
+  run: RuntimeCommand;
+  readStatus: () => string;
+  writeStatus: (raw: string) => void;
+  fetchText: (url: string) => Promise<string>;
+  releaseUrl: string;
+  pin?: ReturnType<typeof loadActiveRuntimePin>;
+}): Promise<UpdateCheck> {
+  const notInstalled = toUpdateCheck('not installed', {
+    updateAvailable: false,
+    detail: 'not installed',
+    latest: null,
+  }, deps.releaseUrl);
+  if (!deps.installed()) return notInstalled;
+  const current = deps.current();
+  const compatibilityRecord = runtimeInstall.installedVersionMatches(current, '2.0.0')
+    ? () => writeSignedUpdateCheck(
+      current,
+      deps.pin ?? loadActiveRuntimePin(),
+      deps.fetchText,
+      deps.writeStatus,
+    )
+    : undefined;
+  const parsed = await checkRuntimeUpdate(deps.run, deps.readStatus, compatibilityRecord);
+  return toUpdateCheck(current, parsed, deps.releaseUrl);
 }
 
 export async function rollbackRuntimeUpdate(
