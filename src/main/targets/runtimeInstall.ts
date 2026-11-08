@@ -70,7 +70,11 @@ export class PinMismatchError extends Error {
 
 /** Compare numeric SemVer components and prerelease identifiers, never string prefixes. */
 export function versionAtLeast(version: string | null, floor: string | null): boolean {
-  const parse = (value: string | null) => /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+[0-9A-Za-z.-]+)?$/.exec(value ?? '');
+  const parse = (value: string | null) => {
+    const parsed = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/.exec(value ?? '');
+    if (parsed?.[4]?.split('.').some((part) => /^0\d+$/.test(part))) return null;
+    return parsed;
+  };
   const actual = parse(version?.replace(/^ElastOS Runtime v/, '') ?? null);
   const minimum = parse(floor);
   if (!actual || !minimum) return false;

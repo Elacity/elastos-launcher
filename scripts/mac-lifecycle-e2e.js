@@ -1,6 +1,7 @@
 const assert = require('node:assert/strict');
 const { spawn } = require('node:child_process');
 const fs = require('node:fs');
+const http = require('node:http');
 const path = require('node:path');
 const { _electron: electron } = require('playwright');
 const { isHealthOk, probeGatewayHealth } = require('../dist/main/targets/runtimeGateway');
@@ -86,6 +87,7 @@ module.exports = async function (app, page, home, options) {
   const external = spawn(binary, ['home', '--browser'], { detached: true, stdio: 'ignore', env: runtimeChildEnv(options.env) });
   console.log(`Started independent Home pid ${external.pid}`);
   let adopted;
+  let foreign;
   try {
     await health(true);
     adopted = await electron.launch(options);
@@ -103,9 +105,20 @@ module.exports = async function (app, page, home, options) {
     await adopted.close();
     await health(false);
     console.log('PASS Quit and stop Home closes the listener');
+    foreign = http.createServer((_request, response) => response.end('OK'));
+    await new Promise((resolve, reject) => { foreign.once('error', reject); foreign.listen(8090, '127.0.0.1', resolve); });
+    adopted = await electron.launch(options);
+    const conflict = await adopted.firstWindow();
+    await waitFor(async () => (await conflict.locator('#error-text').innerText()).includes('port 8090'),
+      30000, 'A foreign listener did not get a clear port 8090 message');
+    assert.equal(foreign.listening, true);
+    console.log('PASS a foreign OK listener gets a clear port 8090 message and is left running');
+    await adopted.close();
+    assert.equal(foreign.listening, true);
     return adopted;
   } finally {
     if (adopted) await adopted.close().catch(() => {});
+    if (foreign) await new Promise((resolve) => foreign.close(resolve));
     // This is the only independently spawned Home. Its ChildProcess object
     // records the pid owned by this test, including an exec into its controller.
     if (external.exitCode === null && external.signalCode === null) external.kill('SIGTERM');

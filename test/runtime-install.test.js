@@ -620,7 +620,7 @@ test('a new signed publisher head above the floor installs without a launcher re
   assert.equal(calls.some((call) => call[0] === 'installer'), false);
   assert.equal(pinMismatchField(canaryPin({ headCid: null }), verifyReleaseHead(newer, FIXTURE_DID)), null);
   assert.equal(versionAtLeast('2.0.1', '2.0.0'), true);
-  for (const version of ['1.99.99', '2.0.0-rc.1', '2.0', '2.0.00', 'garbage']) {
+  for (const version of ['1.99.99', '2.0.0-rc.1', '2.0', '2.0.00', '2.0.1-rc.02', '2.0.1+build..1', 'garbage']) {
     assert.equal(versionAtLeast(version, '2.0.0'), false, version);
     assert.equal(pinMismatchField(canaryPin(), verifyReleaseHead(signedHead({ version }), FIXTURE_DID)), 'version');
   }
