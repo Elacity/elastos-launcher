@@ -1,4 +1,5 @@
 import { execFile as execFileCb } from 'child_process';
+import { randomUUID } from 'crypto';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
@@ -6,6 +7,7 @@ import { findRuntimeBinary } from './runtimeProbe';
 import { runtimeChildEnv, verifyReleaseHead } from './releaseHead';
 import { UpdateCheck } from './types';
 import { ActiveRuntimePin } from './runtimePin';
+import { removeVerifiedTarget } from './runtimeUninstall';
 import { channelGateway, pinMismatchField, PinMismatchError, versionAtLeast, installedVersionMatches } from './runtimeInstall';
 
 export const UPDATE_CANCELLED_LINE = 'Update cancelled.';
@@ -97,23 +99,24 @@ export async function verifiedHeadForRollback(candidate: string, verify: HeadVer
 export async function checkRuntimeUpdate(
   run: RuntimeCommand,
   readStatus: () => string,
-  afterCheck?: () => Promise<void>,
+  fallback?: () => Promise<string>,
 ): Promise<ParsedUpdateCheck> {
   const result = await run(['update', '--check']);
   if (result.code !== 0) {
     throw new Error(result.stderr.trim() || result.stdout.trim() || 'Could not check for an ElastOS update.');
   }
-  await afterCheck?.();
-  let raw: string;
-  try {
-    raw = readStatus();
-  } catch {
-    throw new Error(UPDATE_STATUS_UNREADABLE);
-  }
-  return parseUpdateCheckStatus(raw);
+  const native = () => {
+    try { return parseUpdateCheckStatus(readStatus()); } catch { return null; }
+  };
+  const record = native();
+  if (record) return record;
+  if (!fallback) throw new Error(UPDATE_STATUS_UNREADABLE);
+  const raw = await fallback();
+  // Runtime may finish writing its refusal-aware decision while we fetch.
+  return native() ?? parseUpdateCheckStatus(raw);
 }
 
-/** Runtime 2.0.0 predates #61's status file. Derive that record from signed data. */
+/** Runtime 2.0.0 has no status file. Keep this signed fallback launcher-owned. */
 export async function writeSignedUpdateCheck(
   current: string,
   pin: ActiveRuntimePin,
@@ -134,6 +137,24 @@ export async function writeSignedUpdateCheck(
     latest_version: head.version,
     offered,
   }));
+}
+
+export function launcherUpdateStatusStore(homeDir: string): { read(): string; write(raw: string): void } {
+  const dir = path.join(homeDir, '.elastos-launcher');
+  const file = path.join(dir, 'update-check.json');
+  return {
+    read: () => fs.readFileSync(file, 'utf8'),
+    write(raw) {
+      fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+      const temporary = `${file}.${randomUUID()}.tmp`;
+      try {
+        fs.writeFileSync(temporary, raw, { flag: 'wx', mode: 0o600 });
+        fs.renameSync(temporary, file);
+      } finally {
+        if (fs.existsSync(temporary)) removeVerifiedTarget(temporary);
+      }
+    },
+  };
 }
 
 export async function applyRuntimeUpdate(

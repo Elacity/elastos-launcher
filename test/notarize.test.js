@@ -7,6 +7,11 @@ for (const status of ['Accepted', 'Invalid', 'In Progress', 'invalid-json', 'fai
     const platform = Object.getOwnPropertyDescriptor(process, 'platform');
     Object.defineProperty(process, 'platform', { value: 'darwin' });
     t.after(() => Object.defineProperty(process, 'platform', platform));
+    for (const key of ['NOTARIZE_MAC', 'MAC_RELEASE_STRICT']) {
+      const old = process.env[key];
+      process.env[key] = 'true';
+      t.after(() => { if (old === undefined) delete process.env[key]; else process.env[key] = old; });
+    }
     for (const key of ['APPLE_ID', 'APPLE_APP_SPECIFIC_PASSWORD', 'APPLE_TEAM_ID']) {
       const old = process.env[key];
       process.env[key] = 'test-credential';
@@ -39,5 +44,21 @@ for (const status of ['Accepted', 'Invalid', 'In Progress', 'invalid-json', 'fai
       });
       assert.equal(calls.length, 1);
     }
+  });
+}
+
+for (const enabled of [false, true]) {
+  test(`test builds survive unavailable notarization (requested=${enabled})`, async (t) => {
+    const platform = Object.getOwnPropertyDescriptor(process, 'platform');
+    Object.defineProperty(process, 'platform', { value: 'darwin' });
+    t.after(() => Object.defineProperty(process, 'platform', platform));
+    for (const [key, value] of Object.entries({ NOTARIZE_MAC: String(enabled), MAC_RELEASE_STRICT: 'false', APPLE_ID: '' })) {
+      const old = process.env[key];
+      process.env[key] = value;
+      t.after(() => { if (old === undefined) delete process.env[key]; else process.env[key] = old; });
+    }
+    t.mock.method(child, 'execFileSync', () => { throw new Error('Apple is unavailable'); });
+    delete require.cache[require.resolve('../scripts/notarize')];
+    await require('../scripts/notarize')({ artifactPaths: ['/build/ElastOS.dmg'] });
   });
 }

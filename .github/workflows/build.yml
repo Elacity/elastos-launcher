@@ -4,7 +4,12 @@ on:
   push:
     tags:
       - 'v*'  # Triggers on version tags like v0.1.1, v1.0.0
-  workflow_dispatch:  # Allows manual trigger from GitHub UI
+  workflow_dispatch:
+    inputs:
+      notarize:
+        description: 'Try Apple notarization for this test build (failure is nonblocking)'
+        type: boolean
+        default: false
 
 # Grant write permissions for creating releases
 permissions:
@@ -25,6 +30,9 @@ jobs:
 
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
+    env:
+      MAC_RELEASE_STRICT: ${{ startsWith(github.ref, 'refs/tags/') }}
+      NOTARIZE_MAC: ${{ startsWith(github.ref, 'refs/tags/') || inputs.notarize == true || vars.NOTARIZE_MAC == 'true' }}
 
     steps:
       - name: Checkout code
@@ -46,10 +54,12 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build for macOS (with signing)
+        id: signed_mac
         if: matrix.platform == 'mac'
+        continue-on-error: ${{ !startsWith(github.ref, 'refs/tags/') }}
         run: |
           set -euo pipefail
-          for name in CSC_LINK CSC_KEY_PASSWORD APPLE_ID APPLE_APP_SPECIFIC_PASSWORD APPLE_TEAM_ID; do
+          for name in CSC_LINK CSC_KEY_PASSWORD; do
             test -n "${!name}" || { echo "Missing required credential $name"; exit 1; }
           done
           npm run build:mac -- --arm64 --publish never -c.forceCodeSigning=true
@@ -61,6 +71,13 @@ jobs:
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
 
+      - name: Build macOS test app with ad-hoc signing
+        if: matrix.platform == 'mac' && steps.signed_mac.outcome == 'failure' && !startsWith(github.ref, 'refs/tags/')
+        run: npm run build:mac -- --arm64 --publish never -c.mac.identity=- -c.mac.hardenedRuntime=false -c.forceCodeSigning=false
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Verify macOS code signature
         if: matrix.platform == 'mac'
         run: |
@@ -68,9 +85,15 @@ jobs:
           APP_PATH="dist-electron/mac-arm64/ElastOS.app"
           test -d "$APP_PATH"
           codesign --verify --deep --strict --verbose=2 "$APP_PATH"
-          spctl -a -vv "$APP_PATH"
+          codesign -dv "$APP_PATH" 2>&1
+          node scripts/verify-mac-app.js "$APP_PATH"
+          if [[ "$MAC_RELEASE_STRICT" == true ]]; then
+            spctl -a -vv "$APP_PATH"
+          fi
           for dmg in dist-electron/*.dmg; do
-            xcrun stapler validate "$dmg"
+            if [[ "$MAC_RELEASE_STRICT" == true ]]; then
+              xcrun stapler validate "$dmg"
+            fi
             shasum -a 256 "$dmg"
           done
 

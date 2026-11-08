@@ -26,15 +26,22 @@ async function waitFor(check, timeoutMs, message) {
 }
 
 async function status(page, wanted) {
-  // Poll from Node. Playwright's waitForFunction compiles a predicate inside
-  // the page, where the launcher's strict CSP correctly refuses unsafe-eval.
-  await waitFor(async () => await page.evaluate(() => window.elastos.getStatus()) === wanted,
-    180000, `Launcher status did not become ${wanted}`);
-  await waitFor(async () => (await page.locator('#status-text').innerText()).toLowerCase() === wanted,
-    10000, `Window status did not become ${wanted}`);
+  let last = '';
+  try {
+    await waitFor(async () => {
+      last = await page.evaluate(() => window.elastos.getStatus());
+      return last === wanted;
+    }, 180000, `Launcher status did not become ${wanted}`);
+    await waitFor(async () => (await page.locator('#status-text').innerText()).toLowerCase() === wanted,
+      10000, `Window status did not become ${wanted}`);
+  } catch (error) {
+    console.log(`Status failure wanted=${wanted} last=${last} window=${await page.locator('#status-text').innerText()} error=${await page.locator('#error-text').innerText()}`);
+    throw error;
+  }
 }
 
 module.exports = async function (app, page, home, options) {
+  assert.equal((await page.locator('#logs-content').innerText()).includes('Keep this terminal open'), false);
   await app.evaluate(({ shell }) => {
     global.__openedHome = [];
     shell.openExternal = async (url) => { global.__openedHome.push(url); };
@@ -50,7 +57,14 @@ module.exports = async function (app, page, home, options) {
   assert.equal(await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].isVisible()), false);
   await health(true);
   console.log('PASS closing the window keeps Home running');
-  await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].show());
+  await app.evaluate(({ app, BrowserWindow }) => {
+    app.focus({ steal: true });
+    const window = BrowserWindow.getAllWindows()[0];
+    window.show();
+    window.focus();
+  });
+  await waitFor(() => app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].isFocused()),
+    10000, 'The launcher window did not regain focus');
 
   await page.click('#power-btn');
   await status(page, 'stopped');
@@ -64,9 +78,11 @@ module.exports = async function (app, page, home, options) {
   const checked = await page.evaluate(() => window.elastos.checkForUpdate());
   assert.equal(checked.updateAvailable, false);
   const data = path.join(home, 'Library', 'Application Support', 'elastos');
-  const update = JSON.parse(fs.readFileSync(path.join(data, 'update-check.json'), 'utf8'));
+  const nativeUpdate = path.join(data, 'update-check.json');
+  const update = JSON.parse(fs.readFileSync(fs.existsSync(nativeUpdate) ? nativeUpdate
+    : path.join(home, '.elastos-launcher', 'update-check.json'), 'utf8'));
   assert.equal(update.outcome, 'up_to_date');
-  console.log('PASS elastos update --check writes up_to_date');
+  console.log('PASS update check reads the Runtime record or launcher-owned signed fallback');
   // Stable has no newer signed release. Expose the existing button to exercise
   // its real handler and terminal command against the current signed release.
   await page.evaluate(() => document.querySelector('#update-btn').classList.remove('hidden'));
@@ -122,8 +138,9 @@ module.exports = async function (app, page, home, options) {
     await new Promise((resolve, reject) => { foreign.once('error', reject); foreign.listen(8090, '127.0.0.1', resolve); });
     adopted = await electron.launch(options);
     const conflict = await adopted.firstWindow();
-    await waitFor(async () => (await conflict.locator('#error-text').innerText()).includes('port 8090'),
-      30000, 'A foreign listener did not get a clear port 8090 message');
+    await waitFor(async () => /port 8090/i.test(await conflict.locator('#error-title').innerText())
+      && /another program/i.test(await conflict.locator('#error-text').innerText()),
+    30000, 'A foreign listener did not get a clear port 8090 message');
     assert.equal(foreign.listening, true);
     console.log('PASS a foreign OK listener gets a clear port 8090 message and is left running');
     await adopted.close();

@@ -20,8 +20,7 @@ expect {
 }
 `;
 
-module.exports = async function (context) {
-  if (process.platform !== 'darwin') return [];
+async function notarize(context) {
   const artifacts = context.artifactPaths.filter((file) => /\.(dmg|zip)$/.test(file));
   if (!artifacts.length) throw new Error('No macOS artifact was produced.');
   for (const name of ['APPLE_ID', 'APPLE_APP_SPECIFIC_PASSWORD', 'APPLE_TEAM_ID']) {
@@ -53,4 +52,20 @@ module.exports = async function (context) {
     }
   }
   return artifacts;
+}
+
+module.exports = async function (context) {
+  if (process.platform !== 'darwin') return [];
+  const strict = process.env.MAC_RELEASE_STRICT === 'true';
+  if (!strict && process.env.NOTARIZE_MAC !== 'true') {
+    console.log('[notarize] Skipped for this test build.');
+    return [];
+  }
+  try {
+    return await notarize(context);
+  } catch (error) {
+    if (strict) throw error;
+    console.warn(`[notarize] Test build continues without notarization: ${error.message}`);
+    return [];
+  }
 };
