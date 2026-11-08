@@ -155,7 +155,7 @@ function adoption(t) {
   const lock = path.join(data, 'host-process.lock');
   fs.writeFileSync(lock, JSON.stringify({ pid: 701, addr: 'localhost:8090', generation: 'g1' }));
   let executable = binary;
-  let birth = 'Sat Nov  7 21:00:00 2026';
+  let birth = '1762552800.123456';
   let controllerBirth = birth;
   let parent = 702;
   let alive = true;
@@ -167,17 +167,15 @@ function adoption(t) {
     done(null, 'p701\nn127.0.0.1:8090\nn[::1]:8090\n');
   });
   t.mock.method(child, 'execFileSync', (file, args) => {
-    if (file === '/usr/bin/vmmap') {
+    if (path.basename(file) === 'mac-process-info') {
       const pid = Number(args[args.length - 1]);
-      return `Path: ${pid === 701 ? executable : `${data}/update-controller/runtime`}\nLaunch Time: ${pid === 701 ? birth : controllerBirth}\n`;
+      return `${pid === 701 ? birth : controllerBirth}\n${pid === 701 ? executable : `${data}/update-controller/runtime`}`;
     }
     assert.equal(file, 'ps');
     const field = args[args.length - 1];
     const pid = Number(args[1]);
     if (field === 'command=') return pid === 701 ? `${executable} gateway --addr localhost:8090`
       : `${data}/update-controller/runtime __update-controller --receipt private-file`;
-    if (field === 'comm=') return pid === 701 ? executable : `${data}/update-controller/runtime`;
-    if (field === 'lstart=') return pid === 701 ? birth : controllerBirth;
     if (field === 'ppid=') return String(parent);
     throw new Error(`unexpected ps field ${field}`);
   });
@@ -212,7 +210,7 @@ test('adoptInstalledGatewayProcess rechecks host birth before TERM and KILL and 
   let exits = 0;
   proc.onExit(() => { exits++; });
   proc.signal('SIGTERM');
-  w.birth('reused pid');
+  w.birth('1762552801.123456');
   assert.throws(() => proc.signal('SIGKILL'), /identity|changed|reused/i);
   assert.equal(await proc.hasExited(), true);
   w.poll();
@@ -229,7 +227,7 @@ test('adoptInstalledGatewayProcess rechecks the controller birth before every si
   const proc = await w.adopt();
   assert.ok(proc);
   proc.signal('SIGTERM');
-  w.controllerBirth('reused controller');
+  w.controllerBirth('1762552801.123456');
   assert.throws(() => proc.signal('SIGKILL'), /identity|changed|reused/i);
   assert.deepEqual(w.signals, [[702, 'SIGTERM']]);
 });
@@ -321,7 +319,7 @@ test('Stop, removal and Restart pass their adoption intent to the real target su
 test('adoptInstalledGatewayProcess rejects PID reuse during socket inspection', async (t) => {
   const w = adoption(t);
   t.mock.method(child, 'execFile', (_file, _args, _options, done) => {
-    w.birth('new host while lsof was pending');
+    w.birth('1762552801.123456');
     done(null, 'p701\nn127.0.0.1:8090\n');
   });
   assert.equal(await w.adopt(), null);
@@ -408,4 +406,37 @@ test('a refused Stop signal reports error and keeps the existing supervisor avai
   await assert.rejects(() => sup.stop(), /identity changed/);
   assert.equal(sup.phase(), 'error');
   await assert.rejects(() => sup.stop(), /identity changed/);
+});
+
+test('Mac adoption accepts the native executable path of a hardened process in a private directory', async (t) => {
+  if (process.platform !== 'darwin') return t.skip('native macOS executable identity');
+  const home = fs.mkdtempSync(path.join(fs.realpathSync(os.homedir()), 'round4 native home-'));
+  t.mock.method(os, 'homedir', () => home);
+  const data = path.join(home, 'Library', 'Application Support', 'elastos');
+  const binary = path.join(home, '.local', 'bin', 'elastos');
+  fs.mkdirSync(data, { recursive: true });
+  fs.mkdirSync(path.dirname(binary), { recursive: true });
+  const source = path.join(home, 'fixture.c');
+  fs.writeFileSync(source, '#include <unistd.h>\nint main(void) { for (;;) pause(); }\n');
+  const executable = path.join(home, 'installed-runtime');
+  child.execFileSync('cc', [source, '-o', executable], { timeout: 30000 });
+  child.execFileSync('codesign', ['--force', '--sign', '-', '--options', 'runtime', executable], { timeout: 5000 });
+  fs.symlinkSync(executable, binary);
+  const proc = child.spawn(binary, ['gateway'], { stdio: 'ignore' });
+  await new Promise((resolve, reject) => { proc.once('spawn', resolve); proc.once('error', reject); });
+  const exited = new Promise((resolve) => proc.once('exit', resolve));
+  try {
+    fs.writeFileSync(path.join(data, 'host-process.lock'), JSON.stringify({ pid: proc.pid, addr: 'localhost:8090' }));
+    t.mock.method(child, 'execFile', (_file, _args, _options, done) => {
+      done(null, `p${proc.pid}\nn127.0.0.1:8090\n`);
+    });
+    const adopted = await gateway.adoptInstalledGatewayProcess('darwin', home);
+    assert.ok(adopted, 'kernel identity must work for a real signed executable in a private path');
+    adopted.signal('SIGTERM');
+    await exited;
+    assert.equal(adopted.hasExited(), true);
+  } finally {
+    if (proc.exitCode === null && proc.signalCode === null) proc.kill('SIGTERM');
+    await exited;
+  }
 });

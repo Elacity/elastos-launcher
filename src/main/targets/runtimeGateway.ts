@@ -132,9 +132,8 @@ export function installedGatewayKind(input: {
   if (!input.command) return null;
   const command = input.command.trim();
   if (input.verifiedExecutable) {
-    if (!command.startsWith(`${input.verifiedExecutable} `)) return null;
-    const args = command.slice(input.verifiedExecutable.length).trim();
-    return /^(gateway(?:\s|$)|home\s+--browser(?:\s|$))/.test(args) ? kind : null;
+    // argv[0] may be an alias or symlink; authority comes from the kernel path.
+    return /\bgateway\b|\bhome\s+--browser(?:\s|$)/.test(command) ? kind : null;
   }
   if (!/(^|[\\/\s])elastos(\.exe)?(\s|$)/i.test(command)
     || !(/\bgateway\b/.test(command) || /\bhome\s+--browser(?:\s|$)/.test(command))) return null;
@@ -858,14 +857,15 @@ function psField(pid: number, field: string): string {
 function macProcessIdentity(pid: number): MacProcessIdentity | null {
   if (!Number.isInteger(pid) || pid <= 0) return null;
   try {
-    // vmmap reports the kernel's executable path and precise launch time.
-    // ps comm is argv[0] on macOS and can be forged.
-    const report = execFileSync('/usr/bin/vmmap', ['-w', '-summary', String(pid)], {
-      encoding: 'utf8', timeout: 2000, maxBuffer: 64 * 1024, env: { ...process.env, LC_ALL: 'C' },
+    const helper = path.join(__dirname, '../../native/mac-process-info')
+      .replace(`${path.sep}app.asar${path.sep}`, `${path.sep}app.asar.unpacked${path.sep}`);
+    const report = execFileSync(helper, [String(pid)], {
+      encoding: 'utf8', timeout: 1000, maxBuffer: 16 * 1024,
     });
-    const executable = report.match(/^Path:[ \t]+(.+)$/m)?.[1]?.trim() ?? '';
-    const start = report.match(/^Launch Time:[ \t]+(.+)$/m)?.[1]?.trim() ?? '';
-    if (!start || !path.isAbsolute(executable)) return null;
+    const newline = report.indexOf('\n');
+    const start = report.slice(0, newline);
+    const executable = report.slice(newline + 1);
+    if (!/^\d+\.\d{6}$/.test(start) || !path.isAbsolute(executable) || executable.includes('\0')) return null;
     return { executable, start };
   } catch {
     return null;
