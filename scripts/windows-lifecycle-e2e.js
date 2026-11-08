@@ -1,0 +1,77 @@
+const assert = require('node:assert/strict');
+const { spawnSync } = require('node:child_process');
+const { isHealthOk, probeGatewayHealth } = require('../dist/main/targets/runtimeGateway');
+const { runtimeDataDir, runtimeUpdateCheckPath } = require('../dist/main/targets/runtimePaths');
+
+async function health(wanted) {
+  const deadline = Date.now() + 180000;
+  while (Date.now() < deadline) {
+    if (isHealthOk(await probeGatewayHealth()) === wanted) return;
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+  throw new Error(`Home health did not become ${wanted}`);
+}
+
+async function waitFor(check, timeoutMs, message) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await check()) return;
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+  throw new Error(message);
+}
+
+async function status(page, wanted) {
+  await waitFor(async () => await page.evaluate(() => window.elastos.getStatus()) === wanted,
+    180000, `Launcher status did not become ${wanted}`);
+  await waitFor(async () => (await page.locator('#status-text').innerText()).toLowerCase() === wanted,
+    10000, `Window status did not become ${wanted}`);
+}
+
+function distroUpdateCheck() {
+  const file = runtimeUpdateCheckPath(runtimeDataDir('linux', '/root', {}));
+  const result = spawnSync('wsl.exe', ['-d', 'ElastOS', '-u', 'root', '--', 'cat', file], {
+    encoding: 'utf8',
+    timeout: 60000,
+    windowsHide: true,
+  });
+  if (result.status !== 0) {
+    throw new Error(result.stderr || 'The update check file could not be read.');
+  }
+  return JSON.parse(result.stdout);
+}
+
+module.exports = async function (app, page) {
+  await app.evaluate(({ shell }) => {
+    global.__openedHome = [];
+    shell.openExternal = async (url) => { global.__openedHome.push(url); };
+  });
+  await page.click('#open-btn');
+  assert.deepEqual(await app.evaluate(() => global.__openedHome), ['http://localhost:8090/home/']);
+  const response = await fetch('http://localhost:8090/home/');
+  assert.equal(response.status, 200);
+  console.log('PASS Open Home invokes the browser with localhost:8090/home/ and Home returns HTTP 200');
+
+  await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].close());
+  await new Promise((resolve) => setTimeout(resolve, 2500));
+  assert.equal(await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].isVisible()), false);
+  await health(true);
+  console.log('PASS closing the window keeps Home running');
+  await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].show());
+
+  await page.click('#power-btn');
+  await status(page, 'stopped');
+  await health(false);
+  console.log('PASS Stop Home closes the listener');
+  await page.click('#open-btn');
+  await status(page, 'running');
+  await health(true);
+  console.log('PASS Start Home becomes healthy');
+
+  const checked = await page.evaluate(() => window.elastos.checkForUpdate());
+  assert.equal(checked.updateAvailable, false);
+  const update = distroUpdateCheck();
+  assert.equal(update.outcome, 'up_to_date');
+  console.log('PASS elastos update --check writes up_to_date');
+  return app;
+};

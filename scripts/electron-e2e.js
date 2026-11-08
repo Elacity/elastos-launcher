@@ -213,6 +213,9 @@ async function main() {
             executablePath: electronPath, cwd: root, args, env, timeout: 120000,
           });
         }
+        if (process.platform === 'win32') {
+          electronApp = await require('./windows-lifecycle-e2e')(electronApp, page);
+        }
         return;
       }
       if (errorVisible && errorText && /Set up ElastOS on Windows|Windows needs Linux support|Windows needs one step/.test(errorText)) {
