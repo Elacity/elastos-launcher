@@ -10,6 +10,31 @@ on:
   workflow_dispatch:
 
 jobs:
+  mac-dialogs:
+    name: packaged dialog hit regions (mac)
+    runs-on: macos-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+      - run: npm ci
+      - name: Package the pinned failing source
+        run: |
+          git fetch --depth=1 origin a66ca520bfe48a5ad916f954442a61cce3e7dda6
+          mkdir "$RUNNER_TEMP/launcher-baseline"
+          git archive a66ca520bfe48a5ad916f954442a61cce3e7dda6 | tar -x -C "$RUNNER_TEMP/launcher-baseline"
+          cd "$RUNNER_TEMP/launcher-baseline"
+          npm ci
+          npm run build:mac -- --arm64 --publish never -c.mac.identity=- -c.mac.hardenedRuntime=false -c.forceCodeSigning=false
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+          NOTARIZE_MAC: 'false'
+      - name: Reproduce drag-covered controls on a66ca52
+        run: node scripts/mac-dialog-e2e.js "$RUNNER_TEMP/launcher-baseline/dist-electron/mac-arm64/ElastOS.app" --expect-drag
+
   smoke:
     name: smoke (${{ matrix.platform }})
     timeout-minutes: 45
