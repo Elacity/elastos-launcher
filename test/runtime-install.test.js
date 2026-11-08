@@ -597,7 +597,27 @@ test('runtimeChildEnv drops every ELASTOS_ name, in any case, and keeps the rest
 
 
 test('a new signed publisher head above the floor installs without a launcher release', async () => {
-  const newer = signedHead({ version: '2.0.1' });
+  const newerManifest = signed({ schema: 'elastos.release/v1', channel: 'stable', version: '2.0.1', installer_sha256: SCRIPT_SHA }, 'elastos.release.v1');
+  const newer = signedHead({ version: '2.0.1' }, newerManifest);
+  let probes = 0;
+  const { deps, calls, files } = harness({
+    pin: canaryPin({ headCid: null, installerSha256: '0'.repeat(64) }),
+    fetchText: async (url) => url.endsWith('/release-head.json') ? newer : url.endsWith('/release.json') ? newerManifest : SCRIPT,
+    probe: async () => probes++ === 0 ? { kind: 'not-installed' } : { kind: 'version', version: 'ElastOS Runtime v2.0.1' },
+  });
+  const run = deps.runInstaller;
+  deps.runInstaller = async (...args) => {
+    const result = await run(...args);
+    files.set(RECORD, newer);
+    return result;
+  };
+  await installRuntime(deps);
+  assert.equal(calls.find((call) => call[0] === 'installer')[3].ELASTOS_HEAD_CID, releaseHeadCid(newer));
+  // The publisher then serves 2.0.0. Keep the newer proved installation.
+  calls.length = 0;
+  deps.fetchText = async () => SIGNED_HEAD;
+  await installRuntime(deps);
+  assert.equal(calls.some((call) => call[0] === 'installer'), false);
   assert.equal(pinMismatchField(canaryPin({ headCid: null }), verifyReleaseHead(newer, FIXTURE_DID)), null);
   assert.equal(versionAtLeast('2.0.1', '2.0.0'), true);
   for (const version of ['1.99.99', '2.0.0-rc.1', '2.0', '2.0.00', 'garbage']) {
@@ -619,4 +639,21 @@ test('the head, manifest signature and installer hash each fail closed', () => {
     const boundHead = verifyReleaseHead(signedHead({}, manifest), FIXTURE_DID);
     assert.throws(() => verifiedInstallerSha256(manifest, boundHead));
   }
+});
+
+
+test('release metadata and installer downloads have enforced bounds', async (t) => {
+  const { fetchRuntimeText } = require('../dist/main/targets/runtimeInstall');
+  assert.throws(() => verifyReleaseHead(' '.repeat(256 * 1024 + 1), FIXTURE_DID), /exceeds its limit/);
+  let cancelled = false;
+  t.mock.method(global, 'fetch', async () => ({
+    ok: true, status: 200, url: 'https://publisher.example/install.sh',
+    body: { getReader: () => ({
+      read: async () => ({ done: false, value: new Uint8Array(2 * 1024 * 1024 + 1) }),
+      cancel: async () => { cancelled = true; },
+    }) },
+  }));
+  await assert.rejects(() => fetchRuntimeText('http://publisher.example/install.sh'), /require HTTPS/);
+  await assert.rejects(() => fetchRuntimeText('https://publisher.example/install.sh'), /exceeds the download limit/);
+  assert.equal(cancelled, true);
 });
