@@ -26,7 +26,7 @@ async function waitFor(check, timeoutMs, message) {
 async function status(page, wanted) {
   await waitFor(async () => await page.evaluate(() => window.elastos.getStatus()) === wanted,
     180000, `Launcher status did not become ${wanted}`);
-  await waitFor(async () => (await page.locator('#status-text').innerText()).toLowerCase() === wanted,
+  await waitFor(async () => (await page.locator('#status-text').innerText()).toLowerCase() === `home is ${wanted}`,
     10000, `Window status did not become ${wanted}`);
 }
 

@@ -1073,7 +1073,7 @@ export function createGatewaySupervisor(deps: GatewaySupervisorDeps): GatewaySup
           const health = await deps.fetchHealth();
           if (!isHealthOk(health)) {
             current = 'error';
-            throw new Error('ElastOS is already running, but it is not answering yet. Wait a moment and click Open my computer.');
+            throw new Error('ElastOS is already running, but it is not answering yet. Wait a moment and click Open Home.');
           }
           const confirmed = deps.confirmForeign ? await deps.confirmForeign() : false;
           if (!confirmed) {

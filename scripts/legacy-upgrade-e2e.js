@@ -68,7 +68,7 @@ async function main() {
       await page.waitForTimeout(200);
     }
     const label = (await page.locator('#remove-pc2-btn').innerText()).trim();
-    if (!visible || label !== 'Remove PC2') {
+    if (!visible || label !== require('../src/renderer/flow').legacyPc2Copy([]).confirm) {
       throw new Error(`Remove PC2 was not offered (visible=${visible}, label=${label})`);
     }
     const pkg = JSON.parse(fs.readFileSync(path.join(pc2, 'package.json'), 'utf8'));

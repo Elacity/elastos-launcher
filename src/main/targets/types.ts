@@ -41,7 +41,7 @@ export interface LaunchTargetDescriptor {
   /** Arguments for a launcher-owned start. Not invoked by the registry. */
   startArgs: readonly string[];
   health: HealthProbe;
-  /** Page "Open my computer" should open once health passes. */
+  /** Page "Open Home" should open once health passes. */
   openUrl: string;
   platforms: readonly TargetPlatform[];
 }

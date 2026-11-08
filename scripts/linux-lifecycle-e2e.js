@@ -24,7 +24,7 @@ async function waitFor(check, timeoutMs, message) {
 async function status(page, wanted) {
   await waitFor(async () => await page.evaluate(() => window.elastos.getStatus()) === wanted,
     180000, `Launcher status did not become ${wanted}`);
-  await waitFor(async () => (await page.locator('#status-text').innerText()).toLowerCase() === wanted,
+  await waitFor(async () => (await page.locator('#status-text').innerText()).toLowerCase() === `home is ${wanted}`,
     10000, `Window status did not become ${wanted}`);
 }
 
@@ -145,7 +145,7 @@ module.exports = async function (app, page, home, launch) {
   try {
     const again = await reopened.firstWindow();
     await status(again, 'running');
-    assert.equal(await again.locator('#open-label').innerText(), 'Open my computer');
+    assert.equal(await again.locator('#open-label').innerText(), 'Open Home');
     console.log('PASS a reopened launcher sees the retained Home');
     await clickTray(reopened, 'quit-stop-home');
   } finally {

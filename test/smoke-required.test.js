@@ -73,9 +73,9 @@ test('the smoke passes the pinned head the way the pinned installer accepts it',
   assert.equal(/--head-cid/.test(script), false);
 });
 
-test('the electron e2e clicks Install and waits for Open my computer', () => {
+test('the electron e2e clicks Install and waits for Open Home', () => {
   const script = fs.readFileSync(path.join(root, 'scripts/electron-e2e.js'), 'utf8');
-  assert.match(script, /Open my computer/);
+  assert.match(script, /Open Home/);
   assert.match(script, /#open-btn/);
   assert.match(script, /Release head signature matches the pinned maintainer/);
   assert.match(script, /install\.sh SHA-256 matches the pin/);

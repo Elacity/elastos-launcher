@@ -1,4 +1,8 @@
 import * as os from 'os';
+import { runtimeDataDir, runtimeJoin } from './targets/runtimePaths';
+import { DISTRO_HOME, DISTRO_NAME } from './targets/windowsRuntime';
+export { isLoginLaunch, startHomeAtLogin } from './targets/openAtLogin';
+
 import { applyOpenAtLogin, readOpenAtLogin } from './targets/openAtLogin';
 import { buildDiagnostics, collectPreflight, PreflightReport, saveCollectedSupportBundle } from './targets/preflight';
 import { confirmInstalledGateway, homeLaunchForPlatform, isForeignGatewayError, isHealthOk, probeGatewayHealth, STOP_GRACE_MS } from './targets/runtimeGateway';
@@ -21,6 +25,13 @@ import { LaunchTarget, LaunchTargetId, TargetStatus, UpdateCheck } from './targe
 
 export type { TargetStatus };
 
+export function homeLogFolder(platform: string, home: string, env: NodeJS.ProcessEnv): string {
+  if (platform === 'win32') {
+    return `\\\\wsl.localhost\\${DISTRO_NAME}${runtimeDataDir('linux', DISTRO_HOME, {}).replace(/\//g, '\\')}\\logs`;
+  }
+  return runtimeJoin(runtimeDataDir(platform, home, env), 'logs');
+}
+
 export interface LaunchControllerOptions {
   explicit?: string | null;
   env?: NodeJS.ProcessEnv;
@@ -30,6 +41,7 @@ export interface LaunchController {
   readonly target: LaunchTarget;
   onStatusChange(listener: (status: TargetStatus) => void): void;
   onLog(listener: (line: string) => void): void;
+  onActionSuccess(listener: () => void): void;
   getStatus(): Promise<TargetStatus>;
   start(): Promise<void>;
   stop(): Promise<void>;
@@ -156,6 +168,7 @@ export function createLaunchController(options: LaunchControllerOptions = {}): L
   const statusListeners: Array<(status: TargetStatus) => void> = [];
   const logListeners: Array<(line: string) => void> = [];
   const runtimeLogs: string[] = [];
+  const actionListeners: Array<() => void> = [];
 
   const emitStatus = (status: TargetStatus) => {
     for (const listener of statusListeners) listener(status);
@@ -168,9 +181,16 @@ export function createLaunchController(options: LaunchControllerOptions = {}): L
   setRuntimeLogSink(emitLog);
   if (retired) emitLog(retired);
 
-  async function runRuntime<T>(action: () => Promise<T>): Promise<T> {
+  function clearLastError(): void {
+    lastError = '';
+    for (const listener of actionListeners) listener();
+  }
+
+  async function runRuntime<T>(action: () => Promise<T>, clearsError = false): Promise<T> {
     try {
-      return await action();
+      const result = await action();
+      if (clearsError) clearLastError();
+      return result;
     } catch (err) {
       lastError = messageOf(err);
       emitLog(lastError);
@@ -179,9 +199,11 @@ export function createLaunchController(options: LaunchControllerOptions = {}): L
     }
   }
 
-  function runRuntimeSync<T>(action: () => T): T {
+  function runRuntimeSync<T>(action: () => T, clearsError = false): T {
     try {
-      return action();
+      const result = action();
+      if (clearsError) clearLastError();
+      return result;
     } catch (err) {
       lastError = messageOf(err);
       emitLog(lastError);
@@ -246,28 +268,31 @@ export function createLaunchController(options: LaunchControllerOptions = {}): L
     onLog(listener) {
       logListeners.push(listener);
     },
+    onActionSuccess(listener) {
+      actionListeners.push(listener);
+    },
     getStatus: () => currentStatus(),
-    start: () => runRuntime(() => active.start()),
-    stop: () => runRuntime(() => active.stop()),
-    restart: () => runRuntime(() => active.restart()),
-    install: (onProgress) => runRuntime(() => active.install(onProgress)),
-    update: (onProgress) => runRuntime(() => active.update(onProgress)),
+    start: () => runRuntime(() => active.start(), true),
+    stop: () => runRuntime(() => active.stop(), true),
+    restart: () => runRuntime(() => active.restart(), true),
+    install: (onProgress) => runRuntime(() => active.install(onProgress), true),
+    update: (onProgress) => runRuntime(() => active.update(onProgress), true),
     // On Windows, Uninstall removes the ElastOS Linux environment, after the Reset checks and a second question.
     uninstall: (confirmRemoval) => runRuntime<UninstallResult | void>(() => (process.platform === 'win32'
       ? uninstallRuntimeInDistroOnThisComputer(() => active.stopForRemoval(), confirmRemoval ?? (async () => false))
-      : active.uninstall())),
+      : active.uninstall()), true),
     // On Windows the ElastOS data is inside the ElastOS Linux environment, so Reset works there.
     resetRuntime: (choice) => runRuntime(() => (process.platform === 'win32'
       ? resetRuntimeInDistroOnThisComputer(() => active.stopForRemoval(), choice ?? {})
-      : resetRuntimeOnThisComputer(() => active.stopForRemoval(), choice ?? {}))),
+      : resetRuntimeOnThisComputer(() => active.stopForRemoval(), choice ?? {})), true),
     describeResetBackup: () => (process.platform === 'win32'
       ? describeDistroBackupOnThisComputer()
       : describeRuntimeBackupOnThisComputer()),
-    rollback: (onProgress) => runRuntime(() => active.rollback(onProgress)),
+    rollback: (onProgress) => runRuntime(() => active.rollback(onProgress), true),
     getVersion: () => runRuntimeSync(() => active.getVersion()),
     checkForUpdate: () => runRuntime(() => active.checkForUpdate()),
     openInBrowser: () => {
-      runRuntimeSync(() => active.openInBrowser());
+      runRuntimeSync(() => active.openInBrowser(), true);
     },
     getLogs: (lines) => {
       const count = lines ?? runtimeLogs.length;

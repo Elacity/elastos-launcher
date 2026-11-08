@@ -32,11 +32,12 @@ async function status(page, wanted) {
       last = await page.evaluate(() => window.elastos.getStatus());
       return last === wanted;
     }, 180000, `Launcher status did not become ${wanted}`);
-    const label = wanted === 'error' ? 'needs attention' : wanted;
-    await waitFor(async () => (await page.locator('#status-text').innerText()).toLowerCase() === label,
+    const label = wanted === 'error' ? null : `home is ${wanted}`;
+    await waitFor(async () => label ? (await page.locator('#status-text').innerText()).toLowerCase() === label
+      : await page.locator('#status-text').getAttribute('data-status') === 'error',
       10000, `Window status did not become ${wanted}`);
   } catch (error) {
-    console.log(`Status failure wanted=${wanted} last=${last} window=${await page.locator('#status-text').innerText()} error=${await page.locator('#error-text').innerText()}`);
+    console.log(`Status failure wanted=${wanted} last=${last} window=${await page.locator('#status-text').innerText()} error=${await page.locator('#status-text').innerText()}`);
     const logs = await page.locator('#logs-content').innerText();
     for (const match of logs.matchAll(/Home ownership check: (host-lock|native-host|host-proof|host-changed|controller-status|controller-metadata)\b/g)) {
       console.log(match[0]);
@@ -107,8 +108,8 @@ module.exports = async function (app, page, home, options) {
   await page.evaluate(() => document.querySelector('#update-btn').classList.remove('hidden'));
   await page.click('#update-btn');
   await waitFor(() => page.evaluate(() => document.querySelector('#update-btn').classList.contains('hidden')
-    || document.querySelector('#update-btn-label').textContent === 'Retry'), 20 * 60 * 1000, 'Update did not finish');
-  assert.notEqual(await page.locator('#update-btn-label').innerText(), 'Retry', await page.locator('#error-text').innerText());
+    || document.querySelector('#status-text').dataset.error === 'true'), 20 * 60 * 1000, 'Update did not finish');
+  assert.equal(await page.locator('#status-text').getAttribute('data-error'), 'false', await page.locator('#status-text').innerText());
   await status(page, 'running');
   await health(true);
   console.log('PASS Update button runs elastos update and Home is running afterward');
@@ -134,7 +135,7 @@ module.exports = async function (app, page, home, options) {
     adopted = await electron.launch(options);
     const window = await adopted.firstWindow();
     await status(window, 'running');
-    assert.equal(await window.locator('#open-label').innerText(), 'Open my computer');
+    assert.equal(await window.locator('#open-label').innerText(), 'Open Home');
     console.log('PASS a fresh launcher adopts an already running Home without reinstalling');
     await window.evaluate(() => window.elastos.start());
     const adoptedController = JSON.parse(fs.readFileSync(controllerStatus, 'utf8')).controller_pid;
@@ -166,8 +167,8 @@ module.exports = async function (app, page, home, options) {
     await new Promise((resolve, reject) => { foreign.once('error', reject); foreign.listen(8090, '127.0.0.1', resolve); });
     adopted = await electron.launch(options);
     const conflict = await adopted.firstWindow();
-    await waitFor(async () => /port 8090/i.test(await conflict.locator('#error-title').innerText())
-      && /another program/i.test(await conflict.locator('#error-text').innerText()),
+    await waitFor(async () => /port 8090/i.test(await conflict.locator('#status-text').innerText())
+      && /another program/i.test(await conflict.locator('#status-text').innerText()),
     30000, 'A foreign listener did not get a clear port 8090 message');
     assert.equal(foreign.listening, true);
     console.log('PASS a foreign OK listener gets a clear port 8090 message and is left running');

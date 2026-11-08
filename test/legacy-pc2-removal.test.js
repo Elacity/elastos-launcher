@@ -374,9 +374,9 @@ test('lists only a real PC2 node tree and backs up the PC2 folder before deletin
     { label: 'PC2 folder', path: pc2, bytes: 5 },
     { label: 'PC2 sudoers rule', path: '/etc/sudoers.d/amneziawg', bytes: null },
   ]);
-  assert.equal(copy.title, 'Remove PC2?');
+  assert.equal(copy.title, 'Remove old PC2 files?');
   assert.equal(copy.backup, 'Back up my PC2 data first');
-  assert.equal(copy.done, 'PC2 removed');
+  assert.equal(copy.done, 'Old PC2 files removed.');
   assert.match(copy.list, /PC2 folder — .*\/\.pc2 \(5 bytes\)/);
   assert.match(copy.list, /size unavailable/);
   assert.match(withSupportBundle(copy.done, '/home/tester/Desktop/ElastOS-support.txt'), /support bundle/);

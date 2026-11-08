@@ -11,13 +11,11 @@ if (process.platform !== 'darwin' || process.env.GITHUB_ACTIONS !== 'true') {
   throw new Error('Packaged Mac dialog e2e runs only on the disposable GitHub Mac runner.');
 }
 const binary = path.resolve(process.argv[2], 'Contents/MacOS/ElastOS');
-const expectDrag = process.argv.includes('--expect-drag');
 const clickHelper = path.join(os.tmpdir(), 'launcher-dialog-click');
 const compiled = spawnSync('swiftc', [path.join(__dirname, 'mac-click.swift'), '-o', clickHelper], { encoding: 'utf8', timeout: 120000 });
 assert.equal(compiled.status, 0, compiled.stderr);
 const permission = spawnSync(clickHelper, [], { encoding: 'utf8', timeout: 5000 });
-assert.ok([0, 77].includes(permission.status), permission.stderr);
-console.log(permission.stdout.trim());
+assert.equal(permission.status, 0, `Native OS events are required: ${permission.stdout} ${permission.stderr}`);
 
 async function main() {
   const home = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'launcher-dialog-home-'));
@@ -27,187 +25,141 @@ async function main() {
   delete env.ELECTRON_RUN_AS_NODE;
   const app = await electron.launch({ executablePath: binary, env, timeout: 60000 });
   const watchdog = setTimeout(() => app.process().kill('SIGKILL'), 180000);
-  const failures = [];
-  let nativeFailures = 0;
   try {
     const page = await app.firstWindow();
     await page.waitForLoadState('domcontentloaded');
     await app.evaluate(({ ipcMain, BrowserWindow, app }) => {
       global.__dialogCalls = [];
-      const info = { id: 'runtime', status: 'stopped', openUrl: 'http://localhost:8090/home/',
+      const info = { id: 'runtime', status: 'running', openUrl: 'http://localhost:8090/home/',
         preflight: { ok: true, checks: [] }, openAtLogin: false, canRollback: true };
       const items = ['.pc2', '.personal-cloud', 'Library/Application Support/Personal Cloud',
         'Library/Logs/Personal Cloud'].map((name) => ({ scope: 'host', label: 'Old Personal Cloud data',
         path: `/Users/runner/${name}`, bytes: 1024 }));
       const values = {
-        getLaunchInfo: info, getStatus: 'stopped', getVersion: '2.0.0', isInstalled: true,
+        getLaunchInfo: info, getVersion: '2.0.0', isInstalled: true,
         getLogs: 'Packaged dialog regression', resumeInstallPlan: 'none',
         checkForUpdate: { updateAvailable: true, latest: '2.0.1' },
         describeLegacyPc2: { items },
         describeResetBackup: { present: true, enough: true, bytes: 1024, neededBytes: 2048,
           freeBytes: 1000000, folder: '/Users/runner/Desktop' },
-        describeFailure: { title: 'ElastOS needs attention', message: 'Dialog fixture failure', fixLabel: 'Fix it' },
+        describeFailure: { message: 'Dialog fixture failure', fixLabel: 'Fix it' },
         getPreflight: { ok: true, checks: [] },
       };
-      for (const name of [...Object.keys(values), 'start', 'stop', 'install', 'openBrowser', 'update', 'rollback',
-        'resetRuntime', 'uninstall', 'removeLegacyPc2', 'setOpenAtLogin', 'fixFailure', 'getDiagnostics', 'saveSupportBundle']) {
+      for (const name of [...Object.keys(values), 'getStatus', 'start', 'stop', 'install', 'openBrowser', 'update', 'rollback',
+        'resetRuntime', 'uninstall', 'removeLegacyPc2', 'setOpenAtLogin', 'fixFailure', 'getDiagnostics', 'saveSupportBundle', 'openLogFolder']) {
         ipcMain.removeHandler(`elastos:${name}`);
         ipcMain.handle(`elastos:${name}`, (_event, ...args) => {
           global.__dialogCalls.push({ name, args });
           if (name === 'saveSupportBundle') throw new Error('Dialog fixture failure');
+          if (name === 'getStatus') return info.status;
+          if (name === 'stop') info.status = 'stopped';
+          if (name === 'removeLegacyPc2') {
+            values.describeLegacyPc2 = { items: [] };
+            return { ok: true, message: 'PC2 removed' };
+          }
           return values[name];
         });
       }
       const window = BrowserWindow.getAllWindows()[0];
-      // The production status poll also runs outside IPC. Keep its fixture
-      // consistent with getLaunchInfo instead of racing a not-installed poll.
       const send = window.webContents.send.bind(window.webContents);
       window.webContents.send = (channel, ...args) => send(channel,
-        ...(channel === 'elastos:status' ? ['stopped'] : args));
+        ...(channel === 'elastos:status' ? [info.status] : args));
       window.setPosition(100, 100);
       window.show(); window.focus(); app.focus({ steal: true });
     });
     await page.reload();
-    await page.locator('#remove-pc2-btn').waitFor({ state: 'visible' });
+    await page.locator('#url-value').waitFor({ state: 'visible' });
     await page.waitForTimeout(2100);
-    assert.equal(await page.locator('#status-text').textContent(), 'Stopped', 'fixture survives the production status poll');
-    assert.equal(await page.locator('#uninstall-btn').isEnabled(), true);
-    // Set size after ready-to-show/reload has settled. Both packages must use
-    // the same native bounds and CSS viewport, even on a short hosted display.
-    const geometry = await app.evaluate(({ BrowserWindow }) => {
-      const window = BrowserWindow.getAllWindows()[0];
-      window.setContentSize(500, 600);
-      window.setPosition(100, 100);
-      window.webContents.setZoomFactor(600 / 860);
-      return { bounds: window.getContentBounds(), zoom: window.webContents.getZoomFactor() };
-    });
-    assert.deepEqual(geometry.bounds, { x: 100, y: 100, width: 500, height: 600 });
-    console.log(`Dialog viewport: ${JSON.stringify(geometry)}`);
-    for (let attempt = 0; attempt < 20; attempt++) {
-      if (Math.abs(await page.evaluate(() => innerHeight) - 860) < 1) break;
-      await page.waitForTimeout(100);
-    }
-    const dragElements = await page.evaluate(() => [...document.querySelectorAll('*')]
-      .filter((el) => getComputedStyle(el).webkitAppRegion === 'drag')
-      .map((el) => el.tagName === 'BODY' ? 'body' : el.className));
-    assert.deepEqual(dragElements, expectDrag ? ['body', 'title-bar'] : ['title-bar']);
+    assert.equal(await page.locator('#status-text').textContent(), 'Home is running');
 
-    async function check(label, selector) {
-      const controls = page.locator(selector);
-      assert.ok(await controls.count(), `${label} has controls`);
-      for (const control of await controls.all()) {
-        if (!await control.isVisible()) continue;
-        await control.scrollIntoViewIfNeeded();
-        const report = await control.evaluate((element) => {
-          const rect = (node) => {
-            const r = node.getBoundingClientRect();
-            return { x: r.x, y: r.y, width: r.width, height: r.height };
-          };
-          const identify = (node) => node.id ? `#${node.id}` : node.tagName.toLowerCase() + (node.className ? `.${String(node.className).trim().replace(/\s+/g, '.')}` : '');
-          const r = element.getBoundingClientRect();
-          const center = { x: r.x + r.width / 2, y: r.y + r.height / 2 };
-          const regions = [...document.querySelectorAll('*')].filter((node) => {
-            const style = getComputedStyle(node);
-            return ['drag', 'no-drag'].includes(style.webkitAppRegion) && node.getClientRects().length && style.visibility !== 'hidden';
-          }).map((node) => ({ element: identify(node), region: getComputedStyle(node).webkitAppRegion, rect: rect(node) }));
-          // Apply the rectangular drag/no-drag operations in document order:
-          // body, card, title bar, then overlays. A later no-drag cuts an earlier drag.
-          let drag = false;
-          for (const region of regions) {
-            const box = region.rect;
-            if (center.x >= box.x && center.x < box.x + box.width && center.y >= box.y && center.y < box.y + box.height) {
-              drag = region.region === 'drag';
-            }
-          }
-          const ancestors = [];
-          for (let node = element; node; node = node.parentElement) {
-            ancestors.push({ element: identify(node), region: getComputedStyle(node).webkitAppRegion, rect: rect(node) });
-          }
-          return { control: identify(element), center, drag, regions, ancestors, viewportHeight: innerHeight,
-            card: rect(document.querySelector('.hardware-box')), dialog: rect(document.querySelector('.confirm-content')) };
-        });
-        assert.ok(Math.abs(report.viewportHeight - 860) < 1, 'both packages retain the same 860px CSS viewport');
-        console.log(`${report.drag ? 'FAIL' : 'PASS'} region ${label} ${JSON.stringify(report)}`);
-        if (report.drag) failures.push(`${label} ${report.control}`);
-      }
-    }
-
-    async function nativeClick(selector) {
-      await page.locator(selector).scrollIntoViewIfNeeded();
-      const center = await page.locator(selector).evaluate((el) => {
-        const r = el.getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
-      });
-      const { bounds, zoom } = await app.evaluate(({ BrowserWindow }) => {
+    async function geometry() {
+      return app.evaluate(({ BrowserWindow }) => {
         const window = BrowserWindow.getAllWindows()[0];
         return { bounds: window.getContentBounds(), zoom: window.webContents.getZoomFactor() };
       });
+    }
+    async function nativeClick(selector) {
+      const control = page.locator(selector);
+      await control.scrollIntoViewIfNeeded();
+      const center = await control.evaluate((el) => {
+        const r = el.getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
+      });
+      const { bounds, zoom } = await geometry();
       const result = spawnSync(clickHelper, [String(bounds.x + center.x * zoom), String(bounds.y + center.y * zoom)], { encoding: 'utf8', timeout: 5000 });
       assert.equal(result.status, 0, result.stderr);
       await page.waitForTimeout(300);
     }
-
-    await check('main', '.hardware-box button, #login-checkbox');
-    if (permission.status === 0) {
-      await nativeClick('#logs-btn');
-      assert.equal(await page.locator('#logs-panel').isVisible(), true, 'native click calibration opens Logs');
-      await nativeClick('#close-logs');
-      assert.equal(await page.locator('#logs-panel').isVisible(), false);
-      console.log('PASS native OS click calibration opens and closes Logs');
+    async function check(label) {
+      const leaked = await page.locator('.hidden').evaluateAll((nodes) => nodes
+        .filter((node) => getComputedStyle(node).display !== 'none').map((node) => node.id));
+      assert.deepEqual(leaked, [], label);
+      for (const control of await page.locator('button, a, input, summary').all()) {
+        if (!await control.isVisible()) continue;
+        assert.equal(await control.evaluate((el) => getComputedStyle(el).webkitAppRegion), 'no-drag');
+      }
+      console.log(`PASS ${label}: hidden elements and interactive drag regions`);
     }
-    await page.click('#logs-btn');
-    await check('logs', '#logs-panel button');
-    await page.click('#close-logs');
 
-    for (const [name, trigger] of [['Reset', '#reset-btn'], ['Uninstall', '#uninstall-btn'], ['Remove PC2', '#remove-pc2-btn']]) {
-      await page.click(trigger);
+    await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].hide());
+    const second = spawnSync(binary, [], { env, encoding: 'utf8', timeout: 10000 });
+    assert.equal(second.status, 0, `second instance must exit cleanly: ${second.stderr}`);
+    await page.waitForTimeout(300);
+    assert.equal(await app.evaluate(({ BrowserWindow }) => {
+      const windows = BrowserWindow.getAllWindows();
+      return windows.length === 1 && windows[0].isVisible() && windows[0].isFocused();
+    }), true, 'opening again must focus the existing window');
+    console.log('PASS native second-instance activation focuses one existing window');
+
+    await check('main');
+    const before = await geometry();
+    const strip = await page.locator('.title-bar').boundingBox();
+    assert.ok(strip && strip.x === 0 && strip.width === before.bounds.width);
+    assert.equal(await page.locator('.title-bar').evaluate((el) => getComputedStyle(el).webkitAppRegion), 'drag');
+    const x = before.bounds.x + strip.width * .7;
+    const y = before.bounds.y + strip.height / 2;
+    const drag = spawnSync(clickHelper, [String(x), String(y), String(x + 60), String(y + 45)], { encoding: 'utf8', timeout: 5000 });
+    assert.equal(drag.status, 0, drag.stderr);
+    await page.waitForTimeout(300);
+    const after = await geometry();
+    assert.ok(Math.abs(after.bounds.x - before.bounds.x - 60) <= 3
+      && Math.abs(after.bounds.y - before.bounds.y - 45) <= 3,
+    `top-strip OS drag must move the window: ${JSON.stringify({ before, after })}`);
+    console.log(`PASS native top-strip drag ${JSON.stringify({ before, after })}`);
+    await nativeClick('#url-value');
+    assert.ok(await app.evaluate(() => global.__dialogCalls.some((call) => call.name === 'openBrowser')));
+    console.log('PASS native Home address click invokes openBrowser');
+    await nativeClick('#power-btn');
+    assert.equal(await page.locator('#status-text').textContent(), 'Home is stopped');
+    await nativeClick('summary');
+    assert.equal(await page.locator('#details').getAttribute('open'), '');
+    await check('Details');
+
+    for (const [name, trigger] of [['Reset', '#reset-btn'], ['Uninstall', '#uninstall-btn'], ['Remove old PC2 files', '#remove-pc2-btn']]) {
+      await nativeClick(trigger);
       await page.locator('#confirm-modal').waitFor({ state: 'visible' });
-      if (name === 'Reset') await page.locator('#reset-backup-yes').waitFor({ state: 'visible' });
-      await check(name, '#confirm-modal button, #confirm-modal input');
-      if (permission.status === 0) {
-        if (name === 'Remove PC2') {
-          await nativeClick('#confirm-backup');
-          const checked = await page.locator('#confirm-backup').isChecked();
-          console.log(`${checked ? 'PASS' : 'FAIL'} native Remove PC2 backup checkbox`);
-          if (!checked) nativeFailures++;
-          if (!expectDrag) assert.equal(checked, true);
-        }
-        await nativeClick('#confirm-cancel');
-        const closed = !await page.locator('#confirm-modal').isVisible();
-        console.log(`${closed ? 'PASS' : 'FAIL'} native ${name} Cancel`);
-        if (!closed) nativeFailures++;
-        if (!expectDrag) assert.equal(closed, true);
-        if (closed) await page.click(trigger);
+      await check(name);
+      if (name === 'Remove old PC2 files') {
+        await nativeClick('#confirm-backup');
+        assert.equal(await page.locator('#confirm-backup').isChecked(), true);
       }
-      if (name === 'Reset') await page.check('#reset-backup-yes');
-      if (name === 'Remove PC2') await page.check('#confirm-backup');
-      if (permission.status === 0) {
-        await nativeClick('#confirm-delete');
-        const closed = !await page.locator('#confirm-modal').isVisible();
-        console.log(`${closed ? 'PASS' : 'FAIL'} native ${name} confirm`);
-        if (!closed) nativeFailures++;
-        if (!expectDrag) assert.equal(closed, true);
-      }
-      if (await page.locator('#confirm-modal').isVisible()) await page.click('#confirm-delete');
+      await nativeClick('#confirm-cancel');
+      assert.equal(await page.locator('#confirm-modal').isVisible(), false);
+      await nativeClick(trigger);
+      if (name === 'Reset') await nativeClick('#reset-backup-yes');
+      if (name === 'Remove old PC2 files') await nativeClick('#confirm-backup');
+      await nativeClick('#confirm-delete');
       await page.locator('#confirm-modal').waitFor({ state: 'hidden' });
+      console.log(`PASS native ${name} backup, Cancel, and confirm`);
     }
     const calls = await app.evaluate(() => global.__dialogCalls);
     assert.ok(calls.some((call) => call.name === 'resetRuntime' && call.args[0].backup === true));
     assert.ok(calls.some((call) => call.name === 'uninstall'));
     assert.ok(calls.some((call) => call.name === 'removeLegacyPc2' && call.args[0] === true && call.args[1].length === 4));
-    await page.click('#logs-btn');
-    await page.click('#close-logs');
-    // The real support-bundle error handler exposes the error controls.
-    // Invoke the existing handler after revealing the error section; it calls showError.
-    await page.locator('#error-box').evaluate((el) => el.classList.remove('hidden'));
-    await page.click('#support-btn');
+    assert.equal(await page.locator('#remove-pc2-btn').isVisible(), false);
+    assert.equal(await page.locator('#status-text').textContent(), 'Old PC2 files removed.');
+    await nativeClick('#support-btn');
     await page.locator('#fix-btn').waitFor({ state: 'visible' });
-    await check('errors', '#error-box button');
-    console.log(`Dialog regression: ${failures.length} drag-covered controls; ${nativeFailures} native click failures`);
-    if (expectDrag) {
-      assert.ok(failures.some((name) => name.startsWith('Remove PC2')), 'pinned baseline must reproduce Remove PC2 drag coverage');
-      if (permission.status === 0) assert.ok(nativeFailures > 0, 'native clicks must reproduce the pinned regression');
-    }
-    else assert.deepEqual(failures, [], 'every interactive center must be outside native drag regions');
+    await check('error');
   } finally {
     try { await app.evaluate(({ app }) => app.exit(0)); } catch {}
     clearTimeout(watchdog);

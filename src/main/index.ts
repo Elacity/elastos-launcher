@@ -1,10 +1,12 @@
-import { app, BrowserWindow, dialog, ipcMain, Tray, Menu, nativeImage, shell } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, Tray, Menu, nativeImage, shell, screen } from 'electron';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import log from 'electron-log';
-import { createDefaultLaunchController, finishQuitAfterGatewayStop, homeLaunchForPlatform, TargetStatus } from './launchController';
+import { createDefaultLaunchController, finishQuitAfterGatewayStop, homeLaunchForPlatform, isLoginLaunch, startHomeAtLogin, homeLogFolder, TargetStatus } from './launchController';
 import { describeLegacyPc2OnThisComputer, removeLegacyPc2OnThisComputer, withSupportBundle } from './legacyPc2Removal';
+
+import { contentWindowBounds } from './launcherWindow';
 
 // Chromium must never share the Runtime Home, including on case-insensitive Macs.
 // Set all profile paths before ready, logging, or constructing the controller.
@@ -12,6 +14,13 @@ const electronData = path.join(os.homedir(), '.elastos-launcher', 'electron');
 fs.mkdirSync(electronData, { recursive: true, mode: 0o700 });
 app.setPath('userData', electronData);
 app.setPath('sessionData', electronData);
+
+// Lock the same profile used by Chromium before constructing the runtime controller.
+if (!app.requestSingleInstanceLock()) app.exit(0);
+app.on('second-instance', () => {
+  void app.whenReady().then(showWindow);
+});
+
 app.setAppLogsPath(path.join(electronData, 'logs'));
 
 const launch = createDefaultLaunchController(process.env);
@@ -40,6 +49,16 @@ let isQuitting = false;
 let stopHomeOnQuit = true;
 const quitGate = { started: false, ready: false };
 let currentStatus: TargetStatus = 'stopped';
+let backgroundLogin = false;
+
+function showWindow(): void {
+  backgroundLogin = false;
+  app.dock?.show();
+  if (!mainWindow) createWindow();
+  if (mainWindow?.isMinimized()) mainWindow.restore();
+  mainWindow?.show();
+  mainWindow?.focus();
+}
 
 // Configure logging
 log.transports.file.level = 'info';
@@ -47,10 +66,9 @@ log.transports.console.level = 'debug';
 
 function createWindow(): void {
   mainWindow = new BrowserWindow({
-    width: 500,
-    height: 860,
-    minWidth: 420,
-    minHeight: 560,
+    width: 420,
+    height: 360,
+    useContentSize: true,
     resizable: true,
     webPreferences: {
       preload: path.join(__dirname, '../preload/index.js'),
@@ -58,7 +76,7 @@ function createWindow(): void {
       nodeIntegration: false
     },
     titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'default',
-    backgroundColor: '#121212',
+    backgroundColor: '#18191c',
     show: false,
     icon: path.join(__dirname, '../../resources/icon.png')
   });
@@ -66,7 +84,7 @@ function createWindow(): void {
   mainWindow.loadFile(path.join(__dirname, '../../src/renderer/index.html'));
 
   mainWindow.once('ready-to-show', async () => {
-    mainWindow?.show();
+    if (!backgroundLogin) mainWindow?.show();
     // Replay into this window only. Writing the same lines back to the file
     // log duplicates them each time macOS creates the window again.
     const prior = await launch.getLogs();
@@ -113,7 +131,7 @@ function createTray(): void {
     if (mainWindow?.isVisible()) {
       mainWindow.hide();
     } else {
-      mainWindow?.show();
+      showWindow();
     }
   });
 }
@@ -145,12 +163,12 @@ function updateTrayMenu(): void {
     },
     { type: 'separator' },
     {
-      label: 'Open my computer',
+      label: 'Open Home',
       enabled: currentStatus === 'running',
       click: () => launch.openInBrowser()
     },
     { type: 'separator' },
-    { label: 'Show Window', click: () => mainWindow?.show() },
+    { label: 'Show Window', click: showWindow },
     ...(homeLaunchForPlatform(process.platform).offerKeepHomeOnQuit ? [{
       id: 'quit-keep-home',
       label: 'Quit and keep Home',
@@ -182,12 +200,26 @@ launch.onStatusChange((status) => {
   updateTrayMenu();
 });
 
+launch.onActionSuccess(() => mainWindow?.webContents.send('elastos:actionSuccess'));
+
 // Set up log listener
 launch.onLog((logMessage) => {
   mainWindow?.webContents.send('elastos:log', logMessage);
 });
 
 // IPC handlers. The preload exposes these as window.elastos.
+ipcMain.on('elastos:contentSize', (event, height: unknown) => {
+  if (!mainWindow || event.sender !== mainWindow.webContents || typeof height !== 'number'
+    || !Number.isFinite(height) || height <= 0) return;
+  const bounds = mainWindow.getBounds();
+  mainWindow.setBounds(contentWindowBounds(height, bounds, mainWindow.getContentBounds(),
+    screen.getDisplayMatching(bounds).workArea));
+});
+ipcMain.handle('elastos:openLogFolder', async () => {
+  const folder = homeLogFolder(process.platform, os.homedir(), process.env);
+  const error = await shell.openPath(folder);
+  if (error) throw new Error(error);
+});
 ipcMain.handle('elastos:getStatus', () => launch.getStatus());
 ipcMain.handle('elastos:start', () => launch.start());
 ipcMain.handle('elastos:stop', () => launch.stop());
@@ -270,7 +302,10 @@ ipcMain.handle('elastos:rollback', async (event) => {
 });
 
 // App lifecycle
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
+  backgroundLogin = isLoginLaunch(process.platform, process.argv,
+    process.platform === 'darwin' ? app.getLoginItemSettings() : {});
+  if (backgroundLogin) app.dock?.hide();
   createWindow();
   if (process.platform === 'darwin') {
     Menu.setApplicationMenu(Menu.buildFromTemplate([{ label: 'ElastOS', submenu: [
@@ -296,6 +331,11 @@ app.whenReady().then(() => {
   }, 2000);
   statusTimer.unref();
   if (launch.getOpenAtLogin()) launch.setOpenAtLogin(true);
+  try {
+    await startHomeAtLogin(backgroundLogin && launch.getOpenAtLogin(), launch);
+  } catch (err) {
+    log.error(err instanceof Error ? err.message : String(err));
+  }
 });
 
 app.on('window-all-closed', () => {
@@ -305,13 +345,7 @@ app.on('window-all-closed', () => {
   }
 });
 
-app.on('activate', () => {
-  if (BrowserWindow.getAllWindows().length === 0) {
-    createWindow();
-  } else {
-    mainWindow?.show();
-  }
-});
+app.on('activate', showWindow);
 
 app.on('before-quit', (event) => {
   isQuitting = true;

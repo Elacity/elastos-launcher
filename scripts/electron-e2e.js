@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * Click Install in the Electron window and wait until the button says
- * "Open my computer". Linux, macOS, and Windows CI run this against the pinned runtime.
+ * "Open Home". Linux, macOS, and Windows CI run this against the pinned runtime.
  */
 const { spawn } = require('node:child_process');
 const fs = require('node:fs');
@@ -183,15 +183,15 @@ async function main() {
     while (Date.now() < deadline) {
       label = (await page.locator('#open-label').innerText()).trim();
       const logs = await page.locator('#logs-content').innerText();
-      const errorVisible = await page.locator('#error-box').evaluate((node) => !node.classList.contains('hidden'));
-      const errorText = (await page.locator('#error-text').innerText()).trim();
+      const errorVisible = await page.locator('#status-text').getAttribute('data-error') === 'true';
+      const errorText = (await page.locator('#status-text').innerText()).trim();
       const openDisabled = await page.locator('#open-btn').isDisabled();
       if (Date.now() - lastPrinted > 30000) {
         const tail = logs.split('\n').filter(Boolean).slice(-3).join(' | ');
         console.log(`button=${label} log=${tail || '(empty)'}`);
         lastPrinted = Date.now();
       }
-      if (label === 'Open my computer') {
+      if (label === 'Open Home') {
         console.log('----- install log -----');
         console.log(logs);
         for (const line of REQUIRED_LOGS) {
@@ -203,8 +203,8 @@ async function main() {
           throw new Error(`The launcher opens ${HOME_URL}, not ${EXPECTED_HOME}`);
         }
         const shown = (await page.locator('#url-value').innerText()).trim();
-        if (shown !== 'localhost:8090/home') {
-          throw new Error(`The window shows ${shown}, not localhost:8090/home`);
+        if (shown !== EXPECTED_HOME) {
+          throw new Error(`The window shows ${shown}, expected ${EXPECTED_HOME}`);
         }
         const health = await probeGatewayHealth();
         if (!isHealthOk(health)) {
@@ -221,7 +221,7 @@ async function main() {
         } else if (!browserRowHidden) {
           throw new Error(`Only Windows shows a Browser note (shown: ${browserText})`);
         }
-        console.log('Install reached Open my computer');
+        console.log('Install reached Open Home');
         if (process.platform === 'darwin') {
           if ((await electronApp.evaluate(() => global.__installBrowserCalls)).length !== 0) {
             throw new Error('Mac Install opened a duplicate browser tab after home --browser');
@@ -246,7 +246,7 @@ async function main() {
         }
         return;
       }
-      if (errorVisible && errorText && /Set up ElastOS on Windows|Windows needs Linux support|Windows needs one step/.test(errorText)) {
+      if (errorVisible && errorText && /Set up ElastOS on Windows|Windows needs Linux support|Windows needs one step|ElastOS on Windows/.test(errorText)) {
         const fixHidden = await page.locator('#fix-btn').evaluate((node) => node.classList.contains('hidden'));
         const fixDisabled = await page.locator('#fix-btn').isDisabled();
         if (process.platform === 'win32' && windowsFix === 'pending' && !fixHidden && !fixDisabled) {
@@ -301,7 +301,7 @@ async function main() {
     const logs = await page.locator('#logs-content').innerText();
     console.log('----- install log -----');
     console.log(logs);
-    throw new Error(`Install did not reach Open my computer (button is ${label})`);
+    throw new Error(`Install did not reach Open Home (button is ${label})`);
   } finally {
     const exiting = electronApp.evaluate(({ app }) => {
       app.exit(0);

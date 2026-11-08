@@ -1,30 +1,3 @@
-const INSTALL_STEPS = [
-  { id: 'check', label: 'Checking this computer', estimate: 'about 10 seconds' },
-  { id: 'download', label: 'Downloading ElastOS', estimate: 'about 1 minute' },
-  { id: 'install', label: 'Installing', estimate: 'about 30 seconds' },
-  { id: 'setup', label: 'Setting up your computer', estimate: 'about 2 minutes' },
-  { id: 'start', label: 'Starting', estimate: 'about 20 seconds' },
-];
-
-function stepIndexForMessage(message) {
-  const text = String(message || '').toLowerCase();
-  if (text.includes('ready')) return INSTALL_STEPS.length;
-  if (text.includes('starting')) return 4;
-  if (text.includes('setting up') || text.includes('resuming')) return 3;
-  if (text.includes('installing')) return 2;
-  if (text.includes('download') || text.includes('hosted installer') || text.includes('pinned')) return 1;
-  if (text.includes('checking')) return 0;
-  return -1;
-}
-
-function stepStates(message) {
-  const active = stepIndexForMessage(message);
-  return INSTALL_STEPS.map((step, index) => ({
-    ...step,
-    state: active >= INSTALL_STEPS.length || index < active ? 'done' : index === active ? 'active' : 'pending',
-  }));
-}
-
 function primaryAction(state) {
   const status = state.status;
   if (state.busy) return { id: 'busy', label: 'Working…', enabled: false };
@@ -34,7 +7,7 @@ function primaryAction(state) {
   if (status === 'running') {
     return {
       id: 'open',
-      label: 'Open my computer',
+      label: 'Open Home',
       enabled: true,
     };
   }
@@ -48,7 +21,7 @@ function primaryAction(state) {
   if (status === 'starting' || status === 'stopping') {
     return { id: 'busy', label: 'Please wait', enabled: false };
   }
-  return { id: 'start', label: 'Start', enabled: true };
+  return { id: 'start', label: 'Start Home', enabled: true };
 }
 
 function confirmCopy(_targetId, paths, removesLinux) {
@@ -117,11 +90,6 @@ function resetBackupCopy(description) {
   };
 }
 
-function firstRunCopy(_targetId, status) {
-  if (status !== 'not-installed') return '';
-  return 'Install ElastOS on this computer. One button downloads it, sets it up, and starts it. Then you open your computer in the browser.';
-}
-
 /** Decimal units, as plainBytes in runtimeBackup.ts: 1 KB is 1000 bytes, 1 MB is 1000 KB, 1 GB is 1000 MB. */
 function formatBytes(bytes) {
   if (bytes === null || bytes === undefined || Number.isNaN(Number(bytes))) return 'size unavailable';
@@ -135,12 +103,12 @@ function formatBytes(bytes) {
 function legacyPc2Copy(items) {
   const lines = (items || []).map((entry) => `${entry.label} — ${entry.path} (${formatBytes(entry.bytes)})`);
   return {
-    title: 'Remove PC2?',
-    body: 'This removes the old PC2 install from this computer. ElastOS is left as it is.',
+    title: 'Remove old PC2 files?',
+    body: 'PC2 was the earlier ElastOS Personal Cloud app, and this removes its old files listed below.',
     list: lines.join('\n'),
     backup: 'Back up my PC2 data first',
-    confirm: 'Remove PC2',
-    done: 'PC2 removed',
+    confirm: 'Remove old PC2 files',
+    done: 'Old PC2 files removed.',
   };
 }
 
@@ -154,29 +122,20 @@ function browserNoteText(info) {
   return info && typeof info.browserNote === 'string' ? info.browserNote : '';
 }
 
-function urlLabel(openUrl) {
-  return String(openUrl || '').replace(/^https?:\/\//, '').replace(/\/$/, '');
-}
-
 function launcherLog(message) {
   return String(message || '').split(/\r?\n/)
     .filter((line) => !line.includes('Keep this terminal open')).join('\n');
 }
 
 const api = {
-  INSTALL_STEPS,
-  stepIndexForMessage,
-  stepStates,
   primaryAction,
   confirmCopy,
   resetCopy,
   resetBackupCopy,
-  firstRunCopy,
   formatBytes,
   legacyPc2Copy,
   browserNoteText,
   shouldOpenBrowserAfterStart,
-  urlLabel,
   launcherLog,
 };
 

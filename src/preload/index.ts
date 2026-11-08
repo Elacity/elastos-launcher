@@ -4,6 +4,8 @@ export type RuntimeStatus = 'running' | 'stopped' | 'starting' | 'stopping' | 'e
 
 contextBridge.exposeInMainWorld('elastos', {
   platform: process.platform,
+  contentSize: (height: number) => ipcRenderer.send('elastos:contentSize', height),
+  openLogFolder: () => ipcRenderer.invoke('elastos:openLogFolder'),
   start: () => ipcRenderer.invoke('elastos:start'),
   stop: () => ipcRenderer.invoke('elastos:stop'),
   restart: () => ipcRenderer.invoke('elastos:restart'),
@@ -39,6 +41,12 @@ contextBridge.exposeInMainWorld('elastos', {
   finishResumeInstall: (ok: boolean) => ipcRenderer.invoke('elastos:finishResumeInstall', ok === true),
   setOpenAtLogin: (enabled: boolean) => ipcRenderer.invoke('elastos:setOpenAtLogin', enabled),
 
+  onActionSuccess: (callback: () => void) => {
+    const listener = () => callback();
+    ipcRenderer.on('elastos:actionSuccess', listener);
+    return () => ipcRenderer.removeListener('elastos:actionSuccess', listener);
+  },
+
   onStatus: (callback: (status: RuntimeStatus) => void) => {
     const listener = (_event: Electron.IpcRendererEvent, status: RuntimeStatus) => callback(status);
     ipcRenderer.on('elastos:status', listener);
@@ -68,6 +76,8 @@ declare global {
   interface Window {
     elastos: {
       platform: NodeJS.Platform;
+      contentSize: (height: number) => void;
+      openLogFolder: () => Promise<void>;
       start: () => Promise<void>;
       stop: () => Promise<void>;
       restart: () => Promise<void>;
@@ -123,6 +133,7 @@ declare global {
       resumeInstallPlan: () => Promise<'install' | 'wait' | 'none'>;
       finishResumeInstall: (ok: boolean) => Promise<void>;
       setOpenAtLogin: (enabled: boolean) => Promise<boolean>;
+      onActionSuccess: (callback: () => void) => () => void;
       onStatus: (callback: (status: RuntimeStatus) => void) => () => void;
       onLog: (callback: (log: string) => void) => () => void;
       onInstallProgress: (callback: (message: string) => void) => () => void;

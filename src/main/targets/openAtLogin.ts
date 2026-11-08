@@ -35,8 +35,8 @@ export function linuxAutostartFile(execPath: string): string {
     '[Desktop Entry]',
     'Type=Application',
     'Name=ElastOS',
-    'Comment=Open your computer',
-    `Exec=${desktopExecValue(execPath)}`,
+    'Comment=Start ElastOS when I log in',
+    `Exec=${desktopExecValue(execPath)} --login`,
     'X-GNOME-Autostart-enabled=true',
     '',
   ].join('\n');
@@ -91,9 +91,24 @@ export function applyOpenAtLogin(enabled: boolean, homeDir: string = os.homedir(
     return;
   }
   try {
-    const electron = require('electron') as { app?: { setLoginItemSettings: (settings: { openAtLogin: boolean }) => void } };
-    electron.app?.setLoginItemSettings?.({ openAtLogin: enabled });
+    const electron = require('electron') as { app?: { setLoginItemSettings: (settings: { openAtLogin: boolean; openAsHidden?: boolean; args?: string[] }) => void } };
+    electron.app?.setLoginItemSettings?.({
+      openAtLogin: enabled,
+      ...(process.platform === 'darwin' ? { openAsHidden: true } : { args: ['--login'] }),
+    });
   } catch {
     // Unit tests are not inside Electron.
   }
+}
+
+/** Login launches keep the launcher in the tray until the user opens its window. */
+export function isLoginLaunch(platform: string, argv: readonly string[], settings: { wasOpenedAtLogin?: boolean }): boolean {
+  return platform === 'darwin' ? settings.wasOpenedAtLogin === true : argv.includes('--login');
+}
+
+export async function startHomeAtLogin(enabled: boolean, launch: {
+  getStatus(): Promise<string>;
+  start(): Promise<void>;
+}): Promise<void> {
+  if (enabled && await launch.getStatus() === 'stopped') await launch.start();
 }

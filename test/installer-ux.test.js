@@ -109,7 +109,7 @@ test('sign-in launch writes a desktop file and can remove it', () => {
   const written = syncLinuxAutostart(true, '/home/tester', '/usr/bin/elastos', fs);
   assert.match(files.get(written), /Name=ElastOS/);
   assert.match(files.get(written), /X-GNOME-Autostart-enabled=true/);
-  assert.match(linuxAutostartFile('/usr/bin/elastos'), /Exec=\/usr\/bin\/elastos/);
+  assert.match(linuxAutostartFile('/usr/bin/elastos'), /Exec=\/usr\/bin\/elastos --login\n/);
   assert.equal(
     linuxAutostartExecPath({ APPIMAGE: '/home/me/ElastOS.AppImage' }, '/tmp/.mount_abc/elastos'),
     '/home/me/ElastOS.AppImage',
@@ -123,20 +123,14 @@ test('sign-in launch writes a desktop file and can remove it', () => {
 
 test('the install button is the primary action until the computer is healthy', () => {
   assert.equal(flow.primaryAction({ targetId: 'runtime', status: 'not-installed', busy: false }).label, 'Install');
-  assert.equal(flow.primaryAction({ targetId: 'runtime', status: 'running', busy: false }).label, 'Open my computer');
+  assert.equal(flow.primaryAction({ targetId: 'runtime', status: 'running', busy: false }).label, 'Open Home');
   const otherHome = flow.primaryAction({ targetId: 'runtime', status: 'other-home', busy: false });
   assert.equal(otherHome.enabled, false);
   assert.equal(otherHome.label, 'another ElastOS Home is running');
   assert.equal(flow.primaryAction({ targetId: 'runtime', status: 'error', busy: false }).id, 'retry');
-  assert.match(flow.firstRunCopy('runtime', 'not-installed'), /One button/);
-  assert.equal(flow.firstRunCopy('runtime', 'running'), '');
   const copy = flow.confirmCopy('runtime', []);
   assert.match(copy.title, /ElastOS/);
   assert.match(copy.body, /removes the ElastOS program/);
-  const steps = flow.stepStates('Downloading ElastOS (about 1 minute)');
-  assert.equal(steps[1].state, 'active');
-  assert.equal(steps[0].state, 'done');
-  assert.equal(flow.urlLabel('http://localhost:8090/home/'), 'localhost:8090/home');
 });
 
 test('the port check covers 127.0.0.1 and ::1, and a host without IPv6 checks 127.0.0.1 only', async () => {
@@ -186,7 +180,7 @@ test('Windows shows that its Browser is not available yet, and only Windows', ()
   assert.equal(flow.shouldOpenBrowserAfterStart({ runtimeOpensBrowser: false }), true);
   assert.equal(flow.shouldOpenBrowserAfterStart(undefined), true);
   const html = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'index.html'), 'utf8');
-  assert.match(html, /<div class="info-row single hidden" id="browser-row">/);
+  assert.match(html, /<p class="note hidden" id="browser-row">/);
   const app = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'app.js'), 'utf8');
   assert.match(app, /browserRow\.classList\.toggle\('hidden', !browserText\)/);
   const controller = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'launchController.ts'), 'utf8');
