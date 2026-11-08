@@ -161,6 +161,17 @@ function readHostUpdateStatus(): string {
   return fs.readFileSync(runtimeUpdateCheckPath(runtimeDataDir(process.platform, home, process.env)), 'utf8');
 }
 
+function hostUpdateStatusStamp(): string | null {
+  const file = runtimeUpdateCheckPath(runtimeDataDir(process.platform, os.homedir(), process.env));
+  try {
+    const stat = fs.statSync(file, { bigint: true });
+    return [stat.dev, stat.ino, stat.size, stat.mtimeNs, stat.ctimeNs].join(':');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+    throw error;
+  }
+}
+
 function writeHostUpdateStatus(raw: string): void {
   const file = runtimeUpdateCheckPath(runtimeDataDir(process.platform, os.homedir(), process.env));
   const temporary = `${file}.${randomUUID()}.tmp`;
@@ -192,9 +203,10 @@ async function runtimeCheckForUpdate(): Promise<UpdateCheck> {
   if (runtimeInstallBlock(process.platform, process.arch)) return notInstalled;
   if (!findRuntimeBinary(os.homedir(), process.env.PATH ?? '')) return notInstalled;
   const current = readRuntimeVersion();
-  const compatibilityRecord = runtimeInstall.installedVersionMatches(current, '2.0.0')
-    ? () => writeSignedUpdateCheck(current, loadActiveRuntimePin(), runtimeInstall.fetchRuntimeText, writeHostUpdateStatus)
-    : undefined;
+  const compatibilityRecord = {
+    stamp: hostUpdateStatusStamp,
+    refresh: () => writeSignedUpdateCheck(current, loadActiveRuntimePin(), runtimeInstall.fetchRuntimeText, writeHostUpdateStatus),
+  };
   const parsed = await checkRuntimeUpdate(runRuntimeCommand, readHostUpdateStatus, compatibilityRecord);
   return toUpdateCheck(current, parsed, releaseUrl);
 }

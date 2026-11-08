@@ -207,7 +207,7 @@ test('Runtime 2.0.0 gets the #61 status record only after a successful check and
   const bridge = (head) => writeSignedUpdateCheck('ElastOS Runtime v2.0.0', pin,
     async () => head, (value) => { raw = value; });
   const result = await checkRuntimeUpdate(async () => ({ code: 0, stdout: 'update available 9.9.9', stderr: '' }),
-    () => raw, () => bridge(fixture.SIGNED_HEAD));
+    () => raw, { stamp: () => null, refresh: () => bridge(fixture.SIGNED_HEAD) });
   assert.equal(result.updateAvailable, false);
   assert.equal(JSON.parse(raw).outcome, 'up_to_date');
   await bridge(fixture.signedHead({ version: '2.0.1' }));
@@ -219,7 +219,7 @@ test('Runtime 2.0.0 gets the #61 status record only after a successful check and
   await assert.rejects(() => bridge(fixture.signedHead({ version: '1.9.9' })), /version/);
   await assert.rejects(() => bridge(fixture.signedHead({ channel: 'canary' })), /channel/);
   await assert.rejects(() => checkRuntimeUpdate(async () => ({ code: 1, stdout: '', stderr: 'network failed' }),
-    () => raw, () => bridge(fixture.SIGNED_HEAD)), /network failed/);
+    () => raw, { stamp: () => null, refresh: () => bridge(fixture.SIGNED_HEAD) }), /network failed/);
   assert.equal(raw, undefined);
 });
 
@@ -266,4 +266,26 @@ test('a Mac status query overlapping Stop preserves the completed stop transitio
   const target = createRuntimeTarget('darwin');
   await target.start();
   assert.equal(await target.getStatus(), 'stopped');
+});
+
+test('newer runtimes keep a freshly written native status and bridge an unchanged one', async () => {
+  let stamp = 'before';
+  let raw = status('update_available', true, '2.0.2', '2.0.1');
+  let refreshed = false;
+  const options = { stamp: () => stamp, refresh: async () => { refreshed = true; raw = status('up_to_date', false, '2.0.1', '2.0.1'); } };
+  const native = await checkRuntimeUpdate(async () => {
+    stamp = 'after';
+    return { code: 0, stdout: '', stderr: '' };
+  }, () => raw, options);
+  assert.equal(native.updateAvailable, true);
+  assert.equal(refreshed, false);
+  const bridged = await checkRuntimeUpdate(async () => ({ code: 0, stdout: '', stderr: '' }), () => raw, options);
+  assert.equal(bridged.updateAvailable, false);
+  assert.equal(refreshed, true);
+  refreshed = false;
+  await assert.rejects(() => checkRuntimeUpdate(async () => {
+    stamp = 'malformed'; raw = '{}';
+    return { code: 0, stdout: '', stderr: '' };
+  }, () => raw, options), /not readable/);
+  assert.equal(refreshed, false);
 });

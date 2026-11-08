@@ -97,13 +97,17 @@ export async function verifiedHeadForRollback(candidate: string, verify: HeadVer
 export async function checkRuntimeUpdate(
   run: RuntimeCommand,
   readStatus: () => string,
-  afterCheck?: () => Promise<void>,
+  compatibility?: { stamp(): string | null; refresh(): Promise<void> },
 ): Promise<ParsedUpdateCheck> {
+  const before = compatibility?.stamp();
   const result = await run(['update', '--check']);
   if (result.code !== 0) {
     throw new Error(result.stderr.trim() || result.stdout.trim() || 'Could not check for an ElastOS update.');
   }
-  await afterCheck?.();
+  if (compatibility) {
+    const after = compatibility.stamp();
+    if (after === null || after === before) await compatibility.refresh();
+  }
   let raw: string;
   try {
     raw = readStatus();
