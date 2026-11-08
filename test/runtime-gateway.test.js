@@ -419,6 +419,14 @@ test('pidOwnsGatewayPort refuses when the listeners cannot be read', async () =>
   assert.equal(await pidOwnsGatewayPort(7, ['127.0.0.1', '::1'], [], async () => [{ address: '::1', owned: true }]), true);
 });
 
+test('the health probe returns when localhost lookup does not answer', { timeout: 2000 }, async () => {
+  const health = await probeGatewayHealth({
+    timeoutMs: 200,
+    lookup: () => new Promise(() => {}),
+  });
+  assert.equal(health, null);
+});
+
 test('the health probe asks every address localhost resolves to', async () => {
   const asked = [];
   const ok = { status: 200, body: 'OK' };
@@ -1582,6 +1590,128 @@ test('signalProcessGroup uses the negative pid and surfaces a failed kill', () =
     }),
     /Could not signal ElastOS \(SIGKILL\): operation not permitted/,
   );
+});
+
+function compileObservedPidfd(dir, passthroughAlarm) {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const { spawnSync } = require('node:child_process');
+  const helper = path.join(dir, 'linux-pidfd');
+  const alarmLog = path.join(dir, 'alarm');
+  const signalLog = path.join(dir, 'signals');
+  const prctlLog = path.join(dir, 'prctl');
+  const pidLog = path.join(dir, 'pid');
+  const include = path.join(__dirname, 'native/include');
+  const source = path.join(__dirname, '../src/native/linux-pidfd.c');
+  const obs = path.join(__dirname, 'native/pidfd_obs.c');
+  const quote = (file) => file.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+  const compile = (args) => {
+    const result = spawnSync('cc', args, { encoding: 'utf8' });
+    if (result.status !== 0) {
+      throw new Error(result.stderr || result.stdout || 'cc failed');
+    }
+  };
+  compile([
+    '-Wall', '-Wextra', '-Werror', '-Wno-deprecated-declarations', '-O2',
+    '-I', include,
+    '-Dalarm=pidfd_test_alarm',
+    '-Dprctl=pidfd_test_prctl',
+    '-Dsyscall=pidfd_test_syscall',
+    '-c', source, '-o', path.join(dir, 'helper.o'),
+  ]);
+  compile([
+    '-Wall', '-Wextra', '-Werror', '-O2',
+    ...(passthroughAlarm ? ['-DPIDFD_PASSTHROUGH_ALARM'] : []),
+    `-DPIDFD_ALARM_LOG="${quote(alarmLog)}"`,
+    `-DPIDFD_SIGNAL_LOG="${quote(signalLog)}"`,
+    `-DPIDFD_PRCTL_LOG="${quote(prctlLog)}"`,
+    `-DPIDFD_PID_LOG="${quote(pidLog)}"`,
+    '-c', obs, '-o', path.join(dir, 'obs.o'),
+  ]);
+  compile([path.join(dir, 'helper.o'), path.join(dir, 'obs.o'), '-o', helper]);
+  return { helper, alarmLog, signalLog, prctlLog, pidLog };
+}
+
+function releaseObservedPidfd(dir, pidLog) {
+  const fs = require('node:fs');
+  const text = pidLog && fs.existsSync(pidLog) ? fs.readFileSync(pidLog, 'utf8') : '';
+  for (const line of text.split('\n')) {
+    const pid = Number(line);
+    if (pid) {
+      try { process.kill(pid, 'SIGKILL'); } catch {}
+    }
+  }
+  fs.rmSync(dir, { recursive: true, force: true });
+}
+
+test('Stop still sends SIGKILL on the same pidfd when health outlasts the idle alarm', { timeout: 10000 }, async () => {
+  const fs = require('node:fs');
+  const os = require('node:os');
+  const path = require('node:path');
+  const dir = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'pidfd-idle-'));
+  let built = null;
+  let phase = 'adopt';
+  let waited = false;
+  let err = null;
+  try {
+    built = compileObservedPidfd(dir, false);
+    const sup = createGatewaySupervisor({
+      binary: '/home/tester/.local/bin/elastos',
+      args: ['home', '--browser'],
+      adoptForControls: true,
+      spawn() { throw new Error('a retained Home is not spawned'); },
+      fetchHealth: async () => {
+        if (phase === 'wait' && !waited) {
+          waited = true;
+          await new Promise((resolve) => setTimeout(resolve, 2000));
+        }
+        return { status: 200, body: 'OK' };
+      },
+      adoptInstalled: () => controllerGateway(
+        () => controllerView(),
+        () => ({ controllerStat: procStat(10, 1, 100), exePath: RUNTIME_EXE }),
+        (pid) => {
+          const pidfd = openLinuxPidfd(pid, { helper: built.helper });
+          return {
+            send(signal) {
+              pidfd.send(signal);
+              if (signal === 'SIGTERM') phase = 'wait';
+            },
+            close() { pidfd.close(); },
+          };
+        },
+      ),
+      now: () => Date.now(),
+      sleep: async () => {},
+      openUrl() {},
+      log() {},
+      graceMs: 30,
+      pollMs: 1,
+    });
+    try {
+      await sup.stop();
+    } catch (caught) {
+      err = caught;
+    }
+    assert.equal(fs.readFileSync(built.signalLog, 'utf8'), '15\n9\n');
+    assert.equal(fs.readFileSync(built.alarmLog, 'utf8'), '2\n0\n');
+    assert.equal(fs.readFileSync(built.prctlLog, 'utf8'), '1 9\n');
+    assert.match(String(err && err.message), /still running/);
+    const helperPid = Number(fs.readFileSync(built.pidLog, 'utf8'));
+    let helperGone = false;
+    for (let i = 0; i < 50; i += 1) {
+      try {
+        process.kill(helperPid, 0);
+      } catch {
+        helperGone = true;
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    assert.equal(helperGone, true);
+  } finally {
+    releaseObservedPidfd(dir, built && built.pidLog);
+  }
 });
 
 test('signalProcessGroup kills the leader and a child in that group', async () => {
