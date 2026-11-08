@@ -138,7 +138,6 @@ export function planRuntimeInstall(input: {
   const blocked = runtimeInstallBlock(input.platform, input.arch);
   if (blocked) return { action: 'blocked', message: blocked };
   const versionOk = versionAtLeast(input.installedVersion, input.pin.version);
-  const headOk = Boolean(input.installedHeadCid);
   if (!input.publisher) {
     return input.pin.publishable
       ? { action: 'unchecked' }
@@ -146,7 +145,7 @@ export function planRuntimeInstall(input: {
   }
   const field = pinMismatchField(input.pin, input.publisher);
   if (field) return { action: 'refused', field };
-  const installed = versionOk && headOk && input.installRecordProved;
+  const installed = versionOk && input.installRecordProved;
   if (installed && input.componentsPresent) return { action: 'already-installed' };
   if (installed && !input.componentsPresent) return { action: 'resume-setup' };
   return { action: 'pinned' };
@@ -266,7 +265,7 @@ async function recordProved(deps: RuntimeInstallDeps, dataDir: string, version: 
   try {
     if (!(await deps.installRecordProved(dataDir))) return false;
     const head = verifyReleaseHead(deps.readFile(runtimeJoin(dataDir, 'installation', 'release-head.json')), deps.pin.maintainerDid);
-    return head.headCid === headCid && installedVersionMatches(version, head.version)
+    return (!headCid || head.headCid === headCid) && installedVersionMatches(version, head.version)
       && versionAtLeast(head.version, deps.pin.version);
   } catch {
     return false;

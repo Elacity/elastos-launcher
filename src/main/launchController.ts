@@ -122,6 +122,7 @@ export interface LaunchInfo {
   openUrl: string;
   status: TargetStatus;
   platformNote: string | null;
+  error: string | null;
   /** Shown in the info panel. Windows only: its Browser is not available yet. */
   browserNote: string | null;
   /** Windows: Uninstall saves the whole Linux environment as one file, then removes it. */
@@ -283,6 +284,7 @@ export function createLaunchController(options: LaunchControllerOptions = {}): L
         displayName: active.descriptor.displayName,
         openUrl: active.descriptor.openUrl,
         status,
+        error: status === 'error' ? lastError : null,
         platformNote: platform?.message ?? null,
         browserNote: browserNote(process.platform),
         uninstallRemovesLinux: process.platform === 'win32',

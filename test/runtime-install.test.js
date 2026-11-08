@@ -657,3 +657,14 @@ test('release metadata and installer downloads have enforced bounds', async (t) 
   await assert.rejects(() => fetchRuntimeText('https://publisher.example/install.sh'), /exceeds the download limit/);
   assert.equal(cancelled, true);
 });
+
+test('a curl-installed 2.0.0 with an empty source head is adopted through its matching signed record', async () => {
+  const { deps, calls, files } = installedWithoutProof(SIGNED_HEAD);
+  files.set(SOURCES, JSON.stringify({ default_source: 'default', sources: [{ name: 'default', head_cid: '' }] }));
+  await installRuntime(deps);
+  assert.equal(calls.some((call) => call[0] === 'installer'), false);
+  // A nonempty conflicting source remains an integrity failure and needs repair.
+  files.set(SOURCES, JSON.stringify({ default_source: 'default', sources: [{ name: 'default', head_cid: 'QmWrong' }] }));
+  await installRuntime(deps);
+  assert.equal(calls.filter((call) => call[0] === 'installer').length, 1);
+});

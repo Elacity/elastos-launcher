@@ -534,6 +534,7 @@ async function refreshLaunch() {
     platformNote.classList.add('hidden');
   }
   updateStatus(info.status || await window.elastos.getStatus());
+  if (info.error) showError(info.error);
   await refreshVersion();
   checkForUpdate();
   await refreshLegacyPc2();

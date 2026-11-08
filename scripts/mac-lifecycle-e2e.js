@@ -83,6 +83,12 @@ module.exports = async function (app, page, home, options) {
   await status(page, 'stopped');
   await health(false);
   await app.close();
+  // curl-installed 2.0.0 can have an empty source head CID. Its signed install
+  // record still proves the installation and supplies the rollback identity.
+  const sourcePath = path.join(data, 'sources.json');
+  const sources = JSON.parse(fs.readFileSync(sourcePath, 'utf8'));
+  sources.sources.find((source) => source.name === sources.default_source).head_cid = '';
+  fs.writeFileSync(sourcePath, JSON.stringify(sources));
   const binary = path.join(home, '.local', 'bin', 'elastos');
   const external = spawn(binary, ['home', '--browser'], { detached: true, stdio: 'ignore', env: runtimeChildEnv(options.env) });
   console.log(`Started independent Home pid ${external.pid}`);
@@ -95,6 +101,13 @@ module.exports = async function (app, page, home, options) {
     await status(window, 'running');
     assert.equal(await window.locator('#open-label').innerText(), 'Open my computer');
     console.log('PASS a fresh launcher adopts an already running Home without reinstalling');
+    await window.evaluate(() => window.elastos.install());
+    assert.equal((await window.locator('#logs-content').innerText()).includes('Downloading ElastOS'), false);
+    console.log('PASS Install adopts a proved 2.0.0 installation with an empty source head CID');
+    await window.evaluate(() => window.elastos.update());
+    await status(window, 'running');
+    await health(true);
+    console.log('PASS Update uses the signed installed record when source head CID is unknown and restarts Home');
     await window.click('#power-btn');
     await status(window, 'stopped');
     await health(false);

@@ -222,3 +222,26 @@ test('Runtime 2.0.0 gets the #61 status record only after a successful check and
     () => raw, () => bridge(fixture.SIGNED_HEAD)), /network failed/);
   assert.equal(raw, undefined);
 });
+
+test('a 2.0.0 source with unknown head uses the stored signed record and matching binary version', async () => {
+  const fixture = require('./helpers/signed-release');
+  const calls = [];
+  let version = 'ElastOS Runtime v2.0.0';
+  let record = fixture.SIGNED_HEAD;
+  const store = memoryStore();
+  const run = async (args) => {
+    calls.push([...args]);
+    return { code: 0, stdout: args[0] === 'source' ? 'Head CID:  unknown\n' : args[0] === 'version' ? version : '', stderr: '' };
+  };
+  const verify = { maintainerDid: fixture.FIXTURE_DID, publisherGateway: 'https://publisher.example',
+    readInstalledHead: () => record, fetchText: async () => fixture.SIGNED_HEAD };
+  await applyRuntimeUpdate(run, store, verify);
+  assert.equal(store.get(), fixture.FIXTURE_HEAD_CID);
+  assert.deepEqual(calls, [['source', 'show'], ['version'], ['update', '--yes']]);
+  calls.length = 0;
+  version = 'ElastOS Runtime v2.0.1';
+  await assert.rejects(() => applyRuntimeUpdate(run, store, verify), /does not match/);
+  assert.equal(calls.some((args) => args[0] === 'update'), false);
+  record = fixture.SIGNED_HEAD.replace('2.0.0', '9.9.9');
+  await assert.rejects(() => applyRuntimeUpdate(run, store, verify), /signature/);
+});

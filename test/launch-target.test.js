@@ -235,3 +235,14 @@ test('install logs a missing runtime and does not spawn another product', async 
   assert.equal(preload.includes("exposeInMainWorld('elastos'"), true);
   assert.equal(preload.includes('elastos:install'), true);
 });
+
+test('launch info preserves a specific foreign-port error for the window', async (t) => {
+  const preflight = require('../dist/main/targets/preflight');
+  t.mock.method(preflight, 'collectPreflight', async () => ({ ok: true, checks: [] }));
+  const { createLaunchController } = require('../dist/main/launchController');
+  const controller = createLaunchController({ env: {} });
+  controller.target.getStatus = async () => { throw new Error('Another program is answering on port 8090. Home was not adopted.'); };
+  const info = await controller.getLaunchInfo();
+  assert.equal(info.status, 'error');
+  assert.match(info.error, /Another program.*port 8090/);
+});

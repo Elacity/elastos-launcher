@@ -13,7 +13,7 @@ import {
   probeGatewayHealth,
 } from './runtimeGateway';
 import * as runtimeInstall from './runtimeInstall';
-import { runtimeBinaryPath, runtimeComponentsPath, runtimeDataDir, runtimeUpdateCheckPath } from './runtimePaths';
+import { runtimeBinaryPath, runtimeComponentsPath, runtimeDataDir, runtimeUpdateCheckPath, runtimeJoin, signedInstallRecord } from './runtimePaths';
 import { findRuntimeBinary, parseRuntimeVersion, probeRuntimeInstallation, RUNTIME_VERSION_ARGS } from './runtimeProbe';
 import { runtimeInstallBlock } from './runtimeSupport';
 import { removeVerifiedTarget, uninstallRuntime } from './runtimeUninstall';
@@ -201,6 +201,12 @@ function headVerify(): HeadVerify {
     maintainerDid: pin.maintainerDid,
     publisherGateway: pin.publisherGateway,
     fetchText: runtimeInstall.fetchRuntimeText,
+    minimumVersion: pin.version ?? '2.0.0',
+    readInstalledHead: process.platform === 'win32' ? undefined : () => {
+      const data = runtimeDataDir(process.platform, os.homedir(), process.env);
+      if (!signedInstallRecord(data, pin.maintainerDid)) throw new Error('The signed install record is not valid.');
+      return fs.readFileSync(runtimeJoin(data, 'installation', 'release-head.json'), 'utf8');
+    },
   };
 }
 
