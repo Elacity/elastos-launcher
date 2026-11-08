@@ -1,7 +1,6 @@
 name: Linux ARM64 package
 
-# Ubuntu 22.04 matches the Jetson glibc (2.35). app-builder ships an x86 fpm
-# for every non-amd64 CPU, so the deb is built with the system fpm.
+# Ubuntu 22.04 matches the Jetson glibc (2.35).
 on:
   pull_request:
   workflow_dispatch:
@@ -27,19 +26,7 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Install system fpm
-        run: |
-          set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y ruby ruby-dev ruby-rubygems build-essential
-          sudo gem install fpm --no-document
-          command -v fpm
-          fpm --version
-
       - name: Build the arm64 AppImage and deb
-        env:
-          USE_SYSTEM_FPM: "true"
-          APPIMAGE_EXTRACT_AND_RUN: "1"
         run: npm run build:linux -- --arm64 --publish never
 
       - name: Record checksums

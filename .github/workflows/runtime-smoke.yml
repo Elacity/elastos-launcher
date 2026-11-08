@@ -1,6 +1,5 @@
 name: Runtime smoke
 
-# Linux x64, Linux arm64, macOS arm64, and the ElastOS WSL2 distro are required.
 # A red run fails the pull request. Each job verifies the selected channel
 # against the maintainer DID and rollback floor. Failed verification means
 # install stops. The job then checks gateway /healthz and

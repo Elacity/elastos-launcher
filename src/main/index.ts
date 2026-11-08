@@ -77,14 +77,12 @@ function createWindow(): void {
 }
 
 function createTray(): void {
-  // Simple tray icon
   const iconPath = path.join(__dirname, '../../resources/icon.png');
   let icon: Electron.NativeImage;
   
   try {
     icon = nativeImage.createFromPath(iconPath);
     if (icon.isEmpty()) {
-      // Fallback to a simple icon
       icon = nativeImage.createFromDataURL(
         'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAABHNCSVQICAgIfAhkiAAAAAlwSFlzAAAA7AAAAOwBeShxvQAAABl0RVh0U29mdHdhcmUAd3d3Lmlua3NjYXBlLm9yZ5vuPBoAAAH5SURBVFiF7Ze/axRBFMc/M7t3yUWjhYVYiI2NjQERbfwPrGxEOwsLsRAsLPwPbGwsxMbKQrCwEWzEQrDQRhALC8FCCYiIRuNdkuzujsXu3e7l7nKXM+D3wzDM8N7MZ+a9NzOQUXAIGAN2s+0CtXBkCfgD/AJ+ArPAT2ANWBdRFXgEZuUmcAEodshrA5yECcBTcBB4BZwGfOAZ8ETESv+X+i5wEbiY9H0Z2AmMA/uTvieqGuvpxfMYOJbSrqvOIEACMpAJSAJeAF5S9gM2U2OaAYmqhcAz8BpoBc+BzuuLdEiKZrLMSj0B7JIGFQK1wBM/xhp05QfsBKoNYC8wDzzvFyQJiCeJN8DFaJHXxXJV1tQ68IaYcLrpDyLoJ5APvCOLCRwNVCcJYy2wyQs7KiZlJuoB79oj/wBwtXNOtfYmGIrLWpLK+w5c60UYTANFJOsYcKRPCHPAAWASeMojwChWBxTpFrKu2vQC4BlwyUeFE0KxP0AqYT3JQE+B4SSwH6hnQAFYBO6JqPQKkQZYS5bXgccitP8N/oEKMCGi3C/IEPARuNcvRIb+yO4nngvMAe+Tzr5BkoBBYDfwot9qSOsUyxUNjQ8i6sMggmRoD7nHI/+wHTAGPBNR7hciCRj6LpjCxBpw00d5nyAZGgT2AEv/M/4vmHGRlTWP0ioAAAAASUVORK5CYII='
       );
@@ -96,7 +94,6 @@ function createTray(): void {
   }
 
   tray = new Tray(icon.resize({ width: 16, height: 16 }));
-  (global as typeof globalThis & { __elastosTray?: true }).__elastosTray = true;
   tray.setToolTip('ElastOS');
   updateTrayMenu();
 

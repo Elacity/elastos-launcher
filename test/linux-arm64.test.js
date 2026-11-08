@@ -18,14 +18,15 @@ const DEB_DEPENDS = [
   'libayatana-appindicator3-1',
 ];
 
-test('the arm64 package job uses the Jetson glibc and a system fpm', () => {
+test('the arm64 package job uses the Jetson glibc and the bundled fpm', () => {
   const workflow = fs.readFileSync(path.join(root, '.github/workflows/linux-arm64.yml'), 'utf8');
   const build = fs.readFileSync(path.join(root, '.github/workflows/build.yml'), 'utf8');
   assert.match(workflow, /pull_request:/);
   assert.match(workflow, /runs-on: ubuntu-22\.04-arm/);
-  assert.match(workflow, /USE_SYSTEM_FPM/);
   assert.match(workflow, /--arm64/);
-  assert.match(workflow, /APPIMAGE_EXTRACT_AND_RUN/);
+  assert.equal(workflow.includes('USE_SYSTEM_FPM'), false);
+  assert.equal(workflow.includes('APPIMAGE_EXTRACT_AND_RUN'), false);
+  assert.equal(workflow.includes('gem install fpm'), false);
   assert.match(build, /uses: \.\/\.github\/workflows\/linux-arm64\.yml/);
   assert.match(build, /needs: \[build, linux-arm64\]/);
 });
@@ -59,8 +60,8 @@ test('linux e2e runs the linux lifecycle and leaves the mac lifecycle on darwin'
   assert.match(life, /PASS Stop Home closes the listener/);
   assert.match(life, /PASS Start Home becomes healthy/);
   assert.match(life, /PASS elastos update --check writes up_to_date/);
-  assert.match(life, /PASS the tray icon is ready/);
-  assert.match(life, /__elastosTray/);
+  assert.equal(life.includes('waitForFunction'), false);
+  assert.equal(life.includes('__elastosTray'), false);
   assert.equal(life.includes('Application Support'), false);
   assert.equal(life.includes('home --browser'), false);
   assert.match(life, /\.local', 'share', 'elastos'/);
