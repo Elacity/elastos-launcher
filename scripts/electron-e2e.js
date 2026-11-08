@@ -136,6 +136,12 @@ async function main() {
   }
 
   try {
+    if (process.platform === 'win32') {
+      await electronApp.evaluate(({ shell }) => {
+        global.__launcherOpened = [];
+        shell.openExternal = async (url) => { global.__launcherOpened.push(url); };
+      });
+    }
     const page = await electronApp.firstWindow();
     const readyDeadline = Date.now() + 60000;
     let clicked = '';
@@ -229,6 +235,14 @@ async function main() {
           await require('./linux-lifecycle-e2e')(electronApp, page, home, {
             executablePath: electronPath, cwd: root, args, env, timeout: 120000,
           });
+        }
+        if (process.platform === 'win32') {
+          const opened = await electronApp.evaluate(() => global.__launcherOpened);
+          if (!Array.isArray(opened) || opened.length !== 0) {
+            throw new Error(`Install opened a browser tab after Start: ${JSON.stringify(opened)}`);
+          }
+          console.log('PASS install did not open a second browser tab');
+          electronApp = await require('./windows-lifecycle-e2e')(electronApp, page, home);
         }
         return;
       }

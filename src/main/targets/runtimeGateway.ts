@@ -21,7 +21,7 @@ export { HEALTH_URL, HOME_URL, LEGACY_GATEWAY_ADDR, LOOPBACK_ADDRESSES };
 
 /** Supervised command from the launcher contract. */
 export const GATEWAY_ARGS: readonly string[] = ['gateway', '--addr', GATEWAY_ADDR];
-const TERMINAL_KEEP_LINE = 'Keep this terminal open. Press Ctrl+C to stop Home.';
+export const HOME_TERMINAL_LINE = 'Keep this terminal open. Press Ctrl+C to stop Home.';
 
 export interface HomeLaunch {
   args: readonly string[];
@@ -33,16 +33,16 @@ export interface HomeLaunch {
   offerKeepHomeOnQuit: boolean;
 }
 
-/** Darwin and Linux start the signed Home controller. Windows keeps the gateway command. */
+/** Each desktop platform starts the signed Home controller. */
 export function homeLaunchForPlatform(platform: string): HomeLaunch {
-  const browserHome = platform === 'darwin' || platform === 'linux';
+  const browserHome = platform === 'darwin' || platform === 'linux' || platform === 'win32';
   return {
     args: browserHome ? ['home', '--browser'] : GATEWAY_ARGS,
     quitWhenLastWindowCloses: platform !== 'darwin' && platform !== 'linux',
     updateRestartsHome: browserHome,
     rollbackRestartsHome: browserHome,
-    hideTerminalKeepLine: platform === 'linux',
-    openBrowserAfterInstall: platform !== 'linux',
+    hideTerminalKeepLine: platform === 'linux' || platform === 'win32',
+    openBrowserAfterInstall: platform !== 'linux' && platform !== 'win32',
     offerKeepHomeOnQuit: platform === 'linux',
   };
 }
@@ -87,7 +87,7 @@ export interface GatewayProcess {
   onExit(listener: (code: number | null) => void): void;
   signal(signal: NodeJS.Signals): void;
   hasExited(): boolean | Promise<boolean>;
-  /** Drop a pidfd helper. A spawned process and a Mac process have none. */
+  /** Drop a stop helper. A process that has none does not implement this. */
   dispose?(): void;
 }
 
@@ -179,6 +179,7 @@ export function foreignListenerIsElastos(input: Parameters<typeof installedGatew
 }
 
 export interface GatewaySupervisorDeps {
+  platform?: string;
   binary: string;
   args?: readonly string[];
   /** Mac and Linux adopt the installed Home proved by its host lock and controller status. */
@@ -826,17 +827,18 @@ export function isHealthOk(result: HealthResult | null): boolean {
 }
 
 /** Drop lines that can carry attach_secret. The coords files stay on disk, out of the log. */
-export function scrubRuntimeLog(chunk: string): string {
+export function scrubRuntimeLog(chunk: string, platform: string = process.platform): string {
   if (/attach_secret|runtime-coords\.json|gateway-runtime-coords|home-runtime-coords/i.test(chunk)) {
     return '[elastos] omitted a line that can contain a local secret\n';
   }
-  return chunk;
+  if (platform !== 'win32' || !chunk.includes(HOME_TERMINAL_LINE)) return chunk;
+  return chunk.split(HOME_TERMINAL_LINE).join('');
 }
 
-export function launcherLogText(text: string, hideTerminalKeepLine: boolean): string {
-  const clean = scrubRuntimeLog(text);
+export function launcherLogText(text: string, hideTerminalKeepLine: boolean, platform: string = process.platform): string {
+  const clean = scrubRuntimeLog(text, platform);
   if (!hideTerminalKeepLine) return clean;
-  return clean.split('\n').filter((line) => !line.includes(TERMINAL_KEEP_LINE)).join('\n');
+  return clean.split('\n').filter((line) => !line.includes(HOME_TERMINAL_LINE)).join('\n');
 }
 
 export function createGatewaySupervisor(deps: GatewaySupervisorDeps): GatewaySupervisor {
@@ -853,7 +855,7 @@ export function createGatewaySupervisor(deps: GatewaySupervisorDeps): GatewaySup
   const homeController = deps.args?.[0] === 'home';
 
   const note = (line: string) => {
-    const clean = launcherLogText(line, deps.hideTerminalKeepLine === true).replace(/\s+$/g, '');
+    const clean = launcherLogText(line, deps.hideTerminalKeepLine === true, deps.platform).replace(/\s+$/g, '');
     if (!clean) return;
     logs.push(clean);
     deps.log(clean);
@@ -978,7 +980,7 @@ export function createGatewaySupervisor(deps: GatewaySupervisorDeps): GatewaySup
     if (output.includes(ALREADY_OWNS_TEXT)) {
       return 'already';
     }
-    const tail = launcherLogText(output, deps.hideTerminalKeepLine === true).trim().split('\n').slice(-3).join(' ');
+    const tail = launcherLogText(output, deps.hideTerminalKeepLine === true, deps.platform).trim().split('\n').slice(-3).join(' ');
     current = 'error';
     throw new Error(
       tail
@@ -1012,12 +1014,14 @@ export function createGatewaySupervisor(deps: GatewaySupervisorDeps): GatewaySup
     try {
       proc.signal('SIGTERM');
       if (await confirmedStopped(proc, graceMs)) {
+        proc.dispose?.();
         owned = null;
         current = 'stopped';
         return;
       }
       proc.signal('SIGKILL');
       if (await confirmedStopped(proc, graceMs)) {
+        proc.dispose?.();
         owned = null;
         current = 'stopped';
         return;
@@ -1477,6 +1481,7 @@ export function createDefaultGatewaySupervisor(binary: string, platform: string 
   const launch = homeLaunchForPlatform(platform);
   return createGatewaySupervisor({
     binary,
+    platform,
     args: launch.args,
     hideTerminalKeepLine: launch.hideTerminalKeepLine,
     adoptForControls: platformAdoptsInstalledHome(platform),

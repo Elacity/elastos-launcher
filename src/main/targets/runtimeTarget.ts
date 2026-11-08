@@ -68,7 +68,7 @@ export function createRuntimeTarget(platform: NodeJS.Platform = process.platform
   }
 
   function changeRuntime(action: () => Promise<void>): Promise<void> {
-    if (platform !== 'darwin') return serialize(action);
+    if (platform !== 'darwin' && platform !== 'win32') return serialize(action);
     if (updating) return Promise.reject(new Error('An ElastOS update is already running.'));
     updating = true;
     requestedRunning = true;
@@ -137,13 +137,20 @@ export function createRuntimeTarget(platform: NodeJS.Platform = process.platform
       if (supervisor) {
         const phase = observedPhase;
         if (phase === 'starting' || phase === 'stopping' || phase === 'error'
-          || (phase === 'running' && platform !== 'darwin')) {
+          || (phase === 'running' && platform !== 'darwin' && platform !== 'win32')) {
           return phase;
         }
       }
       if (platform === 'win32') {
         if (!distroIsInstalled()) return 'not-installed';
-        if (isHealthOk(await readHealth())) return 'running';
+        if (isHealthOk(await readHealth())) {
+          // A live controller keeps Home up after the child pid changes. Health
+          // and the distro facts are the status, not the supervisor's old phase.
+          if (!(await confirmInstalledGateway())) {
+            throw new Error('Another program is answering on port 8090. Home was not adopted.');
+          }
+          return 'running';
+        }
         return 'stopped';
       }
       if (runtimeInstallBlock(platform, arch)) return 'not-installed';
@@ -182,13 +189,13 @@ export function createRuntimeTarget(platform: NodeJS.Platform = process.platform
     install: (onProgress) => runtimeInstall.installRuntimeOnThisComputer(onProgress),
     update: (onProgress) => {
       const action = () => applyRuntimeUpdate(runtimeCommand(platform), runtimeHeadStore(), headVerify(platform), onProgress);
-      if (platform === 'darwin') return changeRuntime(action);
+      if (platform === 'darwin' || platform === 'win32') return changeRuntime(action);
       if (!homeLaunchForPlatform(platform).updateRestartsHome) return serialize(action);
       return serialize(() => runWithHomeRestart(action));
     },
     rollback: (onProgress) => {
       const action = () => rollbackRuntime(runtimeCommand(platform), runtimeHeadStore(), headVerify(platform), onProgress);
-      if (platform === 'darwin') return changeRuntime(action);
+      if (platform === 'darwin' || platform === 'win32') return changeRuntime(action);
       if (!homeLaunchForPlatform(platform).rollbackRestartsHome) return serialize(action);
       return serialize(() => runWithHomeRestart(action));
     },

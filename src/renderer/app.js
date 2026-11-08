@@ -221,7 +221,7 @@ async function runInstall() {
     await window.elastos.start();
     renderSteps('Your computer is ready');
     const started = await window.elastos.getLaunchInfo();
-    if (window.elastos.platform !== 'darwin' && started.openBrowserAfterInstall !== false) {
+    if (flow.shouldOpenBrowserAfterStart(started)) {
       await window.elastos.openBrowser();
     }
   } catch (err) {

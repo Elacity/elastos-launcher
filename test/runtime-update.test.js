@@ -255,6 +255,7 @@ test('Mac Undo stops Home, restores the release, and starts Home again', async (
 
 test('Windows Update does not stop or start Home around the command', async (t) => {
   const gateway = require('../dist/main/targets/runtimeGateway');
+  const windows = require('../dist/main/targets/windowsRuntime');
   const updates = require('../dist/main/targets/runtimeUpdate');
   const { createRuntimeTarget } = require('../dist/main/targets/runtimeTarget');
   const calls = [];
@@ -262,8 +263,157 @@ test('Windows Update does not stop or start Home around the command', async (t) 
     stop: async () => { calls.push('stop'); }, start: async () => { calls.push('start'); },
   }));
   t.mock.method(updates, 'applyRuntimeUpdate', async () => { calls.push('update'); });
+  // Keep this source-branch test name. Windows restarts only the distro Home.
+  t.mock.method(windows, 'distroIsInstalled', () => true);
+  t.mock.method(windows, 'createDistroGatewaySupervisor', () => ({ stop: async () => {}, start: async () => {} }));
   await createRuntimeTarget('win32').update();
   assert.deepEqual(calls, ['update']);
+});
+
+test('Windows Update and Undo stop Home, run the release command, and start home --browser again', async (t) => {
+  const windows = require('../dist/main/targets/windowsRuntime');
+  const updates = require('../dist/main/targets/runtimeUpdate');
+  const { createRuntimeTarget } = require('../dist/main/targets/runtimeTarget');
+  const calls = [];
+  t.mock.method(windows, 'createDistroGatewaySupervisor', () => ({
+    stop: async () => { calls.push('stop'); },
+    start: async () => { calls.push('start'); },
+  }));
+  t.mock.method(windows, 'distroIsInstalled', () => true);
+  t.mock.method(updates, 'applyRuntimeUpdate', async () => { calls.push('update'); });
+  t.mock.method(updates, 'rollbackRuntime', async () => { calls.push('rollback'); });
+  const target = createRuntimeTarget('win32');
+  await target.update();
+  assert.deepEqual(calls, ['stop', 'update', 'start']);
+  calls.length = 0;
+  await target.rollback();
+  assert.deepEqual(calls, ['stop', 'rollback', 'start']);
+  calls.length = 0;
+  t.mock.method(updates, 'applyRuntimeUpdate', async () => { throw new Error('update failed'); });
+  await assert.rejects(() => target.update(), /update failed/);
+  assert.deepEqual(calls, ['stop', 'start']);
+});
+
+for (const mode of ['update', 'rollback']) {
+  test(`Windows ${mode} does not start Home after a failed Stop`, async (t) => {
+    const windows = require('../dist/main/targets/windowsRuntime');
+    const updates = require('../dist/main/targets/runtimeUpdate');
+    const { createRuntimeTarget } = require('../dist/main/targets/runtimeTarget');
+    const calls = [];
+    t.mock.method(windows, 'createDistroGatewaySupervisor', () => ({
+      stop: async () => { calls.push('stop'); throw new Error('stop failed'); },
+      start: async () => { calls.push('start'); },
+      forceKill() { calls.push('force-stop'); },
+    }));
+    t.mock.method(windows, 'distroIsInstalled', () => true);
+    t.mock.method(updates, 'applyRuntimeUpdate', async () => { calls.push('update'); });
+    t.mock.method(updates, 'rollbackRuntime', async () => { calls.push('rollback'); });
+    const target = createRuntimeTarget('win32');
+    await assert.rejects(() => target[mode](), /stop failed/);
+    assert.deepEqual(calls, ['stop']);
+  });
+
+  for (const control of ['stop', 'stopForRemoval', 'forceStop', 'quit']) {
+    test(`Windows ${mode} leaves Home stopped after a later ${control}`, async (t) => {
+      const windows = require('../dist/main/targets/windowsRuntime');
+      const updates = require('../dist/main/targets/runtimeUpdate');
+      const { createRuntimeTarget } = require('../dist/main/targets/runtimeTarget');
+      const calls = [];
+      let finish;
+      let entered;
+      const running = new Promise((resolve) => { entered = resolve; });
+      const pending = new Promise((resolve) => { finish = resolve; });
+      t.mock.method(windows, 'createDistroGatewaySupervisor', () => ({
+        stop: async () => { calls.push('stop'); },
+        start: async () => { calls.push('start'); },
+        forceKill() { calls.push('force-stop'); },
+      }));
+      t.mock.method(windows, 'distroIsInstalled', () => true);
+      t.mock.method(updates, mode === 'update' ? 'applyRuntimeUpdate' : 'rollbackRuntime', async () => {
+        calls.push(mode);
+        entered();
+        await pending;
+      });
+      const target = createRuntimeTarget('win32');
+      const operation = target[mode]();
+      await running;
+      let stopping;
+      if (control === 'quit') {
+        const { createLaunchController } = require('../dist/main/launchController');
+        const launch = createLaunchController({ env: {} });
+        launch.target.stop = target.stop;
+        stopping = launch.shutdown();
+      } else if (control === 'forceStop') {
+        target.forceStop();
+        stopping = Promise.resolve();
+      } else {
+        stopping = target[control]();
+      }
+      finish();
+      await operation;
+      await stopping;
+      assert.equal(calls.includes('start'), false);
+    });
+  }
+}
+
+test('Windows controller exit before readiness reports error and does not start again', async (t) => {
+  const child = require('node:child_process');
+  const dns = require('node:dns');
+  const windows = require('../dist/main/targets/windowsRuntime');
+  let exitFn;
+  let dataFn;
+  let spawns = 0;
+  let argv = [];
+  t.mock.method(child, 'spawn', (_cmd, args) => {
+    spawns += 1;
+    argv = args;
+    return {
+      pid: 5150,
+      stdout: { on(_event, fn) { dataFn = fn; } },
+      stderr: { on() {} },
+      on(event, fn) { if (event === 'exit') exitFn = fn; },
+    };
+  });
+  t.mock.method(dns.promises, 'lookup', async () => {
+    dataFn('host executable was replaced on disk');
+    exitFn(75);
+    return [{ address: '203.0.113.9', family: 4 }];
+  });
+  const supervisor = windows.createDistroGatewaySupervisor();
+  await assert.rejects(() => supervisor.start(), /stopped|exit 75|restart/);
+  assert.equal(supervisor.phase(), 'error');
+  assert.equal(spawns, 1);
+  assert.equal(argv.includes('home'), true);
+  assert.equal(argv.includes('--browser'), true);
+});
+
+test('Windows update status read asks for at most 16384 bytes and refuses a larger file', (t) => {
+  const child = require('node:child_process');
+  const fs = require('node:fs');
+  const os = require('node:os');
+  const path = require('node:path');
+  const windows = require('../dist/main/targets/windowsRuntime');
+  const spawnSync = child.spawnSync;
+  let args;
+  t.mock.method(child, 'spawnSync', (_cmd, argv) => {
+    args = argv;
+    return { status: 1, stdout: '', stderr: '', error: undefined };
+  });
+  assert.throws(() => windows.readDistroUpdateStatus(), /could not read a file/);
+  assert.equal(args.at(-1), '16384');
+  assert.equal(args.includes('/root/.local/share/elastos/update-check.json'), true);
+  const script = args[args.indexOf('-c') + 1];
+  const dir = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'update-cap-'));
+  const file = path.join(dir, 'update-check.json');
+  fs.writeFileSync(file, 'x'.repeat(16385));
+  const probed = script.replace("pathlib.PurePosixPath('/root')", `pathlib.PurePosixPath(${JSON.stringify(dir)})`);
+  const refused = spawnSync('python3', ['-c', probed, 'read', file, '16384'], { encoding: 'utf8' });
+  assert.equal(refused.status, 2);
+  fs.writeFileSync(file, '{"ok":true}');
+  const allowed = spawnSync('python3', ['-c', probed, 'read', file, '16384'], { encoding: 'utf8' });
+  assert.equal(allowed.status, 0);
+  assert.equal(Buffer.from(allowed.stdout.trim(), 'base64').toString('utf8'), '{"ok":true}');
 });
 
 test('Runtime 2.0.0 gets the #61 status record only after a successful check and signed head verification', async () => {

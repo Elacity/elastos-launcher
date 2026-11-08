@@ -1412,10 +1412,15 @@ test('logs omit attach secrets', async () => {
   assert.equal(text.includes('sekrit'), false);
   assert.match(text, /omitted a line/);
   assert.equal(scrubRuntimeLog('attach_secret=nope').includes('nope'), false);
+  const { HOME_TERMINAL_LINE } = require('../dist/main/targets/runtimeGateway');
+  const hidden = scrubRuntimeLog(`Home: http://localhost:8090/home/\n${HOME_TERMINAL_LINE}\nStill starting Home (10 s)...\n`, 'win32');
+  assert.equal(hidden.includes(HOME_TERMINAL_LINE), false);
+  assert.match(hidden, /Still starting Home/);
+  assert.match(scrubRuntimeLog(`${HOME_TERMINAL_LINE}\nattach_secret=nope\n`, 'win32'), /omitted a line/);
   const keep = 'Keep this terminal open. Press Ctrl+C to stop Home.\nwas replaced on disk\n';
-  assert.equal(launcherLogText(keep, true).includes('Keep this terminal open'), false);
-  assert.match(launcherLogText(keep, true), /was replaced on disk/);
-  assert.match(launcherLogText(keep, false), /Keep this terminal open/);
+  assert.equal(launcherLogText(keep, true, 'linux').includes('Keep this terminal open'), false);
+  assert.match(launcherLogText(keep, true, 'linux'), /was replaced on disk/);
+  assert.match(launcherLogText(keep, false, 'darwin'), /Keep this terminal open/);
   assert.deepEqual(homeLaunchForPlatform('linux').args, ['home', '--browser']);
   assert.equal(homeLaunchForPlatform('linux').quitWhenLastWindowCloses, false);
   assert.equal(homeLaunchForPlatform('linux').updateRestartsHome, true);
@@ -1433,10 +1438,10 @@ test('logs omit attach secrets', async () => {
   assert.equal(homeLaunchForPlatform('darwin').hideTerminalKeepLine, false);
   assert.equal(homeLaunchForPlatform('darwin').openBrowserAfterInstall, true);
   assert.equal(homeLaunchForPlatform('darwin').offerKeepHomeOnQuit, false);
-  assert.deepEqual(homeLaunchForPlatform('win32').args, ['gateway', '--addr', 'localhost:8090']);
+  assert.deepEqual(homeLaunchForPlatform('win32').args, ['home', '--browser']);
   assert.equal(homeLaunchForPlatform('win32').quitWhenLastWindowCloses, true);
-  assert.equal(homeLaunchForPlatform('win32').updateRestartsHome, false);
-  assert.equal(homeLaunchForPlatform('win32').openBrowserAfterInstall, true);
+  assert.equal(homeLaunchForPlatform('win32').updateRestartsHome, true);
+  assert.equal(homeLaunchForPlatform('win32').openBrowserAfterInstall, false);
   assert.equal(homeLaunchForPlatform('win32').offerKeepHomeOnQuit, false);
 });
 
@@ -1756,3 +1761,32 @@ test('signalProcessGroup kills the leader and a child in that group', async () =
     try { process.kill(-(child.pid), 'SIGKILL'); } catch { /* already gone */ }
   }
 });
+
+for (const platform of ['darwin', 'linux', 'win32']) {
+  test(`combined launcher keeps the reviewed ${platform} log policy`, async () => {
+    let proc;
+    const launch = homeLaunchForPlatform(platform);
+    const sup = createGatewaySupervisor({
+      binary: '/fixture/elastos',
+      platform,
+      args: launch.args,
+      hideTerminalKeepLine: launch.hideTerminalKeepLine,
+      spawn() { proc = fakeProcess(11); return proc; },
+      fetchHealth: async () => {
+        proc.emit('Keep this terminal open. Press Ctrl+C to stop Home.\nHome ready\n');
+        return { status: 200, body: 'OK' };
+      },
+      listenerOwned: () => true,
+      sleep: async () => {},
+      now: () => 0,
+      openUrl() {},
+      log() {},
+    });
+    await sup.start();
+    assert.equal(sup.getLogs().includes('Keep this terminal open'), platform === 'darwin');
+    assert.match(sup.getLogs(), /Home ready/);
+    const flow = require('../src/renderer/flow.js');
+    assert.equal(flow.launcherLog('Keep this terminal open. Press Ctrl+C to stop Home.')
+      .includes('Keep this terminal open'), false);
+  });
+}

@@ -182,6 +182,9 @@ test('Windows shows that its Browser is not available yet, and only Windows', ()
   assert.equal(flow.browserNoteText({ browserNote: WINDOWS_BROWSER_MESSAGE }), WINDOWS_BROWSER_MESSAGE);
   assert.equal(flow.browserNoteText({ browserNote: null }), '');
   assert.equal(flow.browserNoteText(undefined), '');
+  assert.equal(flow.shouldOpenBrowserAfterStart({ runtimeOpensBrowser: true }), false);
+  assert.equal(flow.shouldOpenBrowserAfterStart({ runtimeOpensBrowser: false }), true);
+  assert.equal(flow.shouldOpenBrowserAfterStart(undefined), true);
   const html = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'index.html'), 'utf8');
   assert.match(html, /<div class="info-row single hidden" id="browser-row">/);
   const app = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'app.js'), 'utf8');

@@ -128,6 +128,8 @@ export interface LaunchInfo {
   browserNote: string | null;
   /** Windows: Uninstall saves the whole Linux environment as one file, then removes it. */
   uninstallRemovesLinux: boolean;
+  /** `home --browser` opens one tab. The launcher does not open a second one after Start. */
+  runtimeOpensBrowser: boolean;
   preflight: PreflightReport;
   openAtLogin: boolean;
   canRollback: boolean;
@@ -289,6 +291,7 @@ export function createLaunchController(options: LaunchControllerOptions = {}): L
         error: status === 'error' ? lastError : null,
         platformNote: platform?.message ?? null,
         browserNote: browserNote(process.platform),
+        runtimeOpensBrowser: homeLaunchForPlatform(process.platform).args[0] === 'home',
         uninstallRemovesLinux: process.platform === 'win32',
         preflight,
         openAtLogin: readOpenAtLogin(),
