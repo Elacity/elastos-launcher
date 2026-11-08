@@ -198,6 +198,43 @@ test('Mac Update stops Home, runs the update and starts the current binary even 
   assert.deepEqual(calls, ['stop', 'update', 'start-current-binary']);
 });
 
+test('Linux Update stops Home, runs the update, and starts the current binary even after failure', async (t) => {
+  const gateway = require('../dist/main/targets/runtimeGateway');
+  const updates = require('../dist/main/targets/runtimeUpdate');
+  const probe = require('../dist/main/targets/runtimeProbe');
+  const { createRuntimeTarget } = require('../dist/main/targets/runtimeTarget');
+  const calls = [];
+  t.mock.method(probe, 'findRuntimeBinary', () => '/installed/elastos');
+  t.mock.method(gateway, 'createDefaultGatewaySupervisor', () => ({
+    stop: async () => { calls.push('stop'); }, start: async () => { calls.push('start-current-binary'); },
+  }));
+  let fail = false;
+  t.mock.method(updates, 'applyRuntimeUpdate', async () => {
+    calls.push('update');
+    if (fail) throw new Error('update failed');
+  });
+  const target = createRuntimeTarget('linux');
+  await target.update();
+  assert.deepEqual(calls, ['stop', 'update', 'start-current-binary']);
+  calls.length = 0;
+  fail = true;
+  await assert.rejects(() => target.update(), /update failed/);
+  assert.deepEqual(calls, ['stop', 'update', 'start-current-binary']);
+});
+
+test('Windows Update does not stop or start Home around the command', async (t) => {
+  const gateway = require('../dist/main/targets/runtimeGateway');
+  const updates = require('../dist/main/targets/runtimeUpdate');
+  const { createRuntimeTarget } = require('../dist/main/targets/runtimeTarget');
+  const calls = [];
+  t.mock.method(gateway, 'createDefaultGatewaySupervisor', () => ({
+    stop: async () => { calls.push('stop'); }, start: async () => { calls.push('start'); },
+  }));
+  t.mock.method(updates, 'applyRuntimeUpdate', async () => { calls.push('update'); });
+  await createRuntimeTarget('win32').update();
+  assert.deepEqual(calls, ['update']);
+});
+
 test('Runtime 2.0.0 gets the #61 status record only after a successful check and signed head verification', async () => {
   const fixture = require('./helpers/signed-release');
   const { writeSignedUpdateCheck } = require('../dist/main/targets/runtimeUpdate');
