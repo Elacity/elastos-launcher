@@ -54,11 +54,13 @@ def dump():
     if not target:
         return
     text = json.dumps(events).encode('utf-8')
-    fd = os.open(target, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    tmp = target + ".tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     try:
         os.write(fd, text)
     finally:
         os.close(fd)
+    os.replace(tmp, target)
 
 def note(event):
     events.append(event)
@@ -288,6 +290,41 @@ function runSession(helper, options) {
     removeTemp(channel);
   }
 }
+
+test('event snapshots stay complete while the exit dump is being written', async () => {
+  python();
+  const root = makeTemp('elastos-stop-snapshot-');
+  const events = path.join(root, 'events.json');
+  const paused = path.join(root, 'paused');
+  const resume = path.join(root, 'resume');
+  const script = `${PRELUDE}
+note({'api': 'complete'})
+real_write = os.write
+def paused_write(fd, data):
+    open(os.environ['PAUSED'], 'w').close()
+    deadline = time.monotonic() + 5
+    while not os.path.exists(os.environ['RESUME']):
+        if time.monotonic() > deadline:
+            raise RuntimeError('snapshot reader did not resume writer')
+        time.sleep(0.01)
+    return real_write(fd, data)
+os.write = paused_write
+`; // atexit runs the real dump with its write paused after opening the file.
+  const child = spawn('python3', ['-c', script], {
+    stdio: 'ignore', env: { ...process.env, ELASTOS_STOP_EVENTS: events, PAUSED: paused, RESUME: resume },
+  });
+  const closed = new Promise(resolve => child.on('close', resolve));
+  try {
+    const deadline = Date.now() + 5000;
+    while (!fs.existsSync(paused) && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 10));
+    assert.ok(fs.existsSync(paused), 'writer reached the publication boundary');
+    assert.deepEqual(readEvents(events), [{ api: 'complete' }]);
+  } finally {
+    fs.writeFileSync(resume, 'go');
+    await closed;
+    removeTemp(root);
+  }
+});
 
 test('a raw pid and a host pid receive no signal', () => {
   python();
