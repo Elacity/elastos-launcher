@@ -165,7 +165,7 @@ async function main() {
     }
     if (!clicked) {
       const label = (await page.locator('#open-label').innerText()).trim();
-      const logs = await page.locator('#logs-content').innerText();
+      const logs = await page.locator('#logs-content').textContent();
       console.log('----- install log -----');
       console.log(logs);
       throw new Error(`Install button did not become ready (button is ${label})`);
@@ -182,7 +182,7 @@ async function main() {
     let windowsFix = 'pending';
     while (Date.now() < deadline) {
       label = (await page.locator('#open-label').innerText()).trim();
-      const logs = await page.locator('#logs-content').innerText();
+      const logs = await page.locator('#logs-content').textContent();
       const errorVisible = await page.locator('#status-text').getAttribute('data-error') === 'true';
       const errorText = (await page.locator('#status-text').innerText()).trim();
       const openDisabled = await page.locator('#open-btn').isDisabled();
@@ -298,7 +298,7 @@ async function main() {
       }
       await page.waitForTimeout(1000);
     }
-    const logs = await page.locator('#logs-content').innerText();
+    const logs = await page.locator('#logs-content').textContent();
     console.log('----- install log -----');
     console.log(logs);
     throw new Error(`Install did not reach Open Home (button is ${label})`);

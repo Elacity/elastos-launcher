@@ -173,7 +173,7 @@ module.exports = async function (app, page, home) {
   await health(true);
   console.log('PASS Start Home becomes healthy');
   assert.deepEqual(await app.evaluate(() => global.__openedHome), ['http://localhost:8090/home/']);
-  const logs = await page.locator('#logs-content').innerText();
+  const logs = await page.locator('#logs-content').textContent();
   assert.equal(logs.includes('Keep this terminal open. Press Ctrl+C to stop Home.'), false);
   proveLiveController();
 

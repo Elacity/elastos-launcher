@@ -38,7 +38,7 @@ async function status(page, wanted) {
       10000, `Window status did not become ${wanted}`);
   } catch (error) {
     console.log(`Status failure wanted=${wanted} last=${last} window=${await page.locator('#status-text').innerText()} error=${await page.locator('#status-text').innerText()}`);
-    const logs = await page.locator('#logs-content').innerText();
+    const logs = await page.locator('#logs-content').textContent();
     for (const match of logs.matchAll(/Home ownership check: (host-lock|native-host|host-proof|host-changed|controller-status|controller-metadata)\b/g)) {
       console.log(match[0]);
     }
@@ -47,7 +47,7 @@ async function status(page, wanted) {
 }
 
 module.exports = async function (app, page, home, options) {
-  assert.equal((await page.locator('#logs-content').innerText()).includes('Keep this terminal open'), false);
+  assert.equal((await page.locator('#logs-content').textContent()).includes('Keep this terminal open'), false);
   await app.evaluate(({ shell }) => {
     global.__openedHome = [];
     shell.openExternal = async (url) => { global.__openedHome.push(url); };
@@ -147,7 +147,7 @@ module.exports = async function (app, page, home, options) {
     await health(true);
     console.log('PASS adopted controller exit reports Stopped and explicit Start starts Home again');
     await window.evaluate(() => window.elastos.install());
-    assert.equal((await window.locator('#logs-content').innerText()).includes('Downloading ElastOS'), false);
+    assert.equal((await window.locator('#logs-content').textContent()).includes('Downloading ElastOS'), false);
     console.log('PASS Install adopts a proved 2.0.0 installation with an empty source head CID');
     await window.evaluate(() => window.elastos.update());
     await status(window, 'running');
