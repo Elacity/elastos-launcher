@@ -10,7 +10,6 @@ import { setRuntimeLogSink } from './targets/runtimeGateway';
 import { loadActiveRuntimePin } from './targets/runtimePin';
 import { browserNote } from './targets/runtimeSupport';
 import { runtimeHeadStore } from './targets/runtimeUpdate';
-import { rollbackRuntimeUpdate } from './targets/runtimeTarget';
 import { BackupDescription, describeRuntimeBackupOnThisComputer } from './targets/runtimeBackup';
 import { resetRuntimeOnThisComputer, ResetResult } from './targets/runtimeUninstall';
 import { describeDistroBackupOnThisComputer, resetRuntimeInDistroOnThisComputer } from './targets/windowsReset';
@@ -259,7 +258,7 @@ export function createLaunchController(options: LaunchControllerOptions = {}): L
     describeResetBackup: () => (process.platform === 'win32'
       ? describeDistroBackupOnThisComputer()
       : describeRuntimeBackupOnThisComputer()),
-    rollback: (onProgress) => runRuntime(() => rollbackRuntimeUpdate(onProgress)),
+    rollback: (onProgress) => runRuntime(() => active.rollback(onProgress)),
     getVersion: () => runRuntimeSync(() => active.getVersion()),
     checkForUpdate: () => runRuntime(() => active.checkForUpdate()),
     openInBrowser: () => {

@@ -10,8 +10,7 @@ const {
 } = require('../dist/main/targets/runtimeUpdate');
 const { releaseHeadCid } = require('../dist/main/targets');
 
-const SIGNED_HEAD = '{"payload":{"channel":"stable","latest_release_cid":"release-a","release_sha256":"3dcb060f99a9b300ace45ae82ac722189a9740a349fa631bbd7eb1fd9e0dcd36","schema":"elastos.release.head/v1","version":"0.7.1"},"signature":"8a248801f576beb6b053fa2f52637b2d3087f2804e44434c4d18abea47007dd24e81781f8c390d414d1b8b34055a06b81f0bd78dc83afa2ce152b59a8fce1101","signer_did":"did:key:z6MkvDqGT54cXesYGvABpF1UapVNwjCqRcafi4Px6Thv5T3Z"}';
-const FIXTURE_DID = 'did:key:z6MkvDqGT54cXesYGvABpF1UapVNwjCqRcafi4Px6Thv5T3Z';
+const { SIGNED_HEAD, FIXTURE_DID } = require('./helpers/signed-release');
 const CID = releaseHeadCid(SIGNED_HEAD);
 
 function verifiedFetch(fetched) {

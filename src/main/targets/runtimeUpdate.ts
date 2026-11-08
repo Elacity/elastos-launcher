@@ -93,6 +93,9 @@ export async function verifiedHeadForRollback(candidate: string, verify: HeadVer
   if (verified.headCid !== candidate) {
     throw new Error('Refusing to store a head CID this launcher did not verify.');
   }
+  if (!versionAtLeast(verified.version, verify.minimumVersion ?? '2.0.0')) {
+    throw new Error('The previous ElastOS release is below the minimum version.');
+  }
   return verified.headCid;
 }
 
@@ -232,8 +235,20 @@ export function runtimeHeadStore(homeDir: string = os.homedir()): HeadCidStore {
       }
     },
     set(cid: string) {
-      fs.mkdirSync(path.dirname(file), { recursive: true });
-      fs.writeFileSync(file, JSON.stringify({ headCid: cid }));
+      fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+      const temporary = `${file}.${randomUUID()}.tmp`;
+      try {
+        const fd = fs.openSync(temporary, 'wx', 0o600);
+        try {
+          fs.writeFileSync(fd, JSON.stringify({ headCid: cid }));
+          fs.fsyncSync(fd);
+        } finally {
+          fs.closeSync(fd);
+        }
+        fs.renameSync(temporary, file);
+      } finally {
+        if (fs.existsSync(temporary)) removeVerifiedTarget(temporary);
+      }
     },
   };
 }
