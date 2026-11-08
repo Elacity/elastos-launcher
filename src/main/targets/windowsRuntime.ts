@@ -796,6 +796,7 @@ const STOP_REPLY_MS = 8000;
 export interface DistroStopSession {
   signal(name: 'TERM' | 'KILL'): void;
   close(): void;
+  dispose(): void;
 }
 
 function helperGone(pid: number): boolean {
@@ -1003,6 +1004,13 @@ export function createDistroStopSession(deps: {
       }
     },
     close() { finish(); },
+    dispose() {
+      try {
+        finish();
+      } catch {
+        // finish() already dropped the helper. Stop still reports its own error.
+      }
+    },
   };
 }
 
@@ -1336,6 +1344,9 @@ export function spawnDistroGatewayProcess(): GatewayProcess {
         if (signal === 'SIGKILL') session.close();
       }
     },
+    dispose() {
+      session.dispose();
+    },
   };
 }
 
@@ -1493,6 +1504,9 @@ export function adoptDistroGatewayProcess(deps: {
       } finally {
         if (name === 'KILL') session?.close();
       }
+    },
+    dispose() {
+      session?.dispose();
     },
   };
 }
