@@ -14,7 +14,7 @@ import {
   LOOPBACK_ADDRESSES,
 } from './gatewayAddress';
 import { runtimeChildEnv } from './releaseHead';
-import { runtimeDataDir, runtimeHostLockPath } from './runtimePaths';
+import { runtimeBinaryPath, runtimeDataDir, runtimeHostLockPath } from './runtimePaths';
 
 export { HEALTH_URL, HOME_URL, LEGACY_GATEWAY_ADDR, LOOPBACK_ADDRESSES };
 
@@ -52,6 +52,9 @@ export const FOREIGN_LISTENER_MESSAGE =
   `Another program is answering at ${GATEWAY_ADDR}, so Home was not opened. Quit that program and click Try again.`;
 export const LEGACY_STILL_RUNNING_MESSAGE =
   'An older ElastOS is still running and could not be stopped. Quit it, then click Start.';
+export const HOME_UNCONFIRMED_MESSAGE =
+  'Home could not be confirmed; stop it with Ctrl+C in its terminal';
+export const OTHER_HOME_MESSAGE = 'another ElastOS Home is running';
 
 /** A gateway this window did not start. Callers match the type, not the sentence. */
 export class ForeignGatewayError extends Error {
@@ -77,6 +80,8 @@ export interface HealthResult {
 
 export interface GatewayProcess {
   readonly pid: number;
+  /** True only for the ChildProcess this launcher created. Stop keeps that handle. */
+  readonly spawnedHere?: boolean;
   onOutput(listener: (chunk: string) => void): void;
   onExit(listener: (code: number | null) => void): void;
   signal(signal: NodeJS.Signals): void;
@@ -95,29 +100,11 @@ export function binaryReplacement(output: string, code: number | null): boolean 
   return /was replaced on disk|changed on disk/i.test(output);
 }
 
-/** The gateway is its own process group. Signal the group, not only the leader. */
-export function signalProcessGroup(
-  pid: number,
-  signal: NodeJS.Signals,
-  kill: (pid: number, signal: NodeJS.Signals) => void = process.kill,
-): void {
-  if (!Number.isInteger(pid) || pid <= 0) return;
-  try {
-    kill(-pid, signal);
-  } catch (err) {
-    const code = err && typeof err === 'object' && 'code' in err
-      ? String((err as { code?: string }).code)
-      : '';
-    if (code === 'ESRCH') return;
-    const message = err instanceof Error ? err.message : String(err);
-    throw new Error(`Could not signal ElastOS (${signal}): ${message}`);
-  }
-}
-
 /**
  * `current` is a gateway on `localhost:8090`, the address this launcher
  * starts. `legacy` is one an earlier launcher started on `127.0.0.1:8090`.
- * A legacy gateway is only stopped and started again. Home never opens on it.
+ * Linux does not signal a legacy gateway. Windows may stop its distro
+ * gateway and start `localhost:8090`. Home never opens on the legacy one.
  */
 export type InstalledGatewayKind = 'current' | 'legacy';
 
@@ -184,6 +171,11 @@ export interface GatewaySupervisorDeps {
    */
   foreignIsLegacy?: () => Promise<boolean>;
   /**
+   * Linux sets this. A bare gateway on 127.0.0.1:8090 is another Home.
+   * Start reports that and does not signal it. Windows leaves this unset.
+   */
+  reportLegacyHome?: () => Promise<boolean>;
+  /**
    * An OK body counts only when this returns true: the started gateway owns
    * every `localhost` address that answered. Without it, OK is enough.
    */
@@ -207,7 +199,7 @@ export interface GatewaySupervisor {
    * Uninstall, after the person confirmed. Quit, Stop, and Restart omit it.
    */
   stop(options?: { adopt?: boolean }): Promise<void>;
-  /** SIGKILL the process group this supervisor is stopping. Used when quit runs out of time. */
+  /** SIGKILL the process this supervisor is stopping. Used when quit runs out of time. */
   forceKill(): void;
   openHome(): void;
   getLogs(lines?: number): string;
@@ -449,6 +441,70 @@ export function linuxControllerSignalPid(proved: ProvedLinuxHome, identityNow: s
   return proved.controllerPid;
 }
 
+/** One fresh read of the controller record, the lock, and `/proc`. */
+export interface ControllerObservation {
+  statusText: string | null;
+  lockText: string | null;
+  bootId: string | null;
+  controllerStat: string | null;
+  exePath: string | null;
+  allowedExes: readonly string[];
+}
+
+/**
+ * The update controller pid, or null. The start time, the exe, and the host
+ * lock generation must all match this read. A host pid is not a target.
+ */
+export function confirmedControllerPid(observed: ControllerObservation): number | null {
+  const status = parseLinuxHomeStatus(observed.statusText);
+  const lock = parseHostLockRecord(observed.lockText);
+  if (!status || !lock) return null;
+  if (lock.role !== 'gateway' || lock.addr !== GATEWAY_ADDR) return null;
+  if (!status.generation || lock.generation !== status.generation) return null;
+  const identity = linuxProcessIdentity(observed.controllerStat, observed.bootId);
+  const parsed = observed.controllerStat ? procStatParent(observed.controllerStat) : null;
+  if (identity !== status.controllerStart || !parsed || parsed.pid !== status.controllerPid) return null;
+  const exe = observed.exePath;
+  if (!exe || exe.endsWith(' (deleted)')) return null;
+  if (!observed.allowedExes.includes(exe)) return null;
+  return status.controllerPid;
+}
+
+/** Read the controller, then signal that pid. A mismatch signals nothing. */
+export function signalRecordedController(
+  signal: NodeJS.Signals,
+  read: () => ControllerObservation,
+  kill: (pid: number, signal: NodeJS.Signals) => void = process.kill,
+): void {
+  const target = confirmedControllerPid(read());
+  if (!target) throw new Error(HOME_UNCONFIRMED_MESSAGE);
+  try {
+    kill(target, signal);
+  } catch (err) {
+    if (signalErrorCode(err) === 'ESRCH') return;
+    const message = err instanceof Error ? err.message : String(err);
+    throw new Error(`Could not signal ElastOS (${signal}): ${message}`);
+  }
+}
+
+/** Every signal re-reads the controller. The pid field is not a signal target. */
+export function controllerGateway(
+  read: () => ControllerObservation,
+  kill?: (pid: number, signal: NodeJS.Signals) => void,
+): GatewayProcess {
+  return {
+    pid: -1,
+    onOutput() {},
+    onExit() {},
+    hasExited() {
+      return confirmedControllerPid(read()) === null;
+    },
+    signal(signal) {
+      signalRecordedController(signal, read, kill);
+    },
+  };
+}
+
 /**
  * `lsof -nP -iTCP:<port> -sTCP:LISTEN -Fpn` output. `n` names look like
  * `127.0.0.1:8090`, `[::1]:8090`, or `*:8090`. A socket of another account is
@@ -674,6 +730,10 @@ export function createGatewaySupervisor(deps: GatewaySupervisorDeps): GatewaySup
         const result = await launchOnce();
         if (result === 'replaced') continue;
         if (result === 'already') {
+          if (deps.reportLegacyHome && await deps.reportLegacyHome()) {
+            current = 'error';
+            throw new Error(OTHER_HOME_MESSAGE);
+          }
           if (!legacyStopped && deps.foreignIsLegacy && await deps.foreignIsLegacy()) {
             // An earlier launcher started it on 127.0.0.1. Passkeys need
             // localhost, so stop it once and start it again here.
@@ -715,7 +775,10 @@ export function createGatewaySupervisor(deps: GatewaySupervisorDeps): GatewaySup
       }
     },
     async stop(options?: { adopt?: boolean }) {
-      if (deps.adoptForControls && isHealthOk(await deps.fetchHealth())) {
+      const currentProc = owned;
+      const keepSpawned = currentProc !== null && currentProc.spawnedHere === true
+        && !(await currentProc.hasExited());
+      if (!keepSpawned && deps.adoptForControls && isHealthOk(await deps.fetchHealth())) {
         const installed = await (deps.adoptInstalled?.() ?? null);
         if (!installed) throw new ForeignGatewayError();
         owned = installed;
@@ -789,8 +852,15 @@ export function spawnGatewayProcess(binary: string, args: readonly string[]): Ga
     hasExited() {
       return exited;
     },
+    spawnedHere: true,
     signal(signal) {
-      signalProcessGroup(child.pid ?? -1, signal);
+      try {
+        child.kill(signal);
+      } catch (err) {
+        if (signalErrorCode(err) === 'ESRCH') return;
+        const message = err instanceof Error ? err.message : String(err);
+        throw new Error(`Could not signal ElastOS (${signal}): ${message}`);
+      }
     },
   };
 }
@@ -1070,7 +1140,7 @@ export function createDefaultGatewaySupervisor(binary: string, platform: string 
     openUrl: openRuntimeHome,
     log: (line) => logSink(line),
     confirmForeign: confirmInstalledGateway,
-    foreignIsLegacy: async () => (await installedGatewayOnThisComputer()) === 'legacy',
+    reportLegacyHome: async () => (await installedGatewayOnThisComputer()) === 'legacy',
     listenerOwned: (pid, health) => platform === 'darwin'
       ? confirmInstalledGateway()
       : platform === 'linux'
@@ -1151,56 +1221,80 @@ export function localPidHasExited(
 }
 
 /**
- * The installed gateway from the host lock, so Stop can signal a process this
- * window did not spawn. A `127.0.0.1:8090` gateway from an earlier launcher is
- * adopted too, so Start, Reset, and Uninstall can stop it.
+ * Stop can signal one process this window did not spawn: the update controller
+ * named by status.json. A `127.0.0.1:8090` gateway is not that process.
  */
 function signalErrorCode(err: unknown): string {
   return err && typeof err === 'object' && 'code' in err ? String((err as { code?: string }).code) : '';
 }
 
-/** Linux Home. Signal the proved controller, or the legacy gateway's own pid. */
+function resolvedFile(file: string): string | null {
+  try {
+    const real = fs.realpathSync(file);
+    return real ? real : null;
+  } catch {
+    return null;
+  }
+}
+
+function controllerExeFromProc(pid: number): string | null {
+  let link: string;
+  try {
+    link = fs.readlinkSync(`/proc/${pid}/exe`);
+  } catch {
+    return null;
+  }
+  if (!link || link.endsWith(' (deleted)')) return null;
+  return resolvedFile(link);
+}
+
+/** The installed binary, and the controller copy Runtime stores under the data dir. */
+function allowedControllerExes(dataDir: string): string[] {
+  const files = [
+    runtimeBinaryPath(os.homedir()),
+    `${dataDir}/update-controller/runtime`,
+  ];
+  const allowed: string[] = [];
+  for (const file of files) {
+    const real = resolvedFile(file);
+    if (real && !allowed.includes(real)) allowed.push(real);
+  }
+  return allowed;
+}
+
+function observeRecordedController(): ControllerObservation {
+  const data = runtimeDataDir('linux', os.homedir(), process.env);
+  const statusText = readRegularText(`${data}/update-controller/status.json`, HOME_RECORD_MAX);
+  const lockText = readRegularText(runtimeHostLockPath(data), HOME_RECORD_MAX);
+  const boot = readProcOptional('/proc/sys/kernel/random/boot_id', 128);
+  const status = parseLinuxHomeStatus(statusText);
+  const pid = status ? status.controllerPid : 0;
+  const stat = pid > 0 ? readProcOptional(`/proc/${pid}/stat`, PROC_STAT_MAX) : null;
+  return {
+    statusText,
+    lockText,
+    bootId: boot ?? null,
+    controllerStat: stat ?? null,
+    exePath: pid > 0 ? controllerExeFromProc(pid) : null,
+    allowedExes: allowedControllerExes(data),
+  };
+}
+
+/** `controller` may be signaled. `other-home` is a legacy gateway and is never signaled. */
+export function linuxControllerAdopt(lockText: string | null): 'controller' | 'other-home' | 'none' {
+  const lock = parseHostLockRecord(lockText);
+  if (!lock || lock.role !== 'gateway') return 'none';
+  if (lock.addr === LEGACY_GATEWAY_ADDR) return 'other-home';
+  if (lock.addr !== GATEWAY_ADDR) return 'none';
+  return 'controller';
+}
+
+/** Linux Home. Signal only the recorded update controller. A legacy gateway is not adopted. */
 async function adoptLinuxGatewayProcess(): Promise<GatewayProcess | null> {
   const data = runtimeDataDir('linux', os.homedir(), process.env);
   const lockText = readRegularText(runtimeHostLockPath(data), HOME_RECORD_MAX);
-  const lock = parseHostLockRecord(lockText);
-  if (!lock) return null;
-  if (lock.addr === LEGACY_GATEWAY_ADDR) {
-    if (!(await hostLockGatewayKind(lockText, lock.pid))) return null;
-    const pid = lock.pid;
-    return {
-      pid,
-      onOutput() {},
-      onExit() {},
-      hasExited() { return localPidHasExited(pid); },
-      signal(signal) { signalProcessGroup(pid, signal); },
-    };
-  }
-  if (lock.addr !== GATEWAY_ADDR || lock.role !== 'gateway') return null;
-  const proved = readProvedLinuxHome();
-  if (!proved) return null;
-  return {
-    pid: proved.hostPid,
-    onOutput() {},
-    onExit() {},
-    hasExited() {
-      return localPidHasExited(proved.hostPid) && localPidHasExited(proved.controllerPid);
-    },
-    signal(signal) {
-      const bootId = readProcOptional('/proc/sys/kernel/random/boot_id', 128);
-      const stat = readProcOptional(`/proc/${proved.controllerPid}/stat`, PROC_STAT_MAX);
-      if (bootId === null || !stat) return;
-      const target = linuxControllerSignalPid(proved, linuxProcessIdentity(stat, bootId ?? null));
-      if (!target) return;
-      try {
-        process.kill(target, signal);
-      } catch (err) {
-        if (signalErrorCode(err) === 'ESRCH') return;
-        const message = err instanceof Error ? err.message : String(err);
-        throw new Error(`Could not signal ElastOS (${signal}): ${message}`);
-      }
-    },
-  };
+  if (linuxControllerAdopt(lockText) !== 'controller') return null;
+  return controllerGateway(observeRecordedController);
 }
 
 export async function adoptInstalledGatewayProcess(): Promise<GatewayProcess | null> {
@@ -1238,7 +1332,6 @@ export async function adoptInstalledGatewayProcess(): Promise<GatewayProcess | n
       // A terminal-launched Home need not be a group leader. Signal only its
       // verified controller or host pid. The controller drains its own children.
       if (process.platform === 'darwin') process.kill(stopPid, signal);
-      else signalProcessGroup(pid, signal);
     },
   };
 }

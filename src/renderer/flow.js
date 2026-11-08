@@ -28,6 +28,9 @@ function stepStates(message) {
 function primaryAction(state) {
   const status = state.status;
   if (state.busy) return { id: 'busy', label: 'Working…', enabled: false };
+  if (status === 'other-home') {
+    return { id: 'busy', label: 'another ElastOS Home is running', enabled: false };
+  }
   if (status === 'running') {
     return {
       id: 'open',

@@ -69,7 +69,8 @@ const statusLabels = {
   starting: 'Starting...',
   stopping: 'Stopping...',
   error: 'Needs attention',
-  'not-installed': 'Not installed'
+  'not-installed': 'Not installed',
+  'other-home': 'another ElastOS Home is running'
 };
 
 async function showError(message) {
@@ -176,7 +177,8 @@ function updateStatus(status) {
   openBtn.dataset.action = action.id;
 
   powerBtn.className = 'power-button' + (status === 'running' ? ' running' : '');
-  powerBtn.disabled = busy || status === 'starting' || status === 'stopping' || status === 'not-installed';
+  powerBtn.classList.toggle('hidden', status === 'other-home');
+  powerBtn.disabled = busy || status === 'starting' || status === 'stopping' || status === 'not-installed' || status === 'other-home';
 
   const isInstalled = status !== 'not-installed';
   uninstallBtn.disabled = !isInstalled || status === 'running' || busy;

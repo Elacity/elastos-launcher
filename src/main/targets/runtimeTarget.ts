@@ -5,6 +5,7 @@ import { RUNTIME_TARGET } from './descriptors';
 import {
   createDefaultGatewaySupervisor,
   confirmInstalledGateway,
+  installedGatewayOnThisComputer,
   ForeignGatewayError,
   GatewaySupervisor,
   homeLaunchForPlatform,
@@ -81,6 +82,9 @@ export function createRuntimeTarget(platform: NodeJS.Platform = process.platform
     isInstalled: () => runtimeIsInstalled(),
     getStatus: async () => {
       if (updating) return 'starting';
+      if (platform === 'linux' && (await installedGatewayOnThisComputer()) === 'legacy') {
+        return 'other-home';
+      }
       const observedSupervisor = supervisor;
       const observedPhase = supervisor?.phase();
       if (supervisor) {

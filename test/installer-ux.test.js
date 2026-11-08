@@ -124,6 +124,9 @@ test('sign-in launch writes a desktop file and can remove it', () => {
 test('the install button is the primary action until the computer is healthy', () => {
   assert.equal(flow.primaryAction({ targetId: 'runtime', status: 'not-installed', busy: false }).label, 'Install');
   assert.equal(flow.primaryAction({ targetId: 'runtime', status: 'running', busy: false }).label, 'Open my computer');
+  const otherHome = flow.primaryAction({ targetId: 'runtime', status: 'other-home', busy: false });
+  assert.equal(otherHome.enabled, false);
+  assert.equal(otherHome.label, 'another ElastOS Home is running');
   assert.equal(flow.primaryAction({ targetId: 'runtime', status: 'error', busy: false }).id, 'retry');
   assert.match(flow.firstRunCopy('runtime', 'not-installed'), /One button/);
   assert.equal(flow.firstRunCopy('runtime', 'running'), '');

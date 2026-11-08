@@ -115,7 +115,8 @@ function updateTrayMenu(): void {
     'starting': '🟡 Starting...',
     'stopping': '🟡 Stopping...',
     'error': '🔴 Error',
-    'not-installed': '⚪ Not Installed'
+    'not-installed': '⚪ Not Installed',
+    'other-home': 'another ElastOS Home is running',
   };
 
   const contextMenu = Menu.buildFromTemplate([
@@ -128,6 +129,7 @@ function updateTrayMenu(): void {
     },
     {
       label: 'Stop',
+      visible: currentStatus !== 'other-home',
       enabled: currentStatus === 'running',
       click: () => { void launch.stop(); }
     },

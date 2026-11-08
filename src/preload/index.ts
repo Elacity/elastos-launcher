@@ -1,6 +1,6 @@
 import { contextBridge, ipcRenderer } from 'electron';
 
-export type RuntimeStatus = 'running' | 'stopped' | 'starting' | 'stopping' | 'error' | 'not-installed';
+export type RuntimeStatus = 'running' | 'stopped' | 'starting' | 'stopping' | 'error' | 'not-installed' | 'other-home';
 
 contextBridge.exposeInMainWorld('elastos', {
   platform: process.platform,

@@ -1,21 +1,26 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
 
-const { spawn } = require('node:child_process');
 const {
   HOME_URL,
   binaryReplacement,
   createGatewaySupervisor,
+  controllerGateway,
+  confirmedControllerPid,
+  signalRecordedController,
   isHealthOk,
   scrubRuntimeLog,
   launcherLogText,
   homeLaunchForPlatform,
-  signalProcessGroup,
+  spawnGatewayProcess,
   ForeignGatewayError,
   foreignListenerIsElastos,
   installedGatewayKind,
   FOREIGN_LISTENER_MESSAGE,
   LEGACY_STILL_RUNNING_MESSAGE,
+  HOME_UNCONFIRMED_MESSAGE,
+  OTHER_HOME_MESSAGE,
+  linuxControllerAdopt,
   combineHealth,
   listenerOwnership,
   localhostIsLoopback,
@@ -475,7 +480,7 @@ test('an OK that the started gateway does not own never opens Home', async () =>
   assert.equal(await ready.start(), 'started');
 });
 
-test('upgrade: a gateway an earlier launcher started on 127.0.0.1 is stopped and started on localhost', async () => {
+test('a gateway on 127.0.0.1:8090 is another Home and receives no signal', async () => {
   const legacyLock = JSON.stringify({ pid: 7, role: 'gateway', addr: '127.0.0.1:8090' });
   const legacyFacts = {
     lockText: legacyLock,
@@ -484,56 +489,46 @@ test('upgrade: a gateway an earlier launcher started on 127.0.0.1 is stopped and
     ownsSocket: (_pid, wants) => wants.length === 1 && wants[0] === '127.0.0.1',
   };
   assert.equal(installedGatewayKind(legacyFacts), 'legacy');
-  // Home never opens on the legacy gateway.
   assert.equal(foreignListenerIsElastos(legacyFacts), false);
   assert.equal(installedGatewayKind({ ...legacyFacts, lockText: JSON.stringify({ pid: 7, addr: '0.0.0.0:8090' }) }), null);
   assert.equal(installedGatewayKind({ ...legacyFacts, ownsSocket: () => false }), null);
 
   const spawned = [];
   const opened = [];
-  const logs = [];
-  let legacyRunning = true;
-  const legacySignals = [];
-  const legacy = {
-    pid: 7,
-    onOutput() {},
-    onExit() {},
-    hasExited: () => !legacyRunning,
-    signal(sig) { legacySignals.push(sig); legacyRunning = false; },
-  };
-  let mine = null;
+  const signals = [];
   const sup = createGatewaySupervisor({
     binary: '/bin/elastos',
-    spawn(binary, args) {
+    spawn(_binary, args) {
       spawned.push([...args]);
-      const proc = fakeProcess(50 + spawned.length);
-      if (legacyRunning) {
-        queueMicrotask(() => {
-          proc.emit('another ElastOS host already owns this data directory\n');
-          proc.exit(1);
-        });
-      } else {
-        mine = proc;
-      }
+      const proc = fakeProcess(50);
+      queueMicrotask(() => {
+        proc.emit('another ElastOS host already owns this data directory\n');
+        proc.exit(1);
+      });
       return proc;
     },
-    fetchHealth: async () => (legacyRunning || mine ? { status: 200, body: 'OK', addresses: ['127.0.0.1'] } : null),
+    fetchHealth: async () => ({ status: 200, body: 'OK', addresses: ['127.0.0.1'] }),
     sleep: async () => {},
     now: () => 0,
     openUrl: (url) => opened.push(url),
-    log: (line) => logs.push(line),
+    log: () => {},
     confirmForeign: async () => foreignListenerIsElastos(legacyFacts),
-    foreignIsLegacy: async () => installedGatewayKind(legacyFacts) === 'legacy',
-    adoptInstalled: () => legacy,
-    listenerOwned: (pid) => Boolean(mine && pid === mine.pid),
+    reportLegacyHome: async () => installedGatewayKind(legacyFacts) === 'legacy',
+    adoptInstalled: () => {
+      signals.push('adopt');
+      return {
+        pid: 7,
+        onOutput() {},
+        onExit() {},
+        hasExited: () => false,
+        signal(sig) { signals.push(sig); },
+      };
+    },
   });
-  assert.equal(await sup.start(), 'started');
-  assert.deepEqual(legacySignals, ['SIGTERM']);
-  assert.deepEqual(spawned, [['gateway', '--addr', 'localhost:8090'], ['gateway', '--addr', 'localhost:8090']]);
+  await assert.rejects(() => sup.start(), (err) => err.message === OTHER_HOME_MESSAGE);
+  assert.deepEqual(signals, []);
   assert.deepEqual(opened, []);
-  assert.ok(logs.some((line) => /older ElastOS is running on 127\.0\.0\.1:8090/.test(line)));
-  sup.openHome();
-  assert.deepEqual(opened, ['http://localhost:8090/home/']);
+  assert.deepEqual(spawned, [['gateway', '--addr', 'localhost:8090']]);
 });
 
 test('upgrade: a legacy gateway that cannot be adopted is not opened and says so', async () => {
@@ -717,37 +712,19 @@ test('one failed health poll while the process is alive is not a stop', async ()
   assert.deepEqual(world.signals, ['SIGTERM', 'SIGKILL']);
 });
 
-test('signalProcessGroup uses the negative pid and surfaces a failed kill', () => {
-  const seen = [];
-  signalProcessGroup(42, 'SIGTERM', (pid, signal) => { seen.push([pid, signal]); });
-  assert.deepEqual(seen, [[-42, 'SIGTERM']]);
-  signalProcessGroup(0, 'SIGTERM', () => { throw new Error('pid 0 must not be signaled'); });
-  signalProcessGroup(-5, 'SIGTERM', () => { throw new Error('a negative pid must not be signaled'); });
-  signalProcessGroup(42, 'SIGTERM', () => {
-    const err = new Error('gone');
-    err.code = 'ESRCH';
-    throw err;
-  });
-  assert.throws(
-    () => signalProcessGroup(42, 'SIGKILL', () => {
-      const err = new Error('operation not permitted');
-      err.code = 'EPERM';
-      throw err;
-    }),
-    /Could not signal ElastOS \(SIGKILL\): operation not permitted/,
-  );
-});
-
-test('signalProcessGroup kills the leader and a child in that group', async () => {
-  const child = spawn('bash', ['-c', 'sleep 30 & echo $!; wait'], {
-    detached: true,
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
+test('a process this launcher spawned is signaled through its own handle', async () => {
+  const proc = spawnGatewayProcess(process.execPath, ['-e', `
+    const { spawn } = require('child_process');
+    const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+    process.stdout.write(String(child.pid));
+    setInterval(() => {}, 1000);
+  `]);
+  let grandchild = 0;
   try {
-    const grandchild = await new Promise((resolve, reject) => {
+    grandchild = await new Promise((resolve, reject) => {
       const timer = setTimeout(() => reject(new Error('grandchild pid was not printed')), 3000);
       let buf = '';
-      child.stdout.on('data', (chunk) => {
+      proc.onOutput((chunk) => {
         buf += chunk.toString();
         const line = buf.trim();
         if (/^\d+$/.test(line)) {
@@ -756,31 +733,133 @@ test('signalProcessGroup kills the leader and a child in that group', async () =
         }
       });
     });
-    signalProcessGroup(child.pid, 'SIGTERM');
-    await new Promise((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error('leader did not exit')), 3000);
-      child.once('exit', () => {
+    proc.signal('SIGTERM');
+    const leaderGone = await new Promise((resolve) => {
+      const timer = setTimeout(() => resolve(false), 3000);
+      proc.onExit(() => {
         clearTimeout(timer);
-        resolve();
+        resolve(true);
       });
     });
-    // The orphaned child is reaped by init, which can take longer than a
-    // fixed wait on a busy machine. Poll instead of sleeping once.
-    const gone = () => {
-      try {
-        process.kill(grandchild, 0);
-        return false;
-      } catch {
-        return true;
-      }
-    };
-    for (let waited = 0; waited < 5000 && !gone(); waited += 50) {
-      await new Promise((resolve) => setTimeout(resolve, 50));
-    }
-    assert.throws(() => process.kill(grandchild, 0));
+    assert.equal(leaderGone, true);
+    process.kill(grandchild, 0);
   } finally {
-    try { process.kill(-(child.pid), 'SIGKILL'); } catch { /* already gone */ }
+    try { if (grandchild) process.kill(grandchild, 'SIGKILL'); } catch { /* already gone */ }
+    try { proc.signal('SIGKILL'); } catch { /* already gone */ }
   }
+});
+
+function controllerView(overrides = {}) {
+  return {
+    statusText: JSON.stringify({
+      phase: 'ready',
+      controller_pid: 10,
+      controller_start: 'linux:boot-1:100',
+      host_pid: 20,
+      generation: 'abc',
+    }),
+    lockText: JSON.stringify({
+      pid: 20, role: 'gateway', addr: 'localhost:8090', generation: 'abc',
+    }),
+    bootId: 'boot-1',
+    controllerStat: procStat(10, 1, 100),
+    exePath: '/home/user/.local/share/elastos/update-controller/runtime',
+    allowedExes: [
+      '/home/user/.local/bin/elastos',
+      '/home/user/.local/share/elastos/update-controller/runtime',
+    ],
+    ...overrides,
+  };
+}
+
+function refusedSignal(observed) {
+  const kills = [];
+  assert.equal(confirmedControllerPid(observed), null);
+  assert.throws(
+    () => signalRecordedController('SIGTERM', () => observed, (pid, signal) => kills.push([pid, signal])),
+    { message: HOME_UNCONFIRMED_MESSAGE },
+  );
+  assert.deepEqual(kills, []);
+}
+
+test('a controller pid reused before the first read is not signaled', () => {
+  refusedSignal(controllerView({ controllerStat: procStat(10, 1, 999) }));
+  refusedSignal(controllerView({ statusText: null }));
+  refusedSignal(controllerView({ statusText: 'x'.repeat((16 * 1024) + 1) }));
+  refusedSignal(controllerView({
+    lockText: JSON.stringify({ pid: 20, role: 'gateway', addr: 'localhost:8090', generation: 'stale' }),
+  }));
+  refusedSignal(controllerView({ exePath: '/usr/bin/other' }));
+  refusedSignal(controllerView({ exePath: '/home/user/.local/bin/elastos (deleted)' }));
+  const installed = controllerView({ exePath: '/home/user/.local/bin/elastos' });
+  assert.equal(confirmedControllerPid(installed), 10);
+});
+
+test('a controller pid reused between the check and the signal is not signaled', () => {
+  let observed = controllerView();
+  assert.equal(confirmedControllerPid(observed), 10);
+  observed = controllerView({ controllerStat: procStat(10, 1, 999) });
+  const kills = [];
+  assert.throws(
+    () => signalRecordedController('SIGKILL', () => observed, (pid, signal) => kills.push([pid, signal])),
+    { message: HOME_UNCONFIRMED_MESSAGE },
+  );
+  assert.deepEqual(kills, []);
+  const host = [];
+  signalRecordedController('SIGTERM', () => controllerView(), (pid, signal) => host.push([pid, signal]));
+  assert.deepEqual(host, [[10, 'SIGTERM']]);
+  assert.equal(host.some((row) => row[0] === 20 || row[0] < 0), false);
+});
+
+test('Quit and stop after a retained Home signals only the confirmed controller', async () => {
+  let observed = controllerView();
+  const kills = [];
+  const adopted = controllerGateway(() => observed, (pid, signal) => {
+    kills.push([pid, signal]);
+    if (signal === 'SIGTERM') observed = controllerView({ controllerStat: null });
+  });
+  let health = { status: 200, body: 'OK' };
+  let clock = 0;
+  const sup = createGatewaySupervisor({
+    binary: '/home/tester/.local/bin/elastos',
+    args: ['home', '--browser'],
+    adoptForControls: true,
+    spawn() { throw new Error('a retained Home is not spawned again'); },
+    fetchHealth: async () => {
+      if (kills.length > 0) health = null;
+      return health;
+    },
+    adoptInstalled: async () => adopted,
+    now: () => clock,
+    sleep: async () => { clock += 1000; },
+    openUrl() {},
+    log() {},
+    graceMs: 3000,
+    pollMs: 1000,
+  });
+  await sup.stop();
+  assert.deepEqual(kills, [[10, 'SIGTERM']]);
+  assert.equal(sup.phase(), 'stopped');
+  sup.forceKill();
+  assert.deepEqual(kills, [[10, 'SIGTERM']]);
+
+  observed = controllerView();
+  const later = [];
+  const again = controllerGateway(() => observed, (pid, signal) => later.push([pid, signal]));
+  again.signal('SIGTERM');
+  observed = controllerView({ controllerStat: procStat(10, 1, 999) });
+  assert.throws(() => again.signal('SIGKILL'), { message: HOME_UNCONFIRMED_MESSAGE });
+  assert.deepEqual(later, [[10, 'SIGTERM']]);
+});
+
+test('a legacy 127.0.0.1 gateway is not a controller the launcher can signal', () => {
+  const legacy = JSON.stringify({ pid: 7, role: 'gateway', addr: '127.0.0.1:8090', generation: 'abc' });
+  assert.equal(linuxControllerAdopt(legacy), 'other-home');
+  assert.equal(linuxControllerAdopt(JSON.stringify({
+    pid: 7, role: 'gateway', addr: 'localhost:8090', generation: 'abc',
+  })), 'controller');
+  assert.equal(linuxControllerAdopt(null), 'none');
+  refusedSignal(controllerView({ lockText: legacy }));
 });
 
 test('stop does not kill a gateway this launcher did not start', async () => {
