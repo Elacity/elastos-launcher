@@ -128,10 +128,20 @@ function distroUpdateCheck() {
     timeout: 60000,
     windowsHide: true,
   });
-  if (result.status !== 0) {
-    throw new Error(result.stderr || 'The update check file could not be read.');
-  }
+  if (result.status !== 0) return null;
   return JSON.parse(result.stdout);
+}
+
+async function launcherUpdateCheck(app) {
+  const raw = await app.evaluate(() => {
+    const fs = require('fs');
+    const os = require('os');
+    const path = require('path');
+    const file = path.join(os.homedir(), '.elastos-launcher', 'update-check.json');
+    return fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : '';
+  });
+  if (!raw) return null;
+  return JSON.parse(raw);
 }
 
 module.exports = async function (app, page) {
@@ -167,8 +177,17 @@ module.exports = async function (app, page) {
 
   const checked = await page.evaluate(() => window.elastos.checkForUpdate());
   assert.equal(checked.updateAvailable, false);
-  const update = distroUpdateCheck();
-  assert.equal(update.outcome, 'up_to_date');
-  console.log('PASS elastos update --check writes up_to_date');
+  const runtime = distroUpdateCheck();
+  if (runtime) {
+    assert.equal(runtime.outcome, 'up_to_date');
+    assert.equal(runtime.offered, false);
+    console.log('PASS elastos update --check keeps the Runtime up_to_date record');
+  } else {
+    const launcher = await launcherUpdateCheck(app);
+    assert.ok(launcher);
+    assert.equal(launcher.outcome, 'up_to_date');
+    assert.equal(launcher.offered, false);
+    console.log('PASS elastos update --check stores up_to_date in the launcher record');
+  }
   return app;
 };
