@@ -24,4 +24,4 @@ A wrong signature or channel, version below the floor, changed metadata snapshot
 npm test
 ```
 
-Tests must use an isolated HOME and a PATH that cannot select a host ElastOS installation. Temporary filesystem fixtures use physical paths so the symlink guard runs on Mac too.
+The npm test runner creates an isolated HOME, clears inherited XDG paths, and removes PATH entries that contain an ElastOS program. The missing-runtime test also mocks binary discovery. These guards prevent unit tests from starting a host ElastOS installation. Temporary filesystem fixtures use physical paths so the symlink guard runs on Mac too.

@@ -287,7 +287,7 @@ function isAbort(err: unknown): boolean {
 export async function installerFetch(input: string | URL | Request, init?: RequestInit): Promise<Response> {
   const metadataPath = process.env.ELASTOS_LAUNCHER_METADATA_PATH;
   if (metadataPath) {
-    if (fs.statSync(metadataPath).size > 1024 * 1024) throw new Error('Installer metadata exceeds its limit.');
+    if (fs.statSync(metadataPath).size > 2 * 1024 * 1024) throw new Error('Installer metadata exceeds its limit.');
     const bytes = fs.readFileSync(metadataPath);
     if (createHash('sha256').update(bytes).digest('hex') !== process.env.ELASTOS_LAUNCHER_METADATA_SHA256) {
       throw new Error('Installer metadata changed after verification.');
