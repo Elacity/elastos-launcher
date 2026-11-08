@@ -216,7 +216,7 @@ export function createLaunchController(options: LaunchControllerOptions = {}): L
     const probed = await probeGatewayHealth({ timeoutMs: 800 });
     const health = isHealthOk(probed) ? 'OK' : 'not answering';
     return buildDiagnostics({
-      launcherVersion: '1.4.0',
+      launcherVersion: require('../../package.json').version,
       runtimeVersion,
       target: active.id,
       channel,

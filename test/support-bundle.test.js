@@ -10,6 +10,27 @@ const {
   supportBundlePath,
 } = require('../dist/main/targets/preflight');
 
+test('controller diagnostics and saved support bundle use the launcher package version', async (t) => {
+  const preflight = require('../dist/main/targets/preflight');
+  const gateway = require('../dist/main/targets/runtimeGateway');
+  const { createLaunchController } = require('../dist/main/launchController');
+  const { version } = require('../package.json');
+  t.mock.method(preflight, 'collectPreflight', async () => ({ ok: true, checks: [] }));
+  t.mock.method(gateway, 'probeGatewayHealth', async () => null);
+  let saved = '';
+  t.mock.method(preflight, 'saveCollectedSupportBundle', async (text) => {
+    saved = text;
+    return '/fixture/ElastOS-support.txt';
+  });
+  const controller = createLaunchController({ env: {} });
+  controller.target.getStatus = async () => 'stopped';
+  controller.target.getVersion = () => '2.0.0';
+  const diagnostics = await controller.getDiagnostics();
+  assert.ok(diagnostics.split('\n').includes(`launcher: ${version}`), diagnostics);
+  assert.equal(await controller.saveSupportBundle(), '/fixture/ElastOS-support.txt');
+  assert.ok(saved.split('\n').includes(`launcher: ${version}`), saved);
+});
+
 test('the support bundle has versions, health, and platform, and no secrets', () => {
   const text = buildDiagnostics({
     launcherVersion: '1.4.0',

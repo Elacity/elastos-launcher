@@ -34,6 +34,13 @@ jobs:
           NOTARIZE_MAC: 'false'
       - name: Reproduce drag-covered controls on a66ca52
         run: node scripts/mac-dialog-e2e.js "$RUNNER_TEMP/launcher-baseline/dist-electron/mac-arm64/ElastOS.app" --expect-drag
+      - name: Package the candidate
+        run: npm run build:mac -- --arm64 --publish never -c.mac.identity=- -c.mac.hardenedRuntime=false -c.forceCodeSigning=false
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+          NOTARIZE_MAC: 'false'
+      - name: Require clickable packaged dialogs and main controls
+        run: node scripts/mac-dialog-e2e.js dist-electron/mac-arm64/ElastOS.app
 
   smoke:
     name: smoke (${{ matrix.platform }})

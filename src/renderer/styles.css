@@ -30,7 +30,7 @@ body {
   justify-content: center;
   padding: 28px 16px 40px;
   color: var(--text-normal);
-  -webkit-app-region: drag;
+  -webkit-app-region: no-drag;
   user-select: none;
 }
 
@@ -385,6 +385,7 @@ body {
 
 /* Logs Panel */
 .logs-panel {
+  -webkit-app-region: no-drag;
   position: absolute;
   top: 16px;
   left: 16px;
@@ -482,6 +483,7 @@ body {
 
 /* QR Modal */
 .qr-modal {
+  -webkit-app-region: no-drag;
   position: absolute;
   top: 0;
   left: 0;
@@ -528,6 +530,7 @@ body {
 
 /* Confirm Modal */
 .confirm-modal {
+  -webkit-app-region: no-drag;
   position: fixed;
   top: 0;
   left: 0;

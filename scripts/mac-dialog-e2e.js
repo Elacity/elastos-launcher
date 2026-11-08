@@ -32,7 +32,7 @@ async function main() {
   try {
     const page = await app.firstWindow();
     await page.waitForLoadState('domcontentloaded');
-    await app.evaluate(({ ipcMain, BrowserWindow, app }) => {
+    const geometry = await app.evaluate(({ ipcMain, BrowserWindow, app }) => {
       global.__dialogCalls = [];
       const info = { id: 'runtime', status: 'stopped', openUrl: 'http://localhost:8090/home/',
         preflight: { ok: true, checks: [] }, openAtLogin: false, canRollback: true };
@@ -70,14 +70,19 @@ async function main() {
       // use the measured zoom, and Logs calibrates the OS click translation.
       const bounds = window.getContentBounds();
       window.webContents.setZoomFactor(Math.min(1, bounds.height / 860));
-      console.log(`Dialog viewport: native=${JSON.stringify(bounds)} zoom=${window.webContents.getZoomFactor()}`);
       window.show(); window.focus(); app.focus({ steal: true });
+      return { bounds, zoom: window.webContents.getZoomFactor() };
     });
+    console.log(`Dialog viewport: ${JSON.stringify(geometry)}`);
     await page.reload();
     await page.locator('#remove-pc2-btn').waitFor({ state: 'visible' });
     await page.waitForTimeout(2100);
     assert.equal(await page.locator('#status-text').textContent(), 'Stopped', 'fixture survives the production status poll');
     assert.equal(await page.locator('#uninstall-btn').isEnabled(), true);
+    const dragElements = await page.evaluate(() => [...document.querySelectorAll('*')]
+      .filter((el) => getComputedStyle(el).webkitAppRegion === 'drag')
+      .map((el) => el.tagName === 'BODY' ? 'body' : el.className));
+    assert.deepEqual(dragElements, expectDrag ? ['body', 'title-bar'] : ['title-bar']);
 
     async function check(label, selector) {
       const controls = page.locator(selector);
@@ -189,7 +194,10 @@ async function main() {
     await page.locator('#fix-btn').waitFor({ state: 'visible' });
     await check('errors', '#error-box button');
     console.log(`Dialog regression: ${failures.length} drag-covered controls; ${nativeFailures} native click failures`);
-    if (expectDrag) assert.ok(failures.some((name) => name.startsWith('Remove PC2')), 'pinned baseline must reproduce Remove PC2 drag coverage');
+    if (expectDrag) {
+      assert.ok(failures.some((name) => name.startsWith('Remove PC2')), 'pinned baseline must reproduce Remove PC2 drag coverage');
+      if (permission.status === 0) assert.ok(nativeFailures > 0, 'native clicks must reproduce the pinned regression');
+    }
     else assert.deepEqual(failures, [], 'every interactive center must be outside native drag regions');
   } finally {
     try { await app.evaluate(({ app }) => app.exit(0)); } catch {}
