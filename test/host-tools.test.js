@@ -176,7 +176,7 @@ test('a hidden or stub python is provisioned and a working one is reused', async
   assert.equal(downloads, 1);
   const python = spawnSync('python3', ['-c', ''], { env: prepared.env, encoding: 'utf8' });
   assert.equal(python.status, 0);
-  const which = spawnSync('bash', ['-lc', 'command -v python3'], { env: prepared.env, encoding: 'utf8' });
+  const which = spawnSync('/bin/bash', ['-c', 'command -v python3'], { env: prepared.env, encoding: 'utf8' });
   assert.match(which.stdout, /\/python\/bin\/python3\n$/);
   const sum = spawnSync('sha256sum', [path.join(dir, 'src', 'python', 'lib', 'd'.repeat(90), 'mod.py')], {
     env: prepared.env,
@@ -374,4 +374,25 @@ test('the installer path never asks for Xcode Command Line Tools', () => {
   walk(root);
   const hit = files.filter((file) => fs.readFileSync(file, 'utf8').includes('xcode-select'));
   assert.deepEqual(hit, []);
+});
+
+test('the installer curl shim uses verified metadata even if the publisher moves', async (t) => {
+  const { installerFetch } = require('../dist/main/targets/hostToolEntry');
+  const dir = tempDir();
+  const file = path.join(dir, 'release-metadata.json');
+  const url = 'https://publisher.example/release-head.json';
+  const bytes = JSON.stringify({ [url]: 'verified head bytes' });
+  fs.writeFileSync(file, bytes);
+  const names = ['ELASTOS_LAUNCHER_METADATA_PATH', 'ELASTOS_LAUNCHER_METADATA_SHA256'];
+  const saved = names.map((name) => process.env[name]);
+  process.env[names[0]] = file;
+  process.env[names[1]] = crypto.createHash('sha256').update(bytes).digest('hex');
+  t.after(() => {
+    names.forEach((name, i) => { if (saved[i] === undefined) delete process.env[name]; else process.env[name] = saved[i]; });
+    fs.rmSync(dir, { recursive: true });
+  });
+  t.mock.method(global, 'fetch', async () => { throw new Error('publisher now serves an older head'); });
+  assert.equal(await (await installerFetch(url)).text(), 'verified head bytes');
+  fs.writeFileSync(file, JSON.stringify({ [url]: 'older head' }));
+  await assert.rejects(() => installerFetch(url), /changed after verification/);
 });

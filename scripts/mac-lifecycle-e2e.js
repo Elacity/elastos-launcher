@@ -1,0 +1,100 @@
+const assert = require('node:assert/strict');
+const { spawn } = require('node:child_process');
+const fs = require('node:fs');
+const path = require('node:path');
+const { _electron: electron } = require('playwright');
+const { isHealthOk, probeGatewayHealth } = require('../dist/main/targets/runtimeGateway');
+const { runtimeChildEnv } = require('../dist/main/targets/releaseHead');
+
+async function health(wanted) {
+  const deadline = Date.now() + 180000;
+  while (Date.now() < deadline) {
+    if (isHealthOk(await probeGatewayHealth()) === wanted) return;
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+  throw new Error(`Home health did not become ${wanted}`);
+}
+
+async function status(page, wanted) {
+  await page.waitForFunction(async (next) => await window.elastos.getStatus() === next, wanted, { timeout: 180000 });
+  await page.waitForFunction((next) => document.querySelector('#status-text').textContent.toLowerCase() === next, wanted, { timeout: 10000 });
+}
+
+module.exports = async function (app, page, home, options) {
+  await app.evaluate(({ shell }) => {
+    global.__openedHome = [];
+    shell.openExternal = async (url) => { global.__openedHome.push(url); };
+  });
+  await page.click('#open-btn');
+  assert.deepEqual(await app.evaluate(() => global.__openedHome), ['http://localhost:8090/home/']);
+  const response = await fetch('http://localhost:8090/home/');
+  assert.equal(response.status, 200);
+  console.log('PASS Open Home invokes the browser with localhost:8090/home/ and Home returns HTTP 200');
+
+  await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].close());
+  await new Promise((resolve) => setTimeout(resolve, 2500));
+  assert.equal(await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].isVisible()), false);
+  await health(true);
+  console.log('PASS closing the window keeps Home running');
+  await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].show());
+
+  await page.click('#power-btn');
+  await status(page, 'stopped');
+  await health(false);
+  console.log('PASS Stop Home closes the listener');
+  await page.click('#open-btn');
+  await status(page, 'running');
+  await health(true);
+  console.log('PASS Start Home becomes healthy');
+
+  const checked = await page.evaluate(() => window.elastos.checkForUpdate());
+  assert.equal(checked.updateAvailable, false);
+  const data = path.join(home, 'Library', 'Application Support', 'elastos');
+  const update = JSON.parse(fs.readFileSync(path.join(data, 'update-check.json'), 'utf8'));
+  assert.equal(update.outcome, 'up_to_date');
+  console.log('PASS elastos update --check writes up_to_date');
+  // Stable has no newer signed release. Expose the existing button to exercise
+  // its real handler and terminal command against the current signed release.
+  await page.evaluate(() => document.querySelector('#update-btn').classList.remove('hidden'));
+  await page.click('#update-btn');
+  await page.waitForFunction(() => document.querySelector('#update-btn').classList.contains('hidden')
+    || document.querySelector('#update-btn-label').textContent === 'Retry', undefined, { timeout: 20 * 60 * 1000 });
+  assert.notEqual(await page.locator('#update-btn-label').innerText(), 'Retry', await page.locator('#error-text').innerText());
+  await status(page, 'running');
+  await health(true);
+  console.log('PASS Update button runs elastos update and Home is running afterward');
+  console.log('NOT EXERCISED signed 2.0.0-to-newer replacement or a System-initiated upgrade because no newer signed Stable release exists');
+
+  await page.click('#power-btn');
+  await status(page, 'stopped');
+  await health(false);
+  await app.close();
+  const binary = path.join(home, '.local', 'bin', 'elastos');
+  const external = spawn(binary, ['home', '--browser'], { detached: true, stdio: 'ignore', env: runtimeChildEnv(options.env) });
+  console.log(`Started independent Home pid ${external.pid}`);
+  let adopted;
+  try {
+    await health(true);
+    adopted = await electron.launch(options);
+    const window = await adopted.firstWindow();
+    await status(window, 'running');
+    assert.equal(await window.locator('#open-label').innerText(), 'Open my computer');
+    console.log('PASS a fresh launcher adopts an already running Home without reinstalling');
+    await window.click('#power-btn');
+    await status(window, 'stopped');
+    await health(false);
+    console.log('PASS Stop works for the adopted Home');
+    await window.click('#open-btn');
+    await status(window, 'running');
+    await health(true);
+    await adopted.close();
+    await health(false);
+    console.log('PASS Quit and stop Home closes the listener');
+    return adopted;
+  } finally {
+    if (adopted) await adopted.close().catch(() => {});
+    // This is the only independently spawned Home. Its ChildProcess object
+    // records the pid owned by this test, including an exec into its controller.
+    if (external.exitCode === null && external.signalCode === null) external.kill('SIGTERM');
+  }
+};

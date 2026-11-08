@@ -24,6 +24,7 @@ jobs:
             platform: linux
 
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
 
     steps:
       - name: Checkout code
@@ -47,10 +48,11 @@ jobs:
       - name: Build for macOS (with signing)
         if: matrix.platform == 'mac'
         run: |
-          # Unset empty signing vars so electron-builder skips signing gracefully
-          [ -z "$CSC_LINK" ] && unset CSC_LINK
-          [ -z "$CSC_KEY_PASSWORD" ] && unset CSC_KEY_PASSWORD
-          npm run build:mac -- --publish never
+          set -euo pipefail
+          for name in CSC_LINK CSC_KEY_PASSWORD APPLE_ID APPLE_APP_SPECIFIC_PASSWORD APPLE_TEAM_ID; do
+            test -n "${!name}" || { echo "Missing required credential $name"; exit 1; }
+          done
+          npm run build:mac -- --arm64 --publish never -c.forceCodeSigning=true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CSC_LINK: ${{ secrets.CSC_LINK }}
@@ -62,11 +64,15 @@ jobs:
       - name: Verify macOS code signature
         if: matrix.platform == 'mac'
         run: |
-          APP_PATH=$(find dist-electron -name "*.app" -maxdepth 2 | head -1)
-          if [ -n "$APP_PATH" ]; then
-            echo "Verifying signature on: $APP_PATH"
-            codesign --verify --deep --strict "$APP_PATH" && echo "Signature valid" || echo "WARNING: Signature verification failed"
-          fi
+          set -euo pipefail
+          APP_PATH="dist-electron/mac-arm64/ElastOS.app"
+          test -d "$APP_PATH"
+          codesign --verify --deep --strict --verbose=2 "$APP_PATH"
+          spctl -a -vv "$APP_PATH"
+          for dmg in dist-electron/*.dmg; do
+            xcrun stapler validate "$dmg"
+            shasum -a 256 "$dmg"
+          done
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -78,7 +84,7 @@ jobs:
             dist-electron/*.exe
             dist-electron/*.AppImage
             dist-electron/*.deb
-          if-no-files-found: ignore
+          if-no-files-found: error
 
   release:
     needs: build

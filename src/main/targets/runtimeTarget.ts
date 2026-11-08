@@ -4,6 +4,7 @@ import * as os from 'os';
 import { RUNTIME_TARGET } from './descriptors';
 import {
   createDefaultGatewaySupervisor,
+  confirmInstalledGateway,
   ForeignGatewayError,
   GatewaySupervisor,
   isHealthOk,
@@ -37,6 +38,7 @@ import { LaunchTarget, UpdateCheck } from './types';
 
 export function createRuntimeTarget(): LaunchTarget {
   let supervisor: GatewaySupervisor | null = null;
+  let updating = false;
 
   function binary(): string | null {
     return findRuntimeBinary(os.homedir(), process.env.PATH ?? '');
@@ -56,9 +58,11 @@ export function createRuntimeTarget(): LaunchTarget {
     descriptor: RUNTIME_TARGET,
     isInstalled: () => runtimeIsInstalled(),
     getStatus: async () => {
+      if (updating) return 'starting';
       if (supervisor) {
         const phase = supervisor.phase();
-        if (phase === 'starting' || phase === 'stopping' || phase === 'running' || phase === 'error') {
+        if (phase === 'starting' || phase === 'stopping' || phase === 'error'
+          || (phase === 'running' && process.platform !== 'darwin')) {
           return phase;
         }
       }
@@ -69,7 +73,10 @@ export function createRuntimeTarget(): LaunchTarget {
       }
       if (runtimeInstallBlock(process.platform, process.arch)) return 'not-installed';
       if (!(await runtimeIsInstalled())) return 'not-installed';
-      if (isHealthOk(await readHealth())) return 'running';
+      if (isHealthOk(await readHealth())) {
+        if (process.platform === 'darwin' && !(await confirmInstalledGateway())) throw new Error('Another program is answering on port 8090. Home was not adopted.');
+        return 'running';
+      }
       return 'stopped';
     },
     start: async () => {
@@ -105,7 +112,25 @@ export function createRuntimeTarget(): LaunchTarget {
       await supervisor.start();
     },
     install: (onProgress) => runtimeInstall.installRuntimeOnThisComputer(onProgress),
-    update: (onProgress) => applyRuntimeUpdate(runtimeCommand(), runtimeHeadStore(), headVerify(), onProgress),
+    update: async (onProgress) => {
+      if (process.platform !== 'darwin') return applyRuntimeUpdate(runtimeCommand(), runtimeHeadStore(), headVerify(), onProgress);
+      if (updating) throw new Error('An ElastOS update is already running.');
+      updating = true;
+      try {
+        await stopGateway(true);
+        await applyRuntimeUpdate(runtimeCommand(), runtimeHeadStore(), headVerify(), onProgress);
+      } finally {
+        supervisor = null;
+        try {
+          const file = binary();
+          if (!file) throw new Error('ElastOS is not installed yet. Click Install.');
+          supervisor = createDefaultGatewaySupervisor(file);
+          await supervisor.start();
+        } finally {
+          updating = false;
+        }
+      }
+    },
     // On Windows the launch controller runs uninstallRuntimeInDistro (windowsUninstall.ts) with the two answers.
     uninstall: () => (process.platform === 'win32' ? Promise.reject(new Error('Uninstall on Windows needs your answer in the Uninstall window. Nothing was removed.')) : runtimeUninstall(() => stopGateway(true))),
     getVersion: () => (process.platform === 'win32' ? readDistroVersion() : readRuntimeVersion()),
@@ -158,13 +183,7 @@ function headVerify(): HeadVerify {
   return {
     maintainerDid: pin.maintainerDid,
     publisherGateway: pin.publisherGateway,
-    fetchText: async (url: string) => {
-      const response = await fetch(url);
-      if (!response.ok) {
-        throw new Error('Could not verify the ElastOS release head.');
-      }
-      return response.text();
-    },
+    fetchText: runtimeInstall.fetchRuntimeText,
   };
 }
 

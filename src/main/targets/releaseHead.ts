@@ -1,6 +1,5 @@
 import { createHash, createPublicKey, timingSafeEqual, verify } from 'crypto';
 
-const DOMAIN = 'elastos.release.head.v1';
 const BASE58 = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
 
 export class ReleaseHeadError extends Error {
@@ -31,9 +30,23 @@ export function verifyReleaseHead(text: string, expectedDid: string): {
   channel: string;
   version: string;
   latestReleaseCid: string;
+  releaseSha256: string;
   signerDid: string;
   headCid: string;
 } {
+  const body = verifyEnvelope(text, expectedDid, 'elastos.release.head.v1');
+  return {
+    channel: typeof body.channel === 'string' ? body.channel : '',
+    version: typeof body.version === 'string' ? body.version : '',
+    latestReleaseCid: typeof body.latest_release_cid === 'string' ? body.latest_release_cid : '',
+    releaseSha256: typeof body.release_sha256 === 'string' ? body.release_sha256 : '',
+    signerDid: expectedDid,
+    headCid: releaseHeadCid(text),
+  };
+}
+
+function verifyEnvelope(text: string, expectedDid: string, domain: string): Record<string, unknown> {
+  if (Buffer.byteLength(text, 'utf8') > 256 * 1024) throw new ReleaseHeadError('Signed release metadata exceeds its limit.');
   let envelope: unknown;
   try {
     envelope = parseJsonUnique(text);
@@ -61,19 +74,28 @@ export function verifyReleaseHead(text: string, expectedDid: string): {
     throw new ReleaseHeadError('Signature must contain 64 hex-encoded bytes.');
   }
   const digest = createHash('sha256')
-    .update(Buffer.concat([Buffer.from(`${DOMAIN}\0`), Buffer.from(canonicalJson(body), 'utf8')]))
+    .update(Buffer.concat([Buffer.from(`${domain}\0`), Buffer.from(canonicalJson(body), 'utf8')]))
     .digest();
   const ok = verify(null, digest, didKeyToPublic(signer), Buffer.from(signature, 'hex'));
   if (!ok) {
     throw new ReleaseHeadError('Release head signature does not match the pinned maintainer DID.');
   }
-  return {
-    channel: typeof body.channel === 'string' ? body.channel : '',
-    version: typeof body.version === 'string' ? body.version : '',
-    latestReleaseCid: typeof body.latest_release_cid === 'string' ? body.latest_release_cid : '',
-    signerDid: signer,
-    headCid: releaseHeadCid(text),
-  };
+  return body;
+}
+
+/** The head binds the exact manifest bytes. The signed manifest binds install.sh. */
+export function verifiedInstallerSha256(text: string, head: ReturnType<typeof verifyReleaseHead>): string {
+  if (!sha256Equals(sha256Hex(text), head.releaseSha256)) {
+    throw new ReleaseHeadError('Release manifest SHA-256 does not match the signed head.');
+  }
+  const body = verifyEnvelope(text, head.signerDid, 'elastos.release.v1');
+  if (body.schema !== 'elastos.release/v1' || body.channel !== head.channel || body.version !== head.version) {
+    throw new ReleaseHeadError('Release manifest identity does not match the signed head.');
+  }
+  if (typeof body.installer_sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(body.installer_sha256)) {
+    throw new ReleaseHeadError('The signed release has no valid install.sh SHA-256. Install stopped.');
+  }
+  return body.installer_sha256;
 }
 
 /**

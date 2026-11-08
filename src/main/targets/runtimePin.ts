@@ -5,6 +5,7 @@ import { LaunchTargetId } from './types';
 export type RuntimeChannelName = 'stable' | 'canary';
 
 export interface RuntimeChannelPin {
+  /** Minimum accepted version. Heads are selected after DID verification. */
   version: string | null;
   headCid: string | null;
 }
@@ -28,7 +29,7 @@ export interface ActiveRuntimePin {
   publisherGateway: string;
   fallbackInstallerUrl: string;
   installerSha256: string | null;
-  /** True when this channel has a version and a head CID to verify. */
+  /** True when this channel has a rollback floor. */
   publishable: boolean;
 }
 
@@ -79,7 +80,7 @@ export function activeRuntimePin(pin: RuntimePinFile): ActiveRuntimePin {
     publisherGateway: pin.publisherGateway,
     fallbackInstallerUrl: pin.fallbackInstallerUrl,
     installerSha256: pin.installerSha256,
-    publishable: Boolean(version && headCid),
+    publishable: Boolean(version),
   };
 }
 
@@ -155,7 +156,7 @@ export function overrideKeepsTrustRoot(packaged: RuntimePinFile, override: Runti
   }
   if (override.active !== packaged.active) {
     const selected = packaged.channels[override.active];
-    if (!selected.version || !selected.headCid) return false;
+    if (!selected.version) return false;
   }
   return true;
 }

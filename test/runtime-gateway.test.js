@@ -823,25 +823,26 @@ test('logs omit attach secrets', async () => {
 });
 
 test('uninstall removes only the runtime binary and data dir', async () => {
+  const home = require('node:path').join(require('node:fs').realpathSync(require('node:os').tmpdir()), 'fixture-home');
   const removed = [];
   await uninstallRuntime({
-    binary: '/home/tester/.local/bin/elastos',
-    dataDir: '/home/tester/.local/share/elastos',
-    homeDir: '/home/tester',
+    binary: `${home}/.local/bin/elastos`,
+    dataDir: `${home}/.local/share/elastos`,
+    homeDir: `${home}`,
     platform: 'linux',
     env: {},
     stop: async () => {},
     remove: (target) => removed.push(target),
   });
   assert.deepEqual(removed, [
-    '/home/tester/.local/bin/elastos',
-    '/home/tester/.local/share/elastos',
+    `${home}/.local/bin/elastos`,
+    `${home}/.local/share/elastos`,
   ]);
 
   await assert.rejects(() => uninstallRuntime({
-    binary: '/home/tester/.local/bin/elastos',
-    dataDir: '/home/tester/.other',
-    homeDir: '/home/tester',
+    binary: `${home}/.local/bin/elastos`,
+    dataDir: `${home}/.other`,
+    homeDir: `${home}`,
     platform: 'linux',
     env: {},
     stop: async () => {},
@@ -850,9 +851,9 @@ test('uninstall removes only the runtime binary and data dir', async () => {
 
   let stopped = false;
   await assert.rejects(() => uninstallRuntime({
-    binary: '/home/tester/.local/bin/elastos',
-    dataDir: '/home/tester/Library/Application Support/elastos',
-    homeDir: '/home/tester',
+    binary: `${home}/.local/bin/elastos`,
+    dataDir: `${home}/Library/Application Support/elastos`,
+    homeDir: `${home}`,
     platform: 'darwin',
     env: {},
     stop: async () => {
@@ -879,4 +880,45 @@ test('a local adopted gateway counts as exited only when the pid is gone', () =>
   } finally {
     child.kill('SIGKILL');
   }
+});
+
+test('Mac controls adopt a proved Home and re-read its generation after a System update', async () => {
+  let clock = 0;
+  let healthy = true;
+  let active = fakeProcess(71);
+  const signals = [];
+  const owned = (proc) => {
+    proc.signal = (signal) => { signals.push([proc.pid, signal]); proc.exit(0); healthy = false; };
+    return proc;
+  };
+  owned(active);
+  const sup = createGatewaySupervisor({
+    binary: '/bin/elastos', args: ['home', '--browser'], adoptForControls: true,
+    spawn() { throw new Error('Stop must adopt without spawning'); },
+    fetchHealth: async () => healthy ? { status: 200, body: 'OK' } : null,
+    adoptInstalled: async () => active,
+    now: () => clock, sleep: async () => { clock += 1000; },
+    openUrl() {}, log() {},
+  });
+  // The signed Home controller has replaced its old host with generation 72.
+  active = owned(fakeProcess(72));
+  await sup.stop();
+  assert.deepEqual(signals, [[72, 'SIGTERM']]);
+  assert.equal(sup.phase(), 'stopped');
+  assert.equal(installedGatewayKind({
+    lockText: JSON.stringify({ pid: 72, addr: 'localhost:8090' }),
+    command: '/home/user/.local/bin/elastos home --browser',
+    pidAlive: () => true, ownsSocket: () => true,
+  }), 'current');
+});
+
+test('Mac adoption refuses an unproved listener without sending any signal', async () => {
+  const sup = createGatewaySupervisor({
+    binary: '/bin/elastos', adoptForControls: true,
+    spawn() { throw new Error('must not spawn'); },
+    fetchHealth: async () => ({ status: 200, body: 'OK' }),
+    adoptInstalled: async () => null,
+    now: () => 0, sleep: async () => {}, openUrl() {}, log() {},
+  });
+  await assert.rejects(() => sup.stop(), ForeignGatewayError);
 });

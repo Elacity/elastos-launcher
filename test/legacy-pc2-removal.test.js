@@ -416,14 +416,22 @@ test('the privileged prompt and the WSL removal stay on known PC2 paths', () => 
     fs.writeFileSync(path.join(secretDir, 'secret'), 'SECRET');
     const link = path.join(outside, '.pc2');
     fs.symlinkSync(secretDir, link);
-    const linked = spawnSync('bash', ['-c', wslArgs[5], 'bash', link], { encoding: 'utf8' });
+    const env = { ...process.env };
+    if (process.platform === 'darwin') {
+      // The WSL script uses GNU realpath -e. Model that operation on macOS.
+      const bin = path.join(outside, 'bin');
+      fs.mkdirSync(bin);
+      fs.writeFileSync(path.join(bin, 'realpath'), '#!/usr/bin/env python3\nimport os,sys\nassert sys.argv[1] == "-e"\nprint(os.path.realpath(sys.argv[-1], strict=True))\n', { mode: 0o755 });
+      env.PATH = `${bin}:${env.PATH}`;
+    }
+    const linked = spawnSync('bash', ['-c', wslArgs[5], 'bash', link], { encoding: 'utf8', env });
     assert.notEqual(linked.status, 0);
     assert.equal(fs.readFileSync(path.join(secretDir, 'secret'), 'utf8'), 'SECRET');
     const real = path.join(outside, 'real');
     fs.mkdirSync(path.join(real, '.pc2'), { recursive: true });
     fs.writeFileSync(path.join(real, '.pc2', 'secret'), 'SECRET');
     fs.symlinkSync(real, path.join(outside, 'alias'));
-    const escaped = spawnSync('bash', ['-c', wslArgs[5], 'bash', path.join(outside, 'alias', '.pc2')], { encoding: 'utf8' });
+    const escaped = spawnSync('bash', ['-c', wslArgs[5], 'bash', path.join(outside, 'alias', '.pc2')], { encoding: 'utf8', env });
     assert.equal(escaped.status, 5);
     assert.equal(fs.readFileSync(path.join(real, '.pc2', 'secret'), 'utf8'), 'SECRET');
   } finally {

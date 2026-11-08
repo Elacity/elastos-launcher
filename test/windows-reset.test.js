@@ -34,8 +34,9 @@ const { distroIsInstalled } = require('../dist/main/targets/windowsRuntime');
 const { installRuntime } = require('../dist/main/targets/runtimeInstall');
 const { loadActiveRuntimePin } = require('../dist/main/targets/runtimePin');
 
-const SIGNED_HEAD = fs.readFileSync(path.join(__dirname, 'fixtures', 'release-head-0.8.0-alpha.22.json'));
-const PIN = loadActiveRuntimePin();
+const fixture = require('./helpers/signed-release');
+const SIGNED_HEAD = Buffer.from(fixture.SIGNED_HEAD);
+const PIN = { ...loadActiveRuntimePin(), headCid: fixture.FIXTURE_HEAD_CID, version: fixture.FIXTURE_VERSION, maintainerDid: fixture.FIXTURE_DID };
 const DID = PIN.maintainerDid;
 const PLENTY = () => 1e12;
 // The helper runs inside Linux. Here it runs with this machine's python3, so these tests need POSIX.

@@ -9,6 +9,9 @@ const os = require('node:os');
 const path = require('node:path');
 
 const root = path.join(__dirname, '..');
+if (process.platform === 'darwin' && process.env.GITHUB_ACTIONS !== 'true') {
+  throw new Error('Mac installation e2e runs only on the GitHub runner.');
+}
 const electronPath = require('electron');
 const { _electron: electron } = require('playwright');
 const { HOME_URL, isHealthOk, probeGatewayHealth } = require('../dist/main/targets/runtimeGateway');
@@ -205,6 +208,11 @@ async function main() {
           throw new Error(`Only Windows shows a Browser note (shown: ${browserText})`);
         }
         console.log('Install reached Open my computer');
+        if (process.platform === 'darwin') {
+          electronApp = await require('./mac-lifecycle-e2e')(electronApp, page, home, {
+            executablePath: electronPath, cwd: root, args, env, timeout: 120000,
+          });
+        }
         return;
       }
       if (errorVisible && errorText && /Set up ElastOS on Windows|Windows needs Linux support|Windows needs one step/.test(errorText)) {
@@ -279,7 +287,7 @@ async function main() {
   }
 }
 
-const capMs = process.platform === 'win32' ? 50 * 60 * 1000 : 22 * 60 * 1000;
+const capMs = process.platform === 'win32' ? 50 * 60 * 1000 : 35 * 60 * 1000;
 setTimeout(() => {
   console.error(`e2e did not finish within ${capMs / 60000} minutes`);
   process.exit(1);

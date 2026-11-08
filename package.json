@@ -1,6 +1,6 @@
 {
   "name": "elastos-launcher",
-  "version": "1.4.0",
+  "version": "1.5.0-test.1",
   "description": "ElastOS runtime desktop launcher",
   "main": "dist/main/index.js",
   "author": {
@@ -16,7 +16,7 @@
     "build:win": "npm run build:ts && electron-builder --win",
     "build:linux": "npm run build:ts && electron-builder --linux",
     "build:all": "npm run build:ts && electron-builder --mac --win --linux",
-    "test": "npm run build:ts && node --test test/*.test.js",
+    "test": "npm run build:ts && node scripts/test.js",
     "e2e": "npm run build:ts && node scripts/electron-e2e.js",
     "e2e:upgrade": "npm run build:ts && node scripts/legacy-upgrade-e2e.js"
   },
@@ -39,7 +39,8 @@
     },
     "files": [
       "dist/**/*",
-      "src/renderer/**/*"
+      "src/renderer/**/*",
+      "resources/icon.png"
     ],
     "mac": {
       "category": "public.app-category.utilities",

@@ -140,7 +140,7 @@ function updateTrayMenu(): void {
     { type: 'separator' },
     { label: 'Show Window', click: () => mainWindow?.show() },
     {
-      label: 'Quit',
+      label: 'Quit and stop Home',
       click: () => {
         isQuitting = true;
         app.quit();
@@ -248,7 +248,29 @@ ipcMain.handle('elastos:rollback', async (event) => {
 // App lifecycle
 app.whenReady().then(() => {
   createWindow();
+  if (process.platform === 'darwin') {
+    Menu.setApplicationMenu(Menu.buildFromTemplate([{ label: 'ElastOS', submenu: [
+      { role: 'about' }, { type: 'separator' }, { label: 'Quit and stop Home', accelerator: 'Command+Q', click: () => app.quit() },
+    ] }, { role: 'editMenu' }, { role: 'windowMenu' }]));
+  }
   createTray();
+  // Refresh while the window is hidden too. Runtime's signed Home controller
+  // owns System updates and keeps its child alive across binary replacement.
+  let checkingStatus = false;
+  const statusTimer = setInterval(async () => {
+    if (checkingStatus || isQuitting) return;
+    checkingStatus = true;
+    try {
+      currentStatus = await launch.getStatus();
+      mainWindow?.webContents.send('elastos:status', currentStatus);
+      updateTrayMenu();
+    } catch (err) {
+      log.error(err instanceof Error ? err.message : String(err));
+    } finally {
+      checkingStatus = false;
+    }
+  }, 2000);
+  statusTimer.unref();
   if (launch.getOpenAtLogin()) launch.setOpenAtLogin(true);
 });
 

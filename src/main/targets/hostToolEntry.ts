@@ -284,9 +284,24 @@ function isAbort(err: unknown): boolean {
   return !!err && typeof err === 'object' && 'name' in err && (err as { name?: string }).name === 'AbortError';
 }
 
+export async function installerFetch(input: string | URL | Request, init?: RequestInit): Promise<Response> {
+  const metadataPath = process.env.ELASTOS_LAUNCHER_METADATA_PATH;
+  if (metadataPath) {
+    if (fs.statSync(metadataPath).size > 1024 * 1024) throw new Error('Installer metadata exceeds its limit.');
+    const bytes = fs.readFileSync(metadataPath);
+    if (createHash('sha256').update(bytes).digest('hex') !== process.env.ELASTOS_LAUNCHER_METADATA_SHA256) {
+      throw new Error('Installer metadata changed after verification.');
+    }
+    const metadata = JSON.parse(bytes.toString('utf8')) as Record<string, string>;
+    const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+    if (Object.prototype.hasOwnProperty.call(metadata, url)) return new Response(metadata[url]);
+  }
+  return fetch(input, init);
+}
+
 function defaultDeps(): CurlDeps {
   return {
-    fetch,
+    fetch: installerFetch,
     writeFile: (file, data) => {
       fs.mkdirSync(path.dirname(file), { recursive: true });
       fs.writeFileSync(file, data);

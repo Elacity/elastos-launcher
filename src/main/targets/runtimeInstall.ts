@@ -2,7 +2,7 @@ import { execFile as execFileCb } from 'child_process';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { installerChildEnv, ReleaseHeadError, sha256Equals, sha256Hex, verifyReleaseHead } from './releaseHead';
+import { installerChildEnv, ReleaseHeadError, sha256Equals, sha256Hex, verifyReleaseHead, verifiedInstallerSha256 } from './releaseHead';
 import { ActiveRuntimePin, loadActiveRuntimePin } from './runtimePin';
 import {
   runtimeBinaryPath,
@@ -68,15 +68,39 @@ export class PinMismatchError extends Error {
   }
 }
 
-/** The first field where the pin and the publisher are not the same value. */
-export function pinMismatchField(pin: ActiveRuntimePin, head: ReleaseHead | null): string | null {
-  if (!pin.publishable || !pin.version || !pin.headCid) {
-    return pin.version ? 'headCid' : 'version';
+/** Compare numeric SemVer components and prerelease identifiers, never string prefixes. */
+export function versionAtLeast(version: string | null, floor: string | null): boolean {
+  const parse = (value: string | null) => /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+[0-9A-Za-z.-]+)?$/.exec(value ?? '');
+  const actual = parse(version?.replace(/^ElastOS Runtime v/, '') ?? null);
+  const minimum = parse(floor);
+  if (!actual || !minimum) return false;
+  for (let i = 1; i <= 3; i++) {
+    if (BigInt(actual[i]) !== BigInt(minimum[i])) return BigInt(actual[i]) > BigInt(minimum[i]);
   }
+  if (!actual[4]) return true;
+  if (!minimum[4]) return false;
+  const left = actual[4].split('.');
+  const right = minimum[4].split('.');
+  for (let i = 0; i < Math.max(left.length, right.length); i++) {
+    if (left[i] === right[i]) continue;
+    if (left[i] === undefined) return false;
+    if (right[i] === undefined) return true;
+    const numericLeft = /^\d+$/.test(left[i]);
+    const numericRight = /^\d+$/.test(right[i]);
+    if (numericLeft && numericRight) return BigInt(left[i]) > BigInt(right[i]);
+    if (numericLeft !== numericRight) return numericRight;
+    return left[i] > right[i];
+  }
+  return true;
+}
+
+/** A package pins the trust root and rollback floor, while the publisher selects the head. */
+export function pinMismatchField(pin: ActiveRuntimePin, head: ReleaseHead | null): string | null {
+  if (!pin.publishable || !versionAtLeast(pin.version, '2.0.0')) return 'version';
   if (!head) return 'release-head';
   if (head.channel !== pin.channel) return 'channel';
-  if (head.version !== pin.version) return 'version';
-  if (!head.headCid || head.headCid !== pin.headCid) return 'headCid';
+  if (!versionAtLeast(head.version, pin.version)) return 'version';
+  if (!head.headCid || !/^Qm[1-9A-HJ-NP-Za-km-z]{44}$/.test(head.headCid)) return 'headCid';
   if (head.signerDid !== pin.maintainerDid) return 'signerDid';
   return null;
 }
@@ -90,9 +114,9 @@ export type InstallPlan =
   | { action: 'refused'; field: string };
 
 /**
- * ElastOS counts as installed only when the version, the head CID in
- * sources.json, and the signed install record (installation/release-head.json,
- * checked against the pinned maintainer DID) all match. Version and head CID
+ * ElastOS counts as installed when its version is at least the floor and
+ * sources.json matches its signed installation/release-head.json record.
+ * The record is checked against the pinned maintainer DID. Version and head CID
  * are read from files this account can edit, so they say which release is
  * there. The record is the proof that install.sh finished that release. With
  * no valid record, Install runs the pinned install.sh again, which writes it.
@@ -109,8 +133,8 @@ export function planRuntimeInstall(input: {
 }): InstallPlan {
   const blocked = runtimeInstallBlock(input.platform, input.arch);
   if (blocked) return { action: 'blocked', message: blocked };
-  const versionOk = installedVersionMatches(input.installedVersion, input.pin.version);
-  const headOk = Boolean(input.pin.headCid && input.installedHeadCid === input.pin.headCid);
+  const versionOk = versionAtLeast(input.installedVersion, input.pin.version);
+  const headOk = Boolean(input.installedHeadCid);
   if (!input.publisher) {
     return input.pin.publishable
       ? { action: 'unchecked' }
@@ -173,8 +197,9 @@ export async function installRuntime(
     const components = runtimeComponentsPath(dataDir);
     const probed = await probeInstalled(deps);
     let publisher: ReleaseHead | null = null;
+    let raw = '';
     try {
-      const raw = await deps.fetchText(releaseHeadUrl(deps.pin));
+      raw = await deps.fetchText(releaseHeadUrl(deps.pin));
       publisher = verifyReleaseHead(raw, deps.pin.maintainerDid);
       onProgress('Release head signature matches the pinned maintainer');
     } catch (err) {
@@ -186,7 +211,7 @@ export async function installRuntime(
       arch: deps.arch,
       installedVersion: probed,
       installedHeadCid: readInstalledHeadCid(deps),
-      installRecordProved: await recordProved(deps, dataDir),
+      installRecordProved: await recordProved(deps, dataDir, probed, readInstalledHeadCid(deps)),
       componentsPresent: deps.exists(components),
       pin: deps.pin,
       publisher,
@@ -208,16 +233,19 @@ export async function installRuntime(
       throw new PinMismatchError('version');
     }
 
-    await runInstallerStep(deps, onProgress);
+    const manifest = await deps.fetchText(`${channelGateway(deps.pin)}/release.json`);
+    const installerSha256 = verifiedInstallerSha256(manifest, publisher as ReturnType<typeof verifyReleaseHead>);
+    const selected = { ...deps, pin: { ...deps.pin, version: publisher.version, headCid: publisher.headCid, installerSha256 } };
+    await runInstallerStep(selected, onProgress, raw, manifest);
     const installed = await probeInstalled(deps);
-    if (!installedVersionMatches(installed, deps.pin.version)) {
+    if (!installedVersionMatches(installed, publisher.version)) {
       throw new PinMismatchError('version');
     }
-    if (readInstalledHeadCid(deps) !== deps.pin.headCid) {
+    if (readInstalledHeadCid(deps) !== publisher.headCid) {
       throw new PinMismatchError('headCid');
     }
     onProgress('Installed head CID matches the pin');
-    if (!(await recordProved(deps, dataDir))) throw new Error(NO_RECORD_AFTER_INSTALL);
+    if (!(await recordProved(deps, dataDir, installed, publisher.headCid))) throw new Error(NO_RECORD_AFTER_INSTALL);
     onProgress('Signed install record matches the pinned maintainer');
 
     if (!deps.exists(components)) {
@@ -230,9 +258,12 @@ export async function installRuntime(
 /** Install finished, but install.sh left no valid record. Reset could not prove this install. */
 export const NO_RECORD_AFTER_INSTALL = 'ElastOS was installed, but it did not save its signed install record, so ElastOS cannot prove this install. Click Install to try again.';
 
-async function recordProved(deps: RuntimeInstallDeps, dataDir: string): Promise<boolean> {
+async function recordProved(deps: RuntimeInstallDeps, dataDir: string, version: string | null, headCid: string | null): Promise<boolean> {
   try {
-    return (await deps.installRecordProved(dataDir)) === true;
+    if (!(await deps.installRecordProved(dataDir))) return false;
+    const head = verifyReleaseHead(deps.readFile(runtimeJoin(dataDir, 'installation', 'release-head.json')), deps.pin.maintainerDid);
+    return head.headCid === headCid && installedVersionMatches(version, head.version)
+      && versionAtLeast(head.version, deps.pin.version);
   } catch {
     return false;
   }
@@ -254,8 +285,13 @@ function readInstalledHeadCid(deps: RuntimeInstallDeps): string | null {
   }
 }
 
+export function channelGateway(pin: ActiveRuntimePin): string {
+  const origin = pin.publisherGateway.replace(/\/$/, '');
+  return pin.channel === 'stable' ? origin : `${origin}/channels/${pin.channel}`;
+}
+
 function releaseHeadUrl(pin: ActiveRuntimePin): string {
-  return `${pin.publisherGateway.replace(/\/$/, '')}/release-head.json`;
+  return `${channelGateway(pin)}/release-head.json`;
 }
 
 async function probeInstalled(deps: RuntimeInstallDeps): Promise<string | null> {
@@ -276,6 +312,8 @@ async function probeInstalled(deps: RuntimeInstallDeps): Promise<string | null> 
 async function runInstallerStep(
   deps: RuntimeInstallDeps,
   onProgress: (message: string) => void,
+  head: string,
+  manifest: string,
 ): Promise<void> {
   if (!deps.pin.installerSha256 || !deps.pin.headCid) {
     throw new PinMismatchError('installerSha256');
@@ -297,12 +335,23 @@ async function runInstallerStep(
   writeStage(deps, 'binary');
   onProgress(INSTALLING);
   const launch = pinnedInstallerLaunch(deps.pin, deps.env);
+  // The installer re-fetches both metadata URLs. Serve the verified snapshot
+  // through the existing curl shim so a publisher move cannot change the floor
+  // decision between verification and activation. Artifact URLs still use HTTPS.
+  const metadata = JSON.stringify({
+    [`${channelGateway(deps.pin)}/release-head.json`]: head,
+    [`${channelGateway(deps.pin)}/release.json`]: manifest,
+  });
+  const metadataPath = runtimeJoin(dir, 'release-metadata.json');
+  deps.writeFile(metadataPath, metadata);
+  launch.env.ELASTOS_LAUNCHER_METADATA_PATH = metadataPath;
+  launch.env.ELASTOS_LAUNCHER_METADATA_SHA256 = sha256Hex(metadata);
   await deps.runInstaller(scriptPath, launch.args, launch.env);
 }
 
 /** The pinned install.sh records the head from ELASTOS_HEAD_CID and rejects a head flag. */
 export function pinnedInstallerLaunch(
-  pin: { headCid: string | null; maintainerDid: string },
+  pin: { headCid: string | null; maintainerDid: string; channel?: string; publisherGateway?: string },
   parent: NodeJS.ProcessEnv = {},
 ): { args: readonly string[]; env: NodeJS.ProcessEnv } {
   if (!pin.headCid || !/^Qm[1-9A-HJ-NP-Za-km-z]{20,}$/.test(pin.headCid)) {
@@ -311,7 +360,8 @@ export function pinnedInstallerLaunch(
   const env = installerChildEnv(parent);
   env.ELASTOS_HEAD_CID = pin.headCid;
   return {
-    args: ['--install-only', '--maintainer-did', pin.maintainerDid],
+    args: ['--install-only', '--maintainer-did', pin.maintainerDid,
+      ...(pin.publisherGateway ? ['--publisher-gateway', channelGateway(pin as ActiveRuntimePin)] : [])],
     env,
   };
 }
@@ -357,7 +407,7 @@ export function defaultRuntimeInstallDeps(pin: ActiveRuntimePin = loadActiveRunt
     homeDir,
     env: process.env,
     pin,
-    fetchText: fetchText,
+    fetchText: fetchRuntimeText,
     runInstaller: async (scriptPath, args, env) => {
       const prepared = await prepareInstallerEnvironment({
         homeDir,
@@ -404,12 +454,34 @@ function hideHostTools(): boolean {
   return process.env.ELASTOS_HIDE_HOST_TOOLS === '1';
 }
 
-async function fetchText(url: string): Promise<string> {
-  const response = await fetch(url);
-  if (!response.ok) {
-    throw new Error(`Could not download ${url} (HTTP ${response.status}). Check your connection and try again.`);
+/** Installer bytes and release metadata are bounded in size and total fetch time. */
+export async function fetchRuntimeText(url: string): Promise<string> {
+  if (!url.startsWith('https://')) throw new Error('ElastOS downloads require HTTPS.');
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 30000);
+  try {
+    const response = await fetch(url, { signal: controller.signal });
+    if (!response.ok || !response.url.startsWith('https://')) {
+      throw new Error(`Could not download ${url} (HTTP ${response.status}).`);
+    }
+    const reader = response.body?.getReader();
+    if (!reader) throw new Error('ElastOS download has no body.');
+    const chunks: Buffer[] = [];
+    let size = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > 2 * 1024 * 1024) {
+        await reader.cancel();
+        throw new Error('ElastOS metadata or installer exceeds the download limit.');
+      }
+      chunks.push(Buffer.from(value));
+    }
+    return new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks));
+  } finally {
+    clearTimeout(timer);
   }
-  return response.text();
 }
 
 /** What the runtime target calls. Tests replace this export; they do not hit the network. */

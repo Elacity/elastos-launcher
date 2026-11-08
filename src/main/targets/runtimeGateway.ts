@@ -128,7 +128,8 @@ export function installedGatewayKind(input: {
   if (!input.ownsSocket(parsed.pid, lockAddressWants(kind))) return null;
   if (!input.command) return null;
   const command = input.command.trim();
-  if (!/(^|[\\/\s])elastos(\.exe)?(\s|$)/i.test(command) || !/\bgateway\b/.test(command)) return null;
+  if (!/(^|[\\/\s])elastos(\.exe)?(\s|$)/i.test(command)
+    || !(/\bgateway\b/.test(command) || /\bhome\s+--browser(?:\s|$)/.test(command))) return null;
   return kind;
 }
 
@@ -139,6 +140,9 @@ export function foreignListenerIsElastos(input: Parameters<typeof installedGatew
 
 export interface GatewaySupervisorDeps {
   binary: string;
+  args?: readonly string[];
+  /** Mac Home adopts only the installed process proved by its host lock and sockets. */
+  adoptForControls?: boolean;
   spawn: (binary: string, args: readonly string[]) => GatewayProcess;
   fetchHealth: () => Promise<HealthResult | null>;
   sleep: (ms: number) => Promise<void>;
@@ -337,7 +341,7 @@ export function createGatewaySupervisor(deps: GatewaySupervisorDeps): GatewaySup
   async function launchOnce(): Promise<'ready' | 'replaced' | 'already'> {
     intentionalStop = false;
     foreign = false;
-    const proc = deps.spawn(deps.binary, GATEWAY_ARGS);
+    const proc = deps.spawn(deps.binary, deps.args ?? GATEWAY_ARGS);
     owned = proc;
     let output = '';
     let exited = false;
@@ -497,7 +501,7 @@ export function createGatewaySupervisor(deps: GatewaySupervisorDeps): GatewaySup
             throw new Error('Something is answering on port 8090, but it is not the ElastOS gateway. Home was not opened.');
           }
           foreign = true;
-          owned = null;
+          owned = deps.adoptForControls ? await (deps.adoptInstalled?.() ?? null) : null;
           current = 'running';
           deps.openUrl(HOME_URL);
           return 'already-running';
@@ -507,10 +511,15 @@ export function createGatewaySupervisor(deps: GatewaySupervisorDeps): GatewaySup
       }
     },
     async stop(options?: { adopt?: boolean }) {
+      if (deps.adoptForControls && isHealthOk(await deps.fetchHealth())) {
+        const installed = await (deps.adoptInstalled?.() ?? null);
+        if (!installed) throw new ForeignGatewayError();
+        owned = installed;
+      }
       if (!owned) {
         const health = await deps.fetchHealth();
         if (isHealthOk(health)) {
-          const adopted = options?.adopt
+          const adopted = (options?.adopt || deps.adoptForControls)
             ? await (deps.adoptInstalled?.() ?? null)
             : null;
           if (!adopted) throw new ForeignGatewayError();
@@ -747,6 +756,9 @@ export async function pidOwnsGatewayPort(
 export function createDefaultGatewaySupervisor(binary: string): GatewaySupervisor {
   return createGatewaySupervisor({
     binary,
+    args: process.platform === 'darwin' ? ['home', '--browser'] : GATEWAY_ARGS,
+    adoptForControls: process.platform === 'darwin',
+    healthTimeoutMs: process.platform === 'darwin' ? 150000 : 60000,
     spawn: spawnGatewayProcess,
     fetchHealth: () => probeGatewayHealth(),
     sleep: (ms) => new Promise((resolve) => { setTimeout(resolve, ms); }),
@@ -755,7 +767,9 @@ export function createDefaultGatewaySupervisor(binary: string): GatewaySuperviso
     log: (line) => logSink(line),
     confirmForeign: confirmInstalledGateway,
     foreignIsLegacy: async () => (await installedGatewayOnThisComputer()) === 'legacy',
-    listenerOwned: (pid, health) => pidOwnsGatewayPort(pid, LOOPBACK_ADDRESSES, health.addresses ?? []),
+    listenerOwned: (pid, health) => process.platform === 'darwin'
+      ? confirmInstalledGateway()
+      : pidOwnsGatewayPort(pid, LOOPBACK_ADDRESSES, health.addresses ?? []),
     adoptInstalled: adoptInstalledGatewayProcess,
   });
 }
@@ -839,15 +853,37 @@ export async function adoptInstalledGatewayProcess(): Promise<GatewayProcess | n
   if (process.platform === 'win32') return null;
   const { text, pid } = readHostLock();
   if (pid <= 0 || !(await hostLockGatewayKind(text, pid))) return null;
+  let stopPid = pid;
+  if (process.platform === 'darwin') {
+    const data = runtimeDataDir(process.platform, os.homedir(), process.env);
+    try {
+      const statusPath = `${data}/update-controller/status.json`;
+      if (fs.statSync(statusPath).size > 16 * 1024) return null;
+      const status = JSON.parse(fs.readFileSync(statusPath, 'utf8'));
+      const lock = JSON.parse(text ?? '{}');
+      const controller = status.controller_pid;
+      if (status.host_pid === pid && status.generation === lock.generation
+        && Number.isInteger(controller) && controller > 0
+        && processCommand(controller)?.includes(`${data}/update-controller/runtime __update-controller`)
+        && Number(execFileSync('ps', ['-p', String(pid), '-o', 'ppid='], { encoding: 'utf8', timeout: 1000 }).trim()) === controller) {
+        stopPid = controller;
+      }
+    } catch {
+      // A directly started gateway has no controller. Its proved host pid is sufficient.
+    }
+  }
   return {
     pid,
     onOutput() {},
     onExit() {},
     hasExited() {
-      return localPidHasExited(pid);
+      return localPidHasExited(pid) && localPidHasExited(stopPid);
     },
     signal(signal) {
-      signalProcessGroup(pid, signal);
+      // A terminal-launched Home need not be a group leader. Signal only its
+      // verified controller or host pid. The controller drains its own children.
+      if (process.platform === 'darwin') process.kill(stopPid, signal);
+      else signalProcessGroup(pid, signal);
     },
   };
 }

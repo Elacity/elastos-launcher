@@ -30,7 +30,9 @@ test('the only target is the runtime', () => {
   assert.equal(createLaunchTargetFromEnv({ OTHER: 'runtime' }).id, 'runtime');
 });
 
-test('a missing runtime does not start', async () => {
+test('a missing runtime does not start', async (t) => {
+  const probe = require('../dist/main/targets/runtimeProbe');
+  t.mock.method(probe, 'findRuntimeBinary', () => null);
   const target = createLaunchTarget('runtime');
   assert.equal(target.descriptor.implemented, true);
   await assert.rejects(() => target.start(), /not installed yet/);

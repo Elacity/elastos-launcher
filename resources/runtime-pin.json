@@ -1,18 +1,18 @@
 {
-  "active": "canary",
+  "active": "stable",
   "publisherGateway": "https://elastos.elacitylabs.com",
   "fallbackInstallerUrl": "https://elastos.elacitylabs.com/install.sh",
   "maintainerDid": "did:key:z6MkgwHd2BCWe1jHMXPiR6H1q1RFPcv1YzhMbK5G1kBarbfe",
-  "installerSha256": "18768ef071a9f921fe0c1d902926c138e86f925dbaf5dfb9185fecb8789d6714",
+  "installerSha256": "09131269f6277f08da624424b7e1c355d5a46c70d79a291ddcdc5172751fbbee",
   "channels": {
     "stable": {
-      "version": null,
+      "version": "2.0.0",
       "headCid": null
     },
     "canary": {
-      "version": "0.8.0-alpha.22",
-      "headCid": "QmXnA5ao7PMfwdj7pGaxpWs14gfgD15FtmhVQPj1EphFXm"
+      "version": "2.0.0",
+      "headCid": null
     }
   },
-  "note": "Testing pin. Change \"active\" from canary to stable when a stable head is published, and fill channels.stable in that same edit. headCid is the UnixFS CID of release-head.json, not latest_release_cid. installerSha256 is the SHA-256 of the install.sh bytes this release will execute. Intel Mac has no signed release in this pin."
+  "note": "Version is the rollback floor. Heads follow the selected channel after DID signature verification. installerSha256 is an informational snapshot. Execution requires the hash in the signed release manifest bound by the verified head."
 }

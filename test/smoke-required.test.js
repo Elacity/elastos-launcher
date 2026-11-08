@@ -116,6 +116,6 @@ test('the flattened smoke pin keeps the installer hash', () => {
   const raw = JSON.parse(fs.readFileSync(pin, 'utf8'));
   assert.equal(flat.installerSha256, raw.installerSha256);
   assert.match(flat.installerSha256, /^[0-9a-f]{64}$/);
-  assert.equal(flat.channel, 'canary');
-  assert.equal(flat.headCid, raw.channels.canary.headCid);
+  assert.equal(flat.channel, 'stable');
+  assert.equal(flat.headCid, raw.channels.stable.headCid);
 });

@@ -173,3 +173,30 @@ test('a cancelled update is an error', async () => {
     /did not run/,
   );
 });
+
+test('Mac Update stops Home, runs the update and starts the current binary even after failure', async (t) => {
+  const platform = Object.getOwnPropertyDescriptor(process, 'platform');
+  Object.defineProperty(process, 'platform', { value: 'darwin' });
+  t.after(() => Object.defineProperty(process, 'platform', platform));
+  const gateway = require('../dist/main/targets/runtimeGateway');
+  const updates = require('../dist/main/targets/runtimeUpdate');
+  const probe = require('../dist/main/targets/runtimeProbe');
+  const { createRuntimeTarget } = require('../dist/main/targets/runtimeTarget');
+  const calls = [];
+  t.mock.method(probe, 'findRuntimeBinary', () => '/installed/elastos');
+  t.mock.method(gateway, 'createDefaultGatewaySupervisor', () => ({
+    stop: async () => { calls.push('stop'); }, start: async () => { calls.push('start-current-binary'); },
+  }));
+  let fail = false;
+  t.mock.method(updates, 'applyRuntimeUpdate', async () => {
+    calls.push('update');
+    if (fail) throw new Error('update failed');
+  });
+  const target = createRuntimeTarget();
+  await target.update();
+  assert.deepEqual(calls, ['stop', 'update', 'start-current-binary']);
+  calls.length = 0;
+  fail = true;
+  await assert.rejects(() => target.update(), /update failed/);
+  assert.deepEqual(calls, ['stop', 'update', 'start-current-binary']);
+});
