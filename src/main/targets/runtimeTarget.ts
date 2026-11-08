@@ -200,11 +200,11 @@ export function createRuntimeTarget(platform: NodeJS.Platform = process.platform
       return serialize(() => runWithHomeRestart(action));
     },
     // On Windows the launch controller runs uninstallRuntimeInDistro (windowsUninstall.ts) with the two answers.
-    uninstall: () => {
+    uninstall: (deleteData = false) => {
       requestedRunning = false;
       return platform === 'win32'
         ? Promise.reject(new Error('Uninstall on Windows needs your answer in the Uninstall window. Nothing was removed.'))
-        : serialize(() => runtimeUninstall(() => stopGateway(true)));
+        : serialize(() => runtimeUninstall(() => stopGateway(true), deleteData));
     },
     getVersion: () => (platform === 'win32' ? readDistroVersion() : readRuntimeVersion(platform, arch)),
     checkForUpdate: () => runtimeCheckForUpdate(platform, arch),
@@ -223,12 +223,8 @@ function readHostUpdateStatus(platform: NodeJS.Platform): string {
 }
 
 async function runtimeCheckForUpdate(platform: NodeJS.Platform, arch: string): Promise<UpdateCheck> {
-  let releaseUrl = '';
-  try {
-    releaseUrl = loadActiveRuntimePin().publisherGateway;
-  } catch {
-    releaseUrl = '';
-  }
+  // The signed offer has no release-notes URL. A publisher gateway is not release notes.
+  const releaseUrl = '';
   const notInstalled = toUpdateCheck('not installed', {
     updateAvailable: false,
     detail: 'not installed',
@@ -280,9 +276,10 @@ async function readHealth(): Promise<{ status: number; body: string } | null> {
   return probeGatewayHealth({ timeoutMs: 500 });
 }
 
-async function runtimeUninstall(stop: () => Promise<void>): Promise<void> {
+async function runtimeUninstall(stop: () => Promise<void>, deleteData: boolean): Promise<void> {
   const home = os.homedir();
   await uninstallRuntime({
+    deleteData,
     binary: runtimeBinaryPath(home),
     dataDir: runtimeDataDir(process.platform, home, process.env),
     stop: async () => {

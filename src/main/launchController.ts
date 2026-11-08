@@ -19,7 +19,7 @@ import { runtimeHeadStore } from './targets/runtimeUpdate';
 import { BackupDescription, describeRuntimeBackupOnThisComputer } from './targets/runtimeBackup';
 import { resetRuntimeOnThisComputer, ResetResult } from './targets/runtimeUninstall';
 import { describeDistroBackupOnThisComputer, resetRuntimeInDistroOnThisComputer } from './targets/windowsReset';
-import { UninstallPrompt, UninstallResult, uninstallRuntimeInDistroOnThisComputer } from './targets/windowsUninstall';
+import { UninstallPrompt, UninstallResult, uninstallRuntimeInDistroOnThisComputer, uninstallDistroProgramOnThisComputer } from './targets/windowsUninstall';
 import { finishResumeInstall as clearResumeInstall, fixWindowsOnThisComputer, resumeInstallPlanOnThisComputer, ResumeInstallPlan } from './targets/windowsHost';
 import { LaunchTarget, LaunchTargetId, TargetStatus, UpdateCheck } from './targets/types';
 
@@ -49,7 +49,7 @@ export interface LaunchController {
   install(onProgress: (message: string) => void): Promise<void>;
   update(onProgress: (message: string) => void): Promise<void>;
   /** On Windows `confirmRemoval` asks the second question before the Linux environment is saved and removed. */
-  uninstall(confirmRemoval?: (prompt: UninstallPrompt) => Promise<unknown>): Promise<UninstallResult | void>;
+  uninstall(confirmRemoval?: (prompt: UninstallPrompt) => Promise<unknown>, deleteData?: boolean): Promise<UninstallResult | void>;
   /** `choice.backup` must be true or false. Anything else resets nothing. */
   resetRuntime(choice?: { backup?: unknown }): Promise<ResetResult>;
   describeResetBackup(): Promise<BackupDescription>;
@@ -277,10 +277,10 @@ export function createLaunchController(options: LaunchControllerOptions = {}): L
     restart: () => runRuntime(() => active.restart(), true),
     install: (onProgress) => runRuntime(() => active.install(onProgress), true),
     update: (onProgress) => runRuntime(() => active.update(onProgress), true),
-    // On Windows, Uninstall removes the ElastOS Linux environment, after the Reset checks and a second question.
-    uninstall: (confirmRemoval) => runRuntime<UninstallResult | void>(() => (process.platform === 'win32'
-      ? uninstallRuntimeInDistroOnThisComputer(() => active.stopForRemoval(), confirmRemoval ?? (async () => false))
-      : active.uninstall()), true),
+    // Windows preserves the Home in place, or exports and removes its environment after a second question.
+    uninstall: (confirmRemoval, deleteData = false) => runRuntime<UninstallResult | void>(() => (process.platform === 'win32'
+      ? (deleteData ? uninstallRuntimeInDistroOnThisComputer(() => active.stopForRemoval(), confirmRemoval ?? (async () => false)) : uninstallDistroProgramOnThisComputer(() => active.stopForRemoval()))
+      : active.uninstall(deleteData)), true),
     // On Windows the ElastOS data is inside the ElastOS Linux environment, so Reset works there.
     resetRuntime: (choice) => runRuntime(() => (process.platform === 'win32'
       ? resetRuntimeInDistroOnThisComputer(() => active.stopForRemoval(), choice ?? {})

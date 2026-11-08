@@ -47,34 +47,3 @@ test('the deb depends keep the electron-builder defaults and add the tray librar
   const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
   assert.deepEqual(pkg.build.deb.depends, DEB_DEPENDS);
 });
-
-test('linux e2e runs the linux lifecycle and leaves the mac lifecycle on darwin', () => {
-  const e2e = fs.readFileSync(path.join(root, 'scripts/electron-e2e.js'), 'utf8');
-  const life = fs.readFileSync(path.join(root, 'scripts/linux-lifecycle-e2e.js'), 'utf8');
-  assert.match(e2e, /process\.platform === 'darwin'/);
-  assert.match(e2e, /mac-lifecycle-e2e/);
-  assert.match(e2e, /process\.platform === 'linux'/);
-  assert.match(e2e, /linux-lifecycle-e2e/);
-  assert.match(life, /PASS Open Home/);
-  assert.match(life, /PASS closing the window keeps Home running/);
-  assert.match(life, /PASS Stop Home closes the listener/);
-  assert.match(life, /PASS Start Home becomes healthy/);
-  assert.match(life, /PASS Home system update check reaches the live controller/);
-  assert.match(life, /NOT EXERCISED a full System update because no newer signed release exists/);
-  assert.match(life, /NOT EXERCISED the owner System summary because that route needs a wallet token/);
-  assert.match(life, /update-controller', 'status.json'/);
-  assert.match(life, /__update-controller/);
-  assert.match(life, /PASS elastos update --check writes up_to_date/);
-  assert.match(life, /\.elastos-launcher', 'update-check.json'/);
-  assert.match(life, /PASS the tray icon is ready/);
-  assert.match(life, /__elastosTray/);
-  assert.match(life, /quit-keep-home/);
-  assert.match(life, /quit-stop-home/);
-  assert.match(life, /PASS Quit and keep Home leaves the controller running/);
-  assert.match(life, /PASS Quit and stop Home after reopen stops the retained Home/);
-  assert.equal(life.includes('waitForFunction'), false);
-  assert.equal(life.includes('command ${'), false);
-  assert.equal(life.includes('Application Support'), false);
-  assert.equal(life.includes('home --browser'), false);
-  assert.match(life, /\.local', 'share', 'elastos'/);
-});

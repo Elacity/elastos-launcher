@@ -73,23 +73,18 @@ test('the smoke passes the pinned head the way the pinned installer accepts it',
   assert.equal(/--head-cid/.test(script), false);
 });
 
-test('the electron e2e clicks Install and waits for Open Home', () => {
-  const script = fs.readFileSync(path.join(root, 'scripts/electron-e2e.js'), 'utf8');
-  assert.match(script, /Open Home/);
-  assert.match(script, /#open-btn/);
-  assert.match(script, /Release head signature matches the pinned maintainer/);
-  assert.match(script, /install\.sh SHA-256 matches the pin/);
-  assert.match(script, /Installed head CID matches the pin/);
-  assert.match(script, /app\.exit\(0\)/);
-  assert.match(script, /ELASTOS_LAUNCH_TARGET: 'runtime'/);
-  assert.match(script, /ELASTOS_HIDE_HOST_TOOLS: '1'/);
-  assert.match(script, /--disable-gpu-sandbox/);
-  assert.match(script, /APPDATA/);
-  assert.match(script, /LOCALAPPDATA/);
-  assert.match(script, /#fix-btn/);
-  assert.match(script, /Set up ElastOS on Windows/);
-  assert.match(script, /process\.platform === 'win32' && windowsFix === 'running'/);
-  assert.equal(script.includes("errorText !== 'That still needs attention.'"), false);
+test('e2e menu driver clicks real menu objects by label and rejects disabled items', async () => {
+  const { clickMenu } = require('../scripts/tray-e2e');
+  const calls = [];
+  global.__elastosTrayMenu = { items: [{ label: 'Open Home', enabled: true, click: () => calls.push('open') },
+    { label: 'Start Home', enabled: false },
+    { label: 'Troubleshoot', submenu: { items: [{ label: 'Reset ElastOS…', enabled: true, click: () => calls.push('reset') }] } }] };
+  const app = { evaluate: (fn,arg) => fn({},arg) };
+  try {
+    await clickMenu(app,'Open Home'); await clickMenu(app,'Reset ElastOS…');
+    assert.deepEqual(calls,['open','reset']);
+    await assert.rejects(clickMenu(app,'Start Home'),/No enabled menu item/);
+  } finally { delete global.__elastosTrayMenu; }
 });
 
 test('the flattened smoke pin keeps the installer hash', () => {

@@ -308,11 +308,7 @@ test('the next open continues Install only after Linux support is on', async () 
     }), 'install');
     finishResumeInstall(home, true);
     assert.equal(fs.existsSync(marker), false);
-    const app = fs.readFileSync(path.join(__dirname, '../src/renderer/app.js'), 'utf8');
-    const firstRun = fs.readFileSync(path.join(__dirname, '../docs/FIRST_RUN.md'), 'utf8');
-    assert.match(app, /plan !== 'install'/);
-    assert.match(app, /finishResumeInstall/);
-    assert.match(firstRun, /Install continues/);
+
   } finally {
     fs.rmSync(home, { recursive: true, force: true });
   }

@@ -1,6 +1,6 @@
 {
   "name": "elastos-launcher",
-  "version": "2.0.0-test.3",
+  "version": "2.0.0-test.4",
   "description": "ElastOS runtime desktop launcher",
   "main": "dist/main/index.js",
   "author": {
@@ -40,10 +40,12 @@
     "files": [
       "dist/**/*",
       "src/renderer/**/*",
-      "resources/icon.png"
+      "resources/icon.png",
+      "resources/tray/**/*"
     ],
     "mac": {
       "category": "public.app-category.utilities",
+      "extendInfo": { "LSUIElement": true },
       "icon": "resources/icon.icns",
       "target": [
         "dmg",

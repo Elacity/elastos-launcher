@@ -427,6 +427,7 @@ export function sweepRemovalHoldings(
 }
 
 export async function uninstallRuntime(deps: {
+  deleteData?: boolean;
   binary: string;
   dataDir: string;
   stop: () => Promise<void>;
@@ -452,7 +453,7 @@ export async function uninstallRuntime(deps: {
   assertStableRemovalTarget(deps.binary, lstat);
   assertStableRemovalTarget(deps.dataDir, lstat);
   deps.remove(deps.binary);
-  deps.remove(deps.dataDir);
+  if (deps.deleteData === true) deps.remove(deps.dataDir);
 }
 
 export const RESET_CHOICE_MESSAGE =

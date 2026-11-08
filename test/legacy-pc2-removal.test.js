@@ -33,7 +33,6 @@ const {
   zipStoredSizeFields,
 } = require('../dist/main/legacyPc2Removal');
 const { runtimeBinaryPath, runtimeDataDir, runtimeInstallStagePath } = require('../dist/main/targets/runtimePaths');
-const flow = require('../src/renderer/flow.js');
 
 function enoent() {
   const error = new Error('ENOENT');
@@ -370,16 +369,7 @@ test('lists only a real PC2 node tree and backs up the PC2 folder before deletin
   assert.equal(act.calls[1][0], 'stop');
   assert.ok(act.calls.slice(2).every((call) => call[0] === 'remove'));
 
-  const copy = flow.legacyPc2Copy([
-    { label: 'PC2 folder', path: pc2, bytes: 5 },
-    { label: 'PC2 sudoers rule', path: '/etc/sudoers.d/amneziawg', bytes: null },
-  ]);
-  assert.equal(copy.title, 'Remove old PC2 files?');
-  assert.equal(copy.backup, 'Back up my PC2 data first');
-  assert.equal(copy.done, 'Old PC2 files removed.');
-  assert.match(copy.list, /PC2 folder — .*\/\.pc2 \(5 bytes\)/);
-  assert.match(copy.list, /size unavailable/);
-  assert.match(withSupportBundle(copy.done, '/home/tester/Desktop/ElastOS-support.txt'), /support bundle/);
+  assert.match(withSupportBundle('Old PC2 files removed.', '/home/tester/Desktop/ElastOS-support.txt'), /support bundle/);
 });
 
 test('backup zip stores PC2 files and does not follow a symlink outside them', () => {
@@ -640,28 +630,6 @@ test('PC2 process selection ignores the ElastOS runtime', () => {
     { pid: process.pid, command: 'node /home/tester/.pc2/pc2-node/dist/index.js' },
   ], process.pid);
   assert.deepEqual(pids, [7]);
-});
-
-test('Remove PC2 stays hidden until a legacy install is reported', () => {
-  const html = fs.readFileSync(path.join(__dirname, '../src/renderer/index.html'), 'utf8');
-  const app = fs.readFileSync(path.join(__dirname, '../src/renderer/app.js'), 'utf8');
-  const main = fs.readFileSync(path.join(__dirname, '../src/main/index.ts'), 'utf8');
-  const preload = fs.readFileSync(path.join(__dirname, '../src/preload/index.ts'), 'utf8');
-  assert.match(html, /class="control-btn hidden" id="remove-pc2-btn"/);
-  assert.match(html, /id="confirm-backup"/);
-  assert.match(html, /Back up my PC2 data first/);
-  assert.match(app, /describeLegacyPc2/);
-  assert.match(app, /removeLegacyPc2\(backup, paths\)/);
-  assert.match(app, /legacyConfirmPaths/);
-  assert.match(app, /legacyItems\.length === 0/);
-  assert.match(app, /confirmMode === 'pc2'/);
-  assert.equal(main.includes('./targets'), false);
-  assert.match(main, /elastos:describeLegacyPc2/);
-  assert.match(main, /elastos:removeLegacyPc2/);
-  assert.match(main, /withSupportBundle/);
-  assert.match(preload, /describeLegacyPc2/);
-  assert.match(preload, /elastos:removeLegacyPc2/);
-  assert.equal(flow.primaryAction({ targetId: 'runtime', status: 'not-installed', busy: false }).label, 'Install');
 });
 
 test('sudoers and VPN programs are not PC2 just because of their names', async () => {

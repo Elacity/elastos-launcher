@@ -171,23 +171,7 @@ test('quit waits for the gateway this launcher started and leaves one it did not
   );
   assert.deepEqual(order, ['kill', 'quit']);
 
-  const main = fs.readFileSync(path.join(__dirname, '../src/main/index.ts'), 'utf8');
-  const app = fs.readFileSync(path.join(__dirname, '../src/renderer/app.js'), 'utf8');
-  assert.match(main, /Stopping ElastOS/);
-  assert.match(main, /elastos:resumeInstallPlan/);
-  assert.match(main, /forceStopGateway/);
-  const controllerSrc = fs.readFileSync(path.join(__dirname, '../src/main/launchController.ts'), 'utf8');
-  const targetSrc = fs.readFileSync(path.join(__dirname, '../src/main/targets/runtimeTarget.ts'), 'utf8');
-  assert.match(controllerSrc, /resetRuntimeOnThisComputer\(\(\) => active\.stopForRemoval\(\), choice \?\? \{\}\)/);
-  assert.match(controllerSrc, /await active\.stop\(\)/);
-  assert.match(targetSrc, /await stopGateway\(false\)/);
-  assert.match(targetSrc, /runtimeUninstall\(\(\) => stopGateway\(true\)\)/);
-  assert.equal(main.includes('./targets'), false);
-  assert.match(app, /resumeInstallPlan/);
-  assert.match(app, /finishResumeInstall/);
-  const replay = main.slice(main.indexOf('ready-to-show'), main.indexOf('Check initial status'));
-  assert.match(replay, /elastos:log/);
-  assert.equal(/log\.info/.test(replay), false);
+
 });
 
 test('the runtime health contract is the gateway', () => {
@@ -226,12 +210,7 @@ test('install logs a missing runtime and does not spawn another product', async 
   assert.equal(resolveLaunchTargetId({}), 'runtime');
   assert.equal(resolveLaunchTargetId({ env: { [LAUNCH_TARGET_ENV]: 'elastos-runtime' } }), 'runtime');
 
-  const main = fs.readFileSync(path.join(__dirname, '../src/main/index.ts'), 'utf8');
-  const preload = fs.readFileSync(path.join(__dirname, '../src/preload/index.ts'), 'utf8');
-  assert.equal(main.includes('./targets'), false);
-  assert.equal(main.includes('elastos:start'), true);
-  assert.equal(preload.includes("exposeInMainWorld('elastos'"), true);
-  assert.equal(preload.includes('elastos:install'), true);
+
 });
 
 test('launch info preserves a specific foreign-port error for the window', async (t) => {

@@ -1,80 +1,27 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:">
   <title>ElastOS</title>
   <link rel="stylesheet" href="styles.css">
+  <script defer src="app.js"></script>
 </head>
 <body>
   <div id="window-content">
     <div class="title-bar" aria-hidden="true"></div>
-    <main>
-      <header>
-        <img src="elastos-icon-default.svg" alt="" class="app-mark">
-        <h1>ElastOS</h1>
-      </header>
-      <p id="status-text" role="status" aria-live="polite">Checking Home…</p>
-      <button class="control-btn main-action" id="open-btn" disabled><span id="open-label">Please wait</span></button>
-      <button class="control-btn hidden" id="power-btn">Stop Home</button>
-      <button class="control-btn hidden" id="update-btn"><span id="update-btn-label">Update</span></button>
-      <a class="hidden" id="url-value" href="http://localhost:8090/home/">http://localhost:8090/home/</a>
-      <p id="version">ElastOS 2.0.0</p>
-      <p class="note hidden" id="platform-note"></p>
-      <p class="note hidden" id="browser-row"><span id="browser-note"></span></p>
-      <button class="control-btn hidden" id="fix-btn" type="button">Fix it</button>
-      <label class="login-row" id="login-row">
-        <input type="checkbox" id="login-checkbox">
-        <span>Start ElastOS when you log in to this computer</span>
-      </label>
-      <p class="note" id="login-note">Home runs in the background. You can close this window.</p>
-      <button class="control-btn hidden" id="remove-pc2-btn" type="button">Remove old PC2 files</button>
-      <details id="details">
-        <summary>Details</summary>
-        <div class="details-actions">
-          <button class="control-btn" id="diagnostics-btn">Copy diagnostics</button>
-          <button class="control-btn" id="support-btn">Save support file</button>
-          <button class="control-btn" id="log-folder-btn">Open the Home log folder</button>
-          <button class="control-btn hidden" id="rollback-btn">Restore previous</button>
-          <button class="control-btn" id="reset-btn">Reset</button>
-          <button class="control-btn danger" id="uninstall-btn" disabled>Uninstall</button>
-        </div>
-        <h2>Recent launcher messages</h2>
-        <pre id="logs-content">No recent launcher messages.</pre>
-      </details>
-      <div class="confirm-modal hidden" id="confirm-modal">
-        <div class="confirm-content">
-          <h3 id="confirm-title">Uninstall ElastOS?</h3>
-          <p id="confirm-body">This removes the ElastOS program and its data from this computer.</p>
-          <p class="confirm-path" id="confirm-path">The ElastOS program and its data folder</p>
-          <label class="confirm-backup hidden" id="confirm-backup-row">
-            <input type="checkbox" id="confirm-backup">
-            <span>Back up my PC2 data first</span>
-          </label>
-          <div class="reset-backup hidden" id="reset-backup">
-            <p id="reset-backup-text"></p>
-            <p class="reset-backup-warning" id="reset-backup-warning"></p>
-            <label class="confirm-backup">
-              <input type="radio" name="reset-backup-choice" id="reset-backup-yes">
-              <span id="reset-backup-yes-label">Save a copy of your ElastOS data first</span>
-            </label>
-            <p class="reset-backup-space hidden" id="reset-backup-space"></p>
-            <label class="confirm-backup">
-              <input type="radio" name="reset-backup-choice" id="reset-backup-no">
-              <span id="reset-backup-no-label">Do not save a copy</span>
-            </label>
-          </div>
-          <p class="confirm-warning">This action cannot be undone!</p>
-          <div class="confirm-buttons">
-            <button class="confirm-btn cancel" id="confirm-cancel">Cancel</button>
-            <button class="confirm-btn delete" id="confirm-delete">Delete</button>
-          </div>
-        </div>
-      </div>
+    <main aria-labelledby="title">
+      <img class="app-mark" src="elastos-icon-default.svg" alt="" width="64" height="64">
+      <h1 id="title">ElastOS</h1>
+      <p id="message" role="status" aria-live="polite" hidden></p>
+      <label id="login-row"><input id="login" type="checkbox" checked> Start Home at Login</label>
+      <p id="location" hidden></p>
+      <a id="release-notes" href="#" hidden>What's new</a>
+      <progress id="progress" aria-label="Installation progress" hidden></progress>
+      <div id="actions"><button id="cancel" hidden>Not Now</button><button id="primary" type="button">Install</button></div>
+      <button id="diagnostics" class="text-button" hidden>Copy Diagnostics</button>
     </main>
   </div>
-  <script src="flow.js"></script>
-  <script src="app.js"></script>
 </body>
 </html>

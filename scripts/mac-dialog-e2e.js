@@ -1,170 +1,86 @@
-// Real packaged renderer and handlers; only IPC data/mutations are fixtures.
-// Native macOS paths ignore HOME, so never run this on the maintainer's Mac.
+// Packaged native UI with a fixture controller; lifecycle e2e uses the real signed Home.
 const assert = require('node:assert/strict');
-const { spawnSync } = require('node:child_process');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { _electron: electron } = require('playwright');
-
-if (process.platform !== 'darwin' || process.env.GITHUB_ACTIONS !== 'true') {
-  throw new Error('Packaged Mac dialog e2e runs only on the disposable GitHub Mac runner.');
-}
-const binary = path.resolve(process.argv[2], 'Contents/MacOS/ElastOS');
-const clickHelper = path.join(os.tmpdir(), 'launcher-dialog-click');
-const compiled = spawnSync('swiftc', [path.join(__dirname, 'mac-click.swift'), '-o', clickHelper], { encoding: 'utf8', timeout: 120000 });
-assert.equal(compiled.status, 0, compiled.stderr);
-const permission = spawnSync(clickHelper, [], { encoding: 'utf8', timeout: 5000 });
-assert.equal(permission.status, 0, `Native OS events are required: ${permission.stdout} ${permission.stderr}`);
-
+const { nativeControls } = require('./mac-native');
+const { clickMenu, waitFor, trayState, noWindow } = require('./tray-e2e');
+if (process.platform !== 'darwin' || process.env.GITHUB_ACTIONS !== 'true') throw new Error('Packaged Mac dialog e2e runs only on the disposable GitHub Mac runner.');
 async function main() {
-  const home = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'launcher-dialog-home-'));
-  const env = { ...process.env, HOME: home, USERPROFILE: home, ELASTOS_LAUNCH_TARGET: 'runtime',
-    ELASTOS_HIDE_HOST_TOOLS: '1', PATH: (process.env.PATH || '').split(path.delimiter)
-      .filter((dir) => !fs.existsSync(path.join(dir, 'elastos'))).join(path.delimiter) };
+  const home=fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()),'launcher-dialog-home-'));
+  const env={...process.env, HOME:home, USERPROFILE:home, ELASTOS_HIDE_HOST_TOOLS:'1',
+    PATH:(process.env.PATH||'').split(path.delimiter).filter(dir=>!fs.existsSync(path.join(dir,'elastos'))).join(path.delimiter)};
   delete env.ELECTRON_RUN_AS_NODE;
-  const app = await electron.launch({ executablePath: binary, env, timeout: 60000 });
-  const watchdog = setTimeout(() => app.process().kill('SIGKILL'), 180000);
+  const app=await electron.launch({executablePath:path.resolve(process.argv[2],'Contents/MacOS/ElastOS'),env,timeout:60000});
+  const watchdog=setTimeout(()=>app.process().kill('SIGKILL'),180000);
   try {
-    const page = await app.firstWindow();
-    await page.waitForLoadState('domcontentloaded');
-    await app.evaluate(({ ipcMain, BrowserWindow, app }) => {
-      global.__dialogCalls = [];
-      const info = { id: 'runtime', status: 'running', openUrl: 'http://localhost:8090/home/',
-        preflight: { ok: true, checks: [] }, openAtLogin: false, canRollback: true };
-      const items = ['.pc2', '.personal-cloud', 'Library/Application Support/Personal Cloud',
-        'Library/Logs/Personal Cloud'].map((name) => ({ scope: 'host', label: 'Old Personal Cloud data',
-        path: `/Users/runner/${name}`, bytes: 1024 }));
-      const values = {
-        getLaunchInfo: info, getVersion: '2.0.0', isInstalled: true,
-        getLogs: 'Packaged dialog regression', resumeInstallPlan: 'none',
-        checkForUpdate: { updateAvailable: true, latest: '2.0.1' },
-        describeLegacyPc2: { items },
-        describeResetBackup: { present: true, enough: true, bytes: 1024, neededBytes: 2048,
-          freeBytes: 1000000, folder: '/Users/runner/Desktop' },
-        describeFailure: { message: 'Dialog fixture failure', fixLabel: 'Fix it' },
-        getPreflight: { ok: true, checks: [] },
-      };
-      for (const name of [...Object.keys(values), 'getStatus', 'start', 'stop', 'install', 'openBrowser', 'update', 'rollback',
-        'resetRuntime', 'uninstall', 'removeLegacyPc2', 'setOpenAtLogin', 'fixFailure', 'getDiagnostics', 'saveSupportBundle', 'openLogFolder']) {
-        ipcMain.removeHandler(`elastos:${name}`);
-        ipcMain.handle(`elastos:${name}`, (_event, ...args) => {
-          global.__dialogCalls.push({ name, args });
-          if (name === 'saveSupportBundle') throw new Error('Dialog fixture failure');
-          if (name === 'getStatus') return info.status;
-          if (name === 'stop') info.status = 'stopped';
-          if (name === 'removeLegacyPc2') {
-            values.describeLegacyPc2 = { items: [] };
-            return { ok: true, message: 'PC2 removed' };
-          }
-          return values[name];
-        });
-      }
-      const window = BrowserWindow.getAllWindows()[0];
-      const send = window.webContents.send.bind(window.webContents);
-      window.webContents.send = (channel, ...args) => send(channel,
-        ...(channel === 'elastos:status' ? [info.status] : args));
-      window.setPosition(100, 100);
-      window.show(); window.focus(); app.focus({ steal: true });
+    const page=await app.firstWindow();
+    await page.locator('#primary').waitFor();
+    await app.evaluate(({app,dialog,shell})=>{
+      const root=app.getAppPath();
+      const fromApp=process.mainModule.require.bind(process.mainModule);
+      const {launch}=fromApp(root+'/dist/main/index.js');
+      global.__fixture={calls:[],dialogs:[],answer:{response:0,checkboxChecked:false},status:'not-installed'};
+      const f=global.__fixture;
+      launch.getStatus=async()=>f.status;
+      launch.getOpenAtLogin=()=>false; launch.setOpenAtLogin=v=>f.calls.push(['login',v]);
+      launch.install=async progress=>{f.calls.push(['install']);progress('Starting Home');f.status='running';};
+      launch.start=async()=>{f.calls.push(['start']);f.status='running';};
+      launch.stop=async()=>{f.calls.push(['stop']);f.status='stopped';};
+      launch.shutdown=async()=>{};
+      launch.openInBrowser=()=>f.calls.push(['open','http://localhost:8090/home/']);
+      launch.checkForUpdate=async()=>({latest:'2.0.1',updateAvailable:true,releaseUrl:'https://example.com/releases/2.0.1'});
+      launch.update=async progress=>{f.calls.push(['update']);progress('Downloading');f.status='running';};
+      launch.describeResetBackup=async()=>({present:true,enough:true});
+      launch.resetRuntime=async choice=>{f.calls.push(['reset',choice]);};
+      launch.uninstall=async(_confirm,deleteData)=>{f.calls.push(['uninstall',deleteData]);};
+      launch.getDiagnostics=async()=> 'fixture diagnostics';
+      launch.describeFailure=async()=>({message:'The download stopped.',fixLabel:null});
+      shell.openExternal=async url=>f.calls.push(['external',url]);
+      dialog.showMessageBox=async(...args)=>{f.dialogs.push(args.at(-1));return f.answer;};
+      const pc2=fromApp(root+'/dist/main/legacyPc2Removal.js');
+      pc2.describeLegacyPc2OnThisComputer=async()=>f.removed?[]:[{path:'/Users/runner/.pc2',label:'PC2 data'}];
+      pc2.removeLegacyPc2OnThisComputer=async choice=>{f.calls.push(['pc2',choice]);f.removed=true;return {ok:true};};
     });
-    await page.reload();
-    await page.locator('#url-value').waitFor({ state: 'visible' });
-    await page.waitForTimeout(2100);
-    assert.equal(await page.locator('#status-text').textContent(), 'Home is running');
-
-    async function geometry() {
-      return app.evaluate(({ BrowserWindow }) => {
-        const window = BrowserWindow.getAllWindows()[0];
-        return { bounds: window.getContentBounds(), zoom: window.webContents.getZoomFactor() };
-      });
+    const native=nativeControls(app,page);
+    await native.drag();
+    await native.click('#login');
+    await native.click('#primary');
+    await waitFor(async()=>await page.locator('#primary').innerText()==='Open Home',10000,'No ready screen');
+    assert.equal(await page.locator('#message').innerText(),'Home is ready.');
+    assert.ok(await app.evaluate(()=>global.__fixture.calls.some(c=>c[0]==='login'&&c[1]===false)));
+    await native.click('#primary'); await waitFor(()=>app.evaluate(()=>global.__fixture.calls.some(c=>c[0]==='open')),10000,'Native Open Home did not open Home');
+    await noWindow(app); await trayState(app,'running');
+    for(const [label,action] of [['Reset ElastOS…','reset'],['Uninstall ElastOS…','uninstall'],['Remove Old PC2 Files…','pc2']]) {
+      const before=await app.evaluate(()=>global.__fixture.dialogs.length);
+      await app.evaluate(()=>{global.__fixture.answer={response:0,checkboxChecked:false};});
+      await clickMenu(app,label);
+      await waitFor(()=>app.evaluate((_e,b)=>global.__fixture.dialogs.length>b,before),10000,'Native dialog did not open');
+      const options=await app.evaluate(()=>global.__fixture.dialogs.at(-1));
+      assert.equal(options.defaultId,0);assert.equal(options.cancelId,0);assert.equal(options.buttons[0],'Cancel');
+      assert.equal(await app.evaluate((_e,action)=>global.__fixture.calls.some(c=>c[0]===action),action),false);
+      await app.evaluate(()=>{global.__fixture.answer={response:1,checkboxChecked:true};});
+      await clickMenu(app,label);
+      await waitFor(()=>app.evaluate((_e,action)=>global.__fixture.calls.some(c=>c[0]===action),action),10000,'Confirm did not reach controller');
+      console.log(`PASS real menu ${label} opens native dialog, defaults to Cancel, and honors choice`);
     }
-    async function nativeClick(selector) {
-      const control = page.locator(selector);
-      await control.scrollIntoViewIfNeeded();
-      const center = await control.evaluate((el) => {
-        const r = el.getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
-      });
-      const { bounds, zoom } = await geometry();
-      const result = spawnSync(clickHelper, [String(bounds.x + center.x * zoom), String(bounds.y + center.y * zoom)], { encoding: 'utf8', timeout: 5000 });
-      assert.equal(result.status, 0, result.stderr);
-      await page.waitForTimeout(300);
-    }
-    async function check(label) {
-      const leaked = await page.locator('.hidden').evaluateAll((nodes) => nodes
-        .filter((node) => getComputedStyle(node).display !== 'none').map((node) => node.id));
-      assert.deepEqual(leaked, [], label);
-      for (const control of await page.locator('button, a, input, summary').all()) {
-        if (!await control.isVisible()) continue;
-        assert.equal(await control.evaluate((el) => getComputedStyle(el).webkitAppRegion), 'no-drag');
-      }
-      console.log(`PASS ${label}: hidden elements and interactive drag regions`);
-    }
-
-    await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].hide());
-    const second = spawnSync(binary, [], { env, encoding: 'utf8', timeout: 10000 });
-    assert.equal(second.status, 0, `second instance must exit cleanly: ${second.stderr}`);
-    await page.waitForTimeout(300);
-    assert.equal(await app.evaluate(({ BrowserWindow }) => {
-      const windows = BrowserWindow.getAllWindows();
-      return windows.length === 1 && windows[0].isVisible() && windows[0].isFocused();
-    }), true, 'opening again must focus the existing window');
-    console.log('PASS native second-instance activation focuses one existing window');
-
-    await check('main');
-    const before = await geometry();
-    const strip = await page.locator('.title-bar').boundingBox();
-    assert.ok(strip && strip.x === 0 && strip.width === before.bounds.width);
-    assert.equal(await page.locator('.title-bar').evaluate((el) => getComputedStyle(el).webkitAppRegion), 'drag');
-    const x = before.bounds.x + strip.width * .7;
-    const y = before.bounds.y + strip.height / 2;
-    const drag = spawnSync(clickHelper, [String(x), String(y), String(x + 60), String(y + 45)], { encoding: 'utf8', timeout: 5000 });
-    assert.equal(drag.status, 0, drag.stderr);
-    await page.waitForTimeout(300);
-    const after = await geometry();
-    // macOS starts a window drag only after the pointer has moved a few points, so the
-    // window follows most of the 60 x 45 drag, not all of it (CI saw 60 x 35).
-    assert.ok(after.bounds.x - before.bounds.x >= 30 && after.bounds.y - before.bounds.y >= 20,
-    `top-strip OS drag must move the window: ${JSON.stringify({ before, after })}`);
-    console.log(`PASS native top-strip drag ${JSON.stringify({ before, after })}`);
-    await nativeClick('#url-value');
-    assert.ok(await app.evaluate(() => global.__dialogCalls.some((call) => call.name === 'openBrowser')));
-    console.log('PASS native Home address click invokes openBrowser');
-    await nativeClick('#power-btn');
-    assert.equal(await page.locator('#status-text').textContent(), 'Home is stopped');
-    await nativeClick('summary');
-    assert.equal(await page.locator('#details').getAttribute('open'), '');
-    await check('Details');
-
-    for (const [name, trigger] of [['Reset', '#reset-btn'], ['Uninstall', '#uninstall-btn'], ['Remove old PC2 files', '#remove-pc2-btn']]) {
-      await nativeClick(trigger);
-      await page.locator('#confirm-modal').waitFor({ state: 'visible' });
-      await check(name);
-      if (name === 'Remove old PC2 files') {
-        await nativeClick('#confirm-backup');
-        assert.equal(await page.locator('#confirm-backup').isChecked(), true);
-      }
-      await nativeClick('#confirm-cancel');
-      assert.equal(await page.locator('#confirm-modal').isVisible(), false);
-      await nativeClick(trigger);
-      if (name === 'Reset') await nativeClick('#reset-backup-yes');
-      if (name === 'Remove old PC2 files') await nativeClick('#confirm-backup');
-      await nativeClick('#confirm-delete');
-      await page.locator('#confirm-modal').waitFor({ state: 'hidden' });
-      console.log(`PASS native ${name} backup, Cancel, and confirm`);
-    }
-    const calls = await app.evaluate(() => global.__dialogCalls);
-    assert.ok(calls.some((call) => call.name === 'resetRuntime' && call.args[0].backup === true));
-    assert.ok(calls.some((call) => call.name === 'uninstall'));
-    assert.ok(calls.some((call) => call.name === 'removeLegacyPc2' && call.args[0] === true && call.args[1].length === 4));
-    assert.equal(await page.locator('#remove-pc2-btn').isVisible(), false);
-    assert.equal(await page.locator('#status-text').textContent(), 'Old PC2 files removed.');
-    await nativeClick('#support-btn');
-    await page.locator('#fix-btn').waitFor({ state: 'visible' });
-    await check('error');
+    const calls=await app.evaluate(()=>global.__fixture.calls);
+    assert.ok(calls.some(c=>c[0]==='reset'&&c[1].backup));
+    assert.ok(calls.some(c=>c[0]==='uninstall'&&c[1]===true));
+    assert.ok(calls.some(c=>c[0]==='pc2'&&c[1].backup&&c[1].paths[0]==='/Users/runner/.pc2'));
+    await clickMenu(app,'Update to 2.0.1…');
+    const update=await app.firstWindow();await update.locator('#cancel').waitFor();
+    const updateNative=nativeControls(app,update);await updateNative.click('#cancel');await noWindow(app);
+    await clickMenu(app,'Update to 2.0.1…');
+    const confirming=await app.firstWindow();await confirming.locator('#primary').waitFor();
+    await nativeControls(app,confirming).click('#primary');
+    await waitFor(()=>app.evaluate(()=>global.__fixture.calls.some(c=>c[0]==='update')),10000,'Update did not run');
+    await noWindow(app);
+    console.log('PASS native update window supports Not Now and Update then closes');
   } finally {
-    try { await app.evaluate(({ app }) => app.exit(0)); } catch {}
-    clearTimeout(watchdog);
-    if (app.process().exitCode === null) app.process().kill('SIGKILL');
+    await app.evaluate(({app})=>app.exit(0)).catch(()=>{});clearTimeout(watchdog);
+    if(app.process().exitCode===null)app.process().kill('SIGKILL');
   }
 }
-main().catch((error) => { console.error(error); process.exitCode = 1; });
+main().catch(error=>{console.error(error);process.exitCode=1;});

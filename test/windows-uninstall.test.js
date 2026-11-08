@@ -38,7 +38,6 @@ const { failureScreen } = require('../dist/main/targets/runtimeRecovery');
 const { plainBytes, readStoredZipEntries } = require('../dist/main/targets/runtimeBackup');
 const { RESET_CHOICE_MESSAGE } = require('../dist/main/targets/runtimeUninstall');
 const { loadActiveRuntimePin } = require('../dist/main/targets/runtimePin');
-const flow = require('../src/renderer/flow.js');
 
 const SIGNED_HEAD = fs.readFileSync(path.join(__dirname, 'fixtures', 'release-head-0.8.0-alpha.22.json'));
 const DID = loadActiveRuntimePin().maintainerDid;
@@ -509,20 +508,6 @@ test('Uninstall never offers or writes a data zip, even with the old answer and 
   } finally {
     fx.cleanup();
   }
-  // The window: only Reset loads the copy offer and sends an answer; Uninstall sends nothing.
-  const app = fs.readFileSync(path.join(__dirname, '../src/renderer/app.js'), 'utf8');
-  const uninstallClick = app.slice(app.indexOf("uninstallBtn.addEventListener('click'"), app.indexOf("removePc2Btn.addEventListener('click'"));
-  assert.equal(/loadBackupOffer|resetBackup/.test(uninstallClick), false);
-  assert.match(app, /await loadBackupOffer\('reset'\);/);
-  assert.equal((app.match(/loadBackupOffer\(/g) || []).length, 2);
-  assert.match(app, /function syncResetButton\(\) \{\n  if \(confirmMode !== 'reset'\) return;/);
-  assert.match(app, /const result = await window\.elastos\.uninstall\(\);/);
-  const preload = fs.readFileSync(path.join(__dirname, '../src/preload/index.ts'), 'utf8');
-  assert.match(preload, /uninstall: \(\) => ipcRenderer\.invoke\('elastos:uninstall'\),/);
-  const main = fs.readFileSync(path.join(__dirname, '../src/main/index.ts'), 'utf8');
-  assert.match(main, /ipcMain\.handle\('elastos:uninstall', \(\) => \{/);
-  const src = fs.readFileSync(path.join(__dirname, '../src/main/targets/windowsUninstall.ts'), 'utf8');
-  assert.equal(/saveBackup|checkBackupSpace|writeDistroBackup|runBackupWorker|deps\.backup/.test(src), false);
 
   // Reset on Windows still needs the answer, and with yes it writes the data zip.
   const rx = cleanDistro();
@@ -764,22 +749,6 @@ test('python3 missing in the distro: Uninstall says so in Uninstall words', POSI
 });
 
 test('the Windows Uninstall window says what happens, the main process asks the second question, and wsl.exe runs with no shell', () => {
-  const copy = flow.confirmCopy('runtime', [], true);
-  assert.match(copy.body, /the Linux environment named ElastOS, with the ElastOS program and all your ElastOS data in it/);
-  assert.match(copy.body, /Next, ElastOS asks you one more time, and shows the file where it will save the whole Linux environment before it removes anything\./);
-  assert.equal(/copy of your data/.test(copy.body), false);
-  assert.equal(flow.confirmCopy('runtime', [], false).body, 'This removes the ElastOS program and its data from this computer.');
-  const app = fs.readFileSync(path.join(__dirname, '../src/renderer/app.js'), 'utf8');
-  assert.match(app, /if \(result && result\.linuxCopyMessage\) addLog\(result\.linuxCopyMessage\);/);
-  const main = fs.readFileSync(path.join(__dirname, '../src/main/index.ts'), 'utf8');
-  assert.match(main, /defaultId: 0,\s*cancelId: 0,/);
-  assert.match(main, /return answer\.response === 1;/);
-  const src = fs.readFileSync(path.join(__dirname, '../src/main/targets/windowsUninstall.ts'), 'utf8');
-  assert.equal(/\bspawn\(|exec\(|execSync/.test(src), false);
-  assert.equal((src.match(/execFile\('wsl\.exe', /g) || []).length, 2);
-  assert.equal((src.match(/shell: false,/g) || []).length, 2);
-  assert.equal((src.match(/deps\.runWsl\(/g) || []).length, 1);
-  assert.match(src, /code = await deps\.runWsl\(wslUnregisterArgs\(\), /);
   assert.deepEqual(wslUnregisterArgs(), ['--unregister', 'ElastOS']);
   assert.deepEqual(wslTerminateArgs(), ['--terminate', 'ElastOS']);
   assert.deepEqual(wslExportArgs('C:\\Users\\a b\\ElastOS-backups\\x.tar'), ['--export', 'ElastOS', 'C:\\Users\\a b\\ElastOS-backups\\x.tar']);

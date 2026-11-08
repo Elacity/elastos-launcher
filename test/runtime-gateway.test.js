@@ -1477,6 +1477,7 @@ test('uninstall removes only the runtime binary and data dir', async () => {
   const home = require('node:path').join(require('node:fs').realpathSync(require('node:os').tmpdir()), 'fixture-home');
   const removed = [];
   await uninstallRuntime({
+    deleteData: true,
     binary: `${home}/.local/bin/elastos`,
     dataDir: `${home}/.local/share/elastos`,
     homeDir: `${home}`,
@@ -1491,6 +1492,7 @@ test('uninstall removes only the runtime binary and data dir', async () => {
   ]);
 
   await assert.rejects(() => uninstallRuntime({
+    deleteData: true,
     binary: `${home}/.local/bin/elastos`,
     dataDir: `${home}/.other`,
     homeDir: `${home}`,
@@ -1502,6 +1504,7 @@ test('uninstall removes only the runtime binary and data dir', async () => {
 
   let stopped = false;
   await assert.rejects(() => uninstallRuntime({
+    deleteData: true,
     binary: `${home}/.local/bin/elastos`,
     dataDir: `${home}/Library/Application Support/elastos`,
     homeDir: `${home}`,
@@ -1785,8 +1788,6 @@ for (const platform of ['darwin', 'linux', 'win32']) {
     await sup.start();
     assert.equal(sup.getLogs().includes('Keep this terminal open'), platform === 'darwin');
     assert.match(sup.getLogs(), /Home ready/);
-    const flow = require('../src/renderer/flow.js');
-    assert.equal(flow.launcherLog('Keep this terminal open. Press Ctrl+C to stop Home.')
-      .includes('Keep this terminal open'), false);
+
   });
 }

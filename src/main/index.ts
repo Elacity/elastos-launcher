@@ -1,368 +1,298 @@
-import { app, BrowserWindow, dialog, ipcMain, Tray, Menu, nativeImage, shell, screen } from 'electron';
+import { app, BrowserWindow, clipboard, dialog, ipcMain, Tray, Menu, nativeImage, shell, screen } from 'electron';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import log from 'electron-log';
-import { createDefaultLaunchController, finishQuitAfterGatewayStop, homeLaunchForPlatform, isLoginLaunch, startHomeAtLogin, homeLogFolder, TargetStatus } from './launchController';
+import { createDefaultLaunchController, finishQuitAfterGatewayStop, isLoginLaunch, startHomeAtLogin, homeLogFolder, TargetStatus } from './launchController';
 import { describeLegacyPc2OnThisComputer, removeLegacyPc2OnThisComputer, withSupportBundle } from './legacyPc2Removal';
-
 import { contentWindowBounds } from './launcherWindow';
+import { buildHomeMenu, HomeState, trayPresentation } from './homeMenu';
+import { createOpenHome } from './openHome';
+import { scrubSupportText } from './targets/preflight';
+import type { UpdateCheck } from './targets/types';
 
-// Chromium must never share the Runtime Home, including on case-insensitive Macs.
-// Set all profile paths before ready, logging, or constructing the controller.
+const platform = process.platform;
+
+// Chromium never shares the Runtime Home, even on case-insensitive Macs.
 const electronData = path.join(os.homedir(), '.elastos-launcher', 'electron');
 fs.mkdirSync(electronData, { recursive: true, mode: 0o700 });
 app.setPath('userData', electronData);
 app.setPath('sessionData', electronData);
-
-// Lock the same profile used by Chromium before constructing the runtime controller.
 if (!app.requestSingleInstanceLock()) app.exit(0);
-app.on('second-instance', () => {
-  void app.whenReady().then(showWindow);
-});
-
 app.setAppLogsPath(path.join(electronData, 'logs'));
-
-const launch = createDefaultLaunchController(process.env);
-
-// Set app name for dock/taskbar and menu bar
 app.setName('ElastOS');
-
-// For macOS, set the name before app is ready
-if (process.platform === 'darwin') {
-  app.name = 'ElastOS';
-}
-
-// Set dock icon on macOS
-if (process.platform === 'darwin') {
-  const iconPath = path.join(__dirname, '../../resources/icon.png');
-  const { nativeImage } = require('electron');
-  const icon = nativeImage.createFromPath(iconPath);
-  if (!icon.isEmpty()) {
-    app.dock?.setIcon(icon);
-  }
-}
-
-let mainWindow: BrowserWindow | null = null;
-let tray: Tray | null = null;
-let isQuitting = false;
-let stopHomeOnQuit = true;
-const quitGate = { started: false, ready: false };
-let currentStatus: TargetStatus = 'stopped';
-let backgroundLogin = false;
-
-function showWindow(): void {
-  backgroundLogin = false;
-  app.dock?.show();
-  if (!mainWindow) createWindow();
-  if (mainWindow?.isMinimized()) mainWindow.restore();
-  mainWindow?.show();
-  mainWindow?.focus();
-}
-
-// Configure logging
 log.transports.file.level = 'info';
 log.transports.console.level = 'debug';
+export const launch = createDefaultLaunchController(process.env);
+let mainWindow: BrowserWindow | null = null;
+let tray: Tray | null = null;
+let currentStatus: TargetStatus = 'stopped';
+let updating = false;
+let busy = false;
+let actionGeneration = 0;
+let menuSignature = '';
+let isQuitting = false;
+let offer: UpdateCheck | null = null;
+let legacyItems: Awaited<ReturnType<typeof describeLegacyPc2OnThisComputer>> = [];
+const quitGate = { started: false, ready: false };
+type WindowState = {
+  kind: 'install' | 'progress' | 'error' | 'update';
+  ready?: boolean; message?: string; actionLabel?: string; releaseNotes?: boolean;
+};
+let windowState: WindowState = { kind: 'install' };
+let retry: (() => Promise<void>) | null = null;
 
-function createWindow(): void {
-  mainWindow = new BrowserWindow({
-    width: 420,
-    height: 360,
-    useContentSize: true,
-    resizable: true,
-    webPreferences: {
-      preload: path.join(__dirname, '../preload/index.js'),
-      contextIsolation: true,
-      nodeIntegration: false
-    },
-    titleBarStyle: process.platform === 'darwin' ? 'hiddenInset' : 'default',
-    backgroundColor: '#18191c',
-    show: false,
-    icon: path.join(__dirname, '../../resources/icon.png')
-  });
-
-  mainWindow.loadFile(path.join(__dirname, '../../src/renderer/index.html'));
-
-  mainWindow.once('ready-to-show', async () => {
-    if (!backgroundLogin) mainWindow?.show();
-    // Replay into this window only. Writing the same lines back to the file
-    // log duplicates them each time macOS creates the window again.
-    const prior = await launch.getLogs();
-    for (const line of prior.split('\n').filter(Boolean)) {
-      mainWindow?.webContents.send('elastos:log', line);
-    }
-
-    // Check initial status
-    currentStatus = await launch.getStatus();
-    mainWindow?.webContents.send('elastos:status', currentStatus);
-  });
-
-  mainWindow.on('close', (event) => {
-    if (!isQuitting) {
-      event.preventDefault();
-      mainWindow?.hide();
-    }
-  });
+function setWindowState(state: WindowState): void {
+  windowState = state;
+  mainWindow?.webContents.send('elastos:windowState', state);
 }
-
-function createTray(): void {
-  const iconPath = path.join(__dirname, '../../resources/icon.png');
-  let icon: Electron.NativeImage;
-  
-  try {
-    icon = nativeImage.createFromPath(iconPath);
-    if (icon.isEmpty()) {
-      icon = nativeImage.createFromDataURL(
-        'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAABHNCSVQICAgIfAhkiAAAAAlwSFlzAAAA7AAAAOwBeShxvQAAABl0RVh0U29mdHdhcmUAd3d3Lmlua3NjYXBlLm9yZ5vuPBoAAAH5SURBVFiF7Ze/axRBFMc/M7t3yUWjhYVYiI2NjQERbfwPrGxEOwsLsRAsLPwPbGwsxMbKQrCwEWzEQrDQRhALC8FCCYiIRuNdkuzujsXu3e7l7nKXM+D3wzDM8N7MZ+a9NzOQUXAIGAN2s+0CtXBkCfgD/AJ+ArPAT2ANWBdRFXgEZuUmcAEodshrA5yECcBTcBB4BZwGfOAZ8ETESv+X+i5wEbiY9H0Z2AmMA/uTvieqGuvpxfMYOJbSrqvOIEACMpAJSAJeAF5S9gM2U2OaAYmqhcAz8BpoBc+BzuuLdEiKZrLMSj0B7JIGFQK1wBM/xhp05QfsBKoNYC8wDzzvFyQJiCeJN8DFaJHXxXJV1tQ68IaYcLrpDyLoJ5APvCOLCRwNVCcJYy2wyQs7KiZlJuoB79oj/wBwtXNOtfYmGIrLWpLK+w5c60UYTANFJOsYcKRPCHPAAWASeMojwChWBxTpFrKu2vQC4BlwyUeFE0KxP0AqYT3JQE+B4SSwH6hnQAFYBO6JqPQKkQZYS5bXgccitP8N/oEKMCGi3C/IEPARuNcvRIb+yO4nngvMAe+Tzr5BkoBBYDfwot9qSOsUyxUNjQ8i6sMggmRoD7nHI/+wHTAGPBNR7hciCRj6LpjCxBpw00d5nyAZGgT2AEv/M/4vmHGRlTWP0ioAAAAASUVORK5CYII='
-      );
-    }
-  } catch (e) {
-    icon = nativeImage.createFromDataURL(
-      'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAABHNCSVQICAgIfAhkiAAAAAlwSFlzAAAA7AAAAOwBeShxvQAAABl0RVh0U29mdHdhcmUAd3d3Lmlua3NjYXBlLm9yZ5vuPBoAAAH5SURBVFiF7Ze/axRBFMc/M7t3yUWjhYVYiI2NjQERbfwPrGxEOwsLsRAsLPwPbGwsxMbKQrCwEWzEQrDQRhALC8FCCYiIRuNdkuzujsXu3e7l7nKXM+D3wzDM8N7MZ+a9NzOQUXAIGAN2s+0CtXBkCfgD/AJ+ArPAT2ANWBdRFXgEZuUmcAEodshrA5yECcBTcBB4BZwGfOAZ8ETESv+X+i5wEbiY9H0Z2AmMA/uTvieqGuvpxfMYOJbSrqvOIEACMpAJSAJeAF5S9gM2U2OaAYmqhcAz8BpoBc+BzuuLdEiKZrLMSj0B7JIGFQK1wBM/xhp05QfsBKoNYC8wDzzvFyQJiCeJN8DFaJHXxXJV1tQ68IaYcLrpDyLoJ5APvCOLCRwNVCcJYy2wyQs7KiZlJuoB79oj/wBwtXNOtfYmGIrLWpLK+w5c60UYTANFJOsYcKRPCHPAAWASeMojwChWBxTpFrKu2vQC4BlwyUeFE0KxP0AqYT3JQE+B4SSwH6hnQAFYBO6JqPQKkQZYS5bXgccitP8N/oEKMCGi3C/IEPARuNcvRIb+yO4nngvMAe+Tzr5BkoBBYDfwot9qSOsUyxUNjQ8i6sMggmRoD7nHI/+wHTAGPBNR7hciCRj6LpjCxBpw00d5nyAZGgT2AEv/M/4vmHGRlTWP0ioAAAAASUVORK5CYII='
-    );
+function showWindow(state: WindowState): void {
+  setWindowState(state);
+  if (!mainWindow) {
+    const window = new BrowserWindow({
+      width: 360, height: 320, useContentSize: true, resizable: false,
+      webPreferences: { preload: path.join(__dirname, '../preload/index.js'), contextIsolation: true, nodeIntegration: false },
+      titleBarStyle: platform === 'darwin' ? 'hiddenInset' : 'default',
+      backgroundColor: '#f5f5f5', show: false, autoHideMenuBar: true,
+      icon: path.join(__dirname, '../../resources/icon.png'),
+    });
+    mainWindow = window;
+    window.loadFile(path.join(__dirname, '../../src/renderer/index.html'));
+    window.once('ready-to-show', () => { window.show(); window.focus(); });
+    window.on('closed', () => { mainWindow = null; });
+  } else {
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.show(); mainWindow.focus();
   }
-
-  tray = new Tray(icon.resize({ width: 16, height: 16 }));
-  (global as typeof globalThis & { __elastosTray?: true }).__elastosTray = true;
-  tray.setToolTip('ElastOS');
-  updateTrayMenu();
-
-  tray.on('click', () => {
-    if (mainWindow?.isVisible()) {
-      mainWindow.hide();
-    } else {
-      showWindow();
-    }
-  });
 }
-
-function updateTrayMenu(): void {
-  const statusLabels: Record<TargetStatus, string> = {
-    'running': '🟢 Running',
-    'stopped': '⚫ Stopped',
-    'starting': '🟡 Starting...',
-    'stopping': '🟡 Stopping...',
-    'error': '🔴 Error',
-    'not-installed': '⚪ Not Installed',
-    'other-home': 'another ElastOS Home is running',
-  };
-
-  const contextMenu = Menu.buildFromTemplate([
-    { label: `Status: ${statusLabels[currentStatus]}`, enabled: false },
-    { type: 'separator' },
-    {
-      label: 'Start',
-      enabled: currentStatus === 'stopped' || currentStatus === 'error',
-      click: () => { void launch.start(); }
-    },
-    {
-      label: 'Stop',
-      visible: currentStatus !== 'other-home',
-      enabled: currentStatus === 'running',
-      click: () => { void launch.stop(); }
-    },
-    { type: 'separator' },
-    {
-      label: 'Open Home',
-      enabled: currentStatus === 'running',
-      click: () => launch.openInBrowser()
-    },
-    { type: 'separator' },
-    { label: 'Show Window', click: showWindow },
-    ...(homeLaunchForPlatform(process.platform).offerKeepHomeOnQuit ? [{
-      id: 'quit-keep-home',
-      label: 'Quit and keep Home',
-      click: () => {
-        stopHomeOnQuit = false;
-        isQuitting = true;
-        app.quit();
-      },
-    }] : []),
-    {
-      id: 'quit-stop-home',
-      label: 'Quit and stop Home',
-      click: () => {
-        stopHomeOnQuit = true;
-        isQuitting = true;
-        app.quit();
-      }
-    }
-  ]);
-
-  tray?.setContextMenu(contextMenu);
-  (global as typeof globalThis & { __elastosTrayMenu?: Menu }).__elastosTrayMenu = contextMenu;
+function closeWindow(): void { mainWindow?.close(); }
+async function showError(error: unknown, again: (() => Promise<void>) | null = null): Promise<void> {
+  log.error(error instanceof Error ? error.message : String(error));
+  retry = again;
+  const failure = await launch.describeFailure().catch(() => null);
+  const message = failure?.message || (error instanceof Error ? error.message : String(error));
+  showWindow({ kind: 'error', message: message.split(/(?<=[.!?])\s/)[0],
+    actionLabel: failure?.fixLabel ? 'Try Again' : (again ? 'Try Again' : 'Show Logs') });
 }
-
-// Set up status change listener
-launch.onStatusChange((status) => {
-  currentStatus = status;
-  mainWindow?.webContents.send('elastos:status', status);
-  updateTrayMenu();
-});
-
-launch.onActionSuccess(() => mainWindow?.webContents.send('elastos:actionSuccess'));
-
-// Set up log listener
-launch.onLog((logMessage) => {
-  mainWindow?.webContents.send('elastos:log', logMessage);
-});
-
-// IPC handlers. The preload exposes these as window.elastos.
-ipcMain.on('elastos:contentSize', (event, height: unknown) => {
-  if (!mainWindow || event.sender !== mainWindow.webContents || typeof height !== 'number'
-    || !Number.isFinite(height) || height <= 0) return;
-  const bounds = mainWindow.getBounds();
-  mainWindow.setBounds(contentWindowBounds(height, bounds, mainWindow.getContentBounds(),
-    screen.getDisplayMatching(bounds).workArea));
-});
-ipcMain.handle('elastos:openLogFolder', async () => {
-  const folder = homeLogFolder(process.platform, os.homedir(), process.env);
-  const error = await shell.openPath(folder);
+async function perform(action: () => Promise<void>): Promise<void> {
+  if (busy || isQuitting) return;
+  busy = true;
+  actionGeneration++;
+  updateMenu();
+  try { await action(); } catch (error) { await showError(error, action); }
+  finally { busy = false; currentStatus = await launch.getStatus().catch(() => 'error'); updateMenu(); }
+}
+// Signed 2.0.0's Home command opens the browser itself on a cold start.
+async function startHome(): Promise<void> { currentStatus = 'starting'; updateMenu(); await launch.start(); }
+async function stopHome(): Promise<void> { currentStatus = 'stopping'; updateMenu(); await launch.stop(); }
+const openHome = createOpenHome({ getStatus: () => launch.getStatus(), start: startHome, openInBrowser: () => launch.openInBrowser() }, () => showWindow({ kind: 'install' }), true);
+async function openApp(): Promise<void> { await perform(openHome); }
+async function copyDiagnostics(): Promise<void> {
+  const file = log.transports.file.getFile().path;
+  let tail = '';
+  let fd: number | undefined;
+  try {
+    fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+    const stat = fs.fstatSync(fd);
+    if (stat.isFile()) {
+      const bytes = Buffer.alloc(Math.min(stat.size, 64 * 1024));
+      const count = fs.readSync(fd, bytes, 0, bytes.length, Math.max(0, stat.size - bytes.length));
+      tail = bytes.subarray(0, count).toString('utf8');
+    }
+  } catch { /* The current session diagnostics are still available. */ }
+  finally { if (fd !== undefined) fs.closeSync(fd); }
+  clipboard.writeText(scrubSupportText(`${await launch.getDiagnostics()}\n${tail}`));
+}
+async function showLogs(): Promise<void> {
+  const error = await shell.openPath(homeLogFolder(platform, os.homedir(), process.env));
   if (error) throw new Error(error);
-});
-ipcMain.handle('elastos:getStatus', () => launch.getStatus());
-ipcMain.handle('elastos:start', () => launch.start());
-ipcMain.handle('elastos:stop', () => launch.stop());
-ipcMain.handle('elastos:restart', () => launch.restart());
-ipcMain.handle('elastos:getLogs', (_, lines) => launch.getLogs(lines));
-ipcMain.handle('elastos:isInstalled', () => launch.isInstalled());
-ipcMain.handle('elastos:openBrowser', () => launch.openInBrowser());
-ipcMain.handle('elastos:install', async (event) => {
-  return launch.install((msg) => {
-    event.sender.send('elastos:installProgress', msg);
-  });
-});
-
-ipcMain.handle('elastos:uninstall', () => {
-  // The second question on Windows, asked here in the main process so the
-  // window alone cannot answer it. Cancel is the default button.
-  const confirmRemoval = async (prompt: { title: string; message: string; detail: string; confirmLabel: string; cancelLabel: string }) => {
-    const options = {
-      type: 'warning' as const,
-      title: prompt.title,
-      message: prompt.message,
-      detail: prompt.detail,
-      buttons: [prompt.cancelLabel, prompt.confirmLabel],
-      defaultId: 0,
-      cancelId: 0,
-      noLink: true,
-    };
-    const answer = mainWindow ? await dialog.showMessageBox(mainWindow, options) : await dialog.showMessageBox(options);
-    return answer.response === 1;
-  };
-  return launch.uninstall(confirmRemoval);
-});
-ipcMain.handle('elastos:resetRuntime', (_event, choice: unknown) => {
-  const backup = choice && typeof choice === 'object' ? (choice as { backup?: unknown }).backup : undefined;
-  return launch.resetRuntime({ backup });
-});
-ipcMain.handle('elastos:describeResetBackup', () => launch.describeResetBackup());
-
-// Version and updates
-ipcMain.handle('elastos:getVersion', () => launch.getVersion());
-ipcMain.handle('elastos:checkForUpdate', () => launch.checkForUpdate());
-ipcMain.handle('elastos:update', async (event) => {
-  return launch.update((msg) => {
-    event.sender.send('elastos:updateProgress', msg);
-  });
-});
-
-ipcMain.handle('elastos:getLaunchInfo', () => launch.getLaunchInfo());
-ipcMain.handle('elastos:getPreflight', () => launch.getPreflight());
-ipcMain.handle('elastos:getDiagnostics', () => launch.getDiagnostics());
-ipcMain.handle('elastos:saveSupportBundle', () => launch.saveSupportBundle());
-ipcMain.handle('elastos:describeLegacyPc2', async () => ({ items: await describeLegacyPc2OnThisComputer() }));
-ipcMain.handle('elastos:removeLegacyPc2', async (_event, backup: unknown, paths: unknown) => {
-  const confirmed = Array.isArray(paths) ? paths.filter((entry): entry is string => typeof entry === 'string') : [];
-  const result = await removeLegacyPc2OnThisComputer({ backup: backup === true, paths: confirmed });
-  if (result.ok) return result;
-  let bundle = '';
-  try {
-    bundle = await launch.saveSupportBundle();
-  } catch {
-    bundle = '';
+}
+async function confirm(options: Electron.MessageBoxOptions): Promise<Electron.MessageBoxReturnValue> {
+  return mainWindow ? dialog.showMessageBox(mainWindow, options) : dialog.showMessageBox(options);
+}
+async function reset(): Promise<void> {
+  const backup = await launch.describeResetBackup();
+  if ('blocked' in backup && backup.blocked) throw new Error(String(backup.blocked));
+  const answer = await confirm({ type: 'warning', title: 'Reset ElastOS', message: 'Reset ElastOS?',
+    detail: 'This removes ElastOS and your Home data so you can install it again.',
+    buttons: ['Cancel', 'Reset'], defaultId: 0, cancelId: 0, noLink: true,
+    ...(backup.present ? { checkboxLabel: backup.enough ? 'Back Up First' : 'Reset Without a Backup', checkboxChecked: backup.enough } : {}) });
+  if (answer.response !== 1) return;
+  if (backup.present && !backup.enough && !answer.checkboxChecked) return;
+  await launch.resetRuntime({ backup: backup.present && backup.enough && answer.checkboxChecked });
+  showWindow({ kind: 'install' });
+}
+async function uninstall(): Promise<void> {
+  const answer = await confirm({ type: 'warning', title: 'Uninstall ElastOS', message: 'Uninstall ElastOS?',
+    detail: 'This removes ElastOS from this computer and keeps your Home data unless you choose to delete it.',
+    checkboxLabel: 'Also delete my Home data', checkboxChecked: false,
+    buttons: ['Cancel', 'Uninstall'], defaultId: 0, cancelId: 0, noLink: true });
+  if (answer.response !== 1) return;
+  const result = await launch.uninstall(async prompt => (await confirm({ type: 'warning', title: prompt.title,
+    message: prompt.message, detail: prompt.detail, buttons: [prompt.cancelLabel, prompt.confirmLabel],
+    defaultId: 0, cancelId: 0, noLink: true })).response === 1, answer.checkboxChecked);
+  if (result?.linuxCopyMessage) log.info(result.linuxCopyMessage);
+  launch.setOpenAtLogin(false);
+  closeWindow();
+}
+async function removePc2(): Promise<void> {
+  const items = await describeLegacyPc2OnThisComputer();
+  if (!items.length) return;
+  const answer = await confirm({ type: 'warning', title: 'Remove Old PC2 Files', message: 'Remove old PC2 files?',
+    detail: `PC2 was the earlier ElastOS Personal Cloud app; this removes its old files.\n${items.map(item => item.path).join('\n')}`,
+    checkboxLabel: 'Back Up First', checkboxChecked: true,
+    buttons: ['Cancel', 'Remove'], defaultId: 0, cancelId: 0, noLink: true });
+  if (answer.response !== 1) return;
+  const result = await removeLegacyPc2OnThisComputer({ backup: answer.checkboxChecked, paths: items.map(item => item.path) });
+  if (!result.ok) {
+    const bundle = await launch.saveSupportBundle().catch(() => '');
+    throw new Error(bundle ? withSupportBundle(result.message, bundle) : result.message);
   }
-  const message = bundle ? withSupportBundle(result.message, bundle) : result.message;
-  throw new Error(message);
-});
-ipcMain.handle('elastos:describeFailure', () => launch.describeFailure());
-ipcMain.handle('elastos:fixFailure', () => launch.fixFailure());
-ipcMain.handle('elastos:resumeInstallPlan', () => launch.resumeInstallPlan());
-ipcMain.handle('elastos:finishResumeInstall', (_event, ok: unknown) => {
-  launch.finishResumeInstall(ok === true);
-});
-ipcMain.handle('elastos:setOpenAtLogin', (_, enabled: boolean) => {
-  launch.setOpenAtLogin(enabled);
-  return launch.getOpenAtLogin();
-});
-ipcMain.handle('elastos:rollback', async (event) => {
-  return launch.rollback((msg) => {
-    event.sender.send('elastos:updateProgress', msg);
+  await refreshMaintenance();
+}
+function updateMenu(): void {
+  if (!tray) return;
+  const status: HomeState = updating ? 'updating' : currentStatus;
+  const state = { status, platform: platform, busy, login: launch.getOpenAtLogin(), pc2: legacyItems.length > 0, update: offer };
+  const signature = JSON.stringify(state);
+  if (signature === menuSignature) return;
+  menuSignature = signature;
+  const presentation = trayPresentation(status);
+  const icon = nativeImage.createFromPath(path.join(__dirname, `../../resources/tray/${presentation.image}${platform === 'darwin' ? 'Template' : ''}.png`)).resize({ width: 18, height: 18 });
+  if (platform === 'darwin') icon.setTemplateImage(true);
+  tray.setImage(icon);
+  tray.setToolTip(presentation.tooltip);
+  const template = buildHomeMenu(state, {
+    open: () => { void openApp(); }, start: () => { void perform(startHome); }, stop: () => { void perform(stopHome); },
+    update: () => { if (offer) showWindow({ kind: 'update', message: `Update ElastOS to ${offer.latest}?`, releaseNotes: Boolean(offer.releaseUrl) }); },
+    login: enabled => { void perform(async () => { launch.setOpenAtLogin(enabled); }); },
+    diagnostics: () => { void copyDiagnostics().catch(error => showError(error)); }, logs: () => { void showLogs().catch(error => showError(error)); },
+    removePc2: () => { void perform(removePc2); }, reset: () => { void perform(reset); }, uninstall: () => { void perform(uninstall); },
+    about: () => app.showAboutPanel(), quit: () => app.quit(),
   });
-});
+  const menu = Menu.buildFromTemplate(template);
+  tray.setContextMenu(menu);
+  if (platform === 'darwin') Menu.setApplicationMenu(Menu.buildFromTemplate([
+    { label: 'ElastOS', submenu: template }, { role: 'editMenu' },
+  ]));
+  // Real Electron menu objects, used by the packaged CI tests.
+  (global as typeof globalThis & { __elastosTrayMenu?: Menu; __elastosTrayState?: string }).__elastosTrayMenu = menu;
+  (global as typeof globalThis & { __elastosTrayState?: string }).__elastosTrayState = presentation.image;
+}
+async function refreshMaintenance(): Promise<void> {
+  legacyItems = await describeLegacyPc2OnThisComputer().catch(error => { log.warn(String(error)); return []; });
+  offer = await launch.checkForUpdate().catch(error => { log.warn(String(error)); return null; });
+  updateMenu();
+}
+function step(message: string): void {
+  log.info(message);
+  setWindowState({ kind: 'progress', message: /start|home ready/i.test(message) ? 'Starting Home' : /download|fetch/i.test(message) ? 'Downloading' : 'Setting up' });
+}
+async function install(login: boolean): Promise<void> {
+  await perform(async () => {
+    launch.setOpenAtLogin(login);
+    currentStatus = 'starting'; updateMenu();
+    showWindow({ kind: 'progress', message: 'Downloading' });
+    await launch.install(step);
+    setWindowState({ kind: 'install', ready: true, message: 'Home is ready.' });
+    void refreshMaintenance();
+  });
+}
+async function update(): Promise<void> {
+  if (!offer?.updateAvailable) return;
+  await perform(async () => {
+    updating = true; updateMenu();
+    showWindow({ kind: 'progress', message: 'Downloading' });
+    try {
+      await launch.update(step);
+      if (await launch.getStatus() !== 'running') await launch.start();
+      offer = null;
+      closeWindow();
+    } finally { updating = false; }
+  });
+}
+launch.onStatusChange(status => { currentStatus = status; updateMenu(); });
+launch.onLog(message => log.info(message));
 
-// App lifecycle
+// Only the current small window may invoke its actions. No destructive renderer IPC.
+function handle(name: string, action: (...args: any[]) => unknown): void {
+  ipcMain.handle(`elastos:${name}`, (event, ...args) => {
+    if (event.sender !== mainWindow?.webContents) throw new Error('Unknown window.');
+    return action(...args);
+  });
+}
+handle('getWindowState', () => windowState);
+handle('install', login => windowState.kind === 'install' && !windowState.ready ? install(login === true) : undefined);
+handle('update', () => windowState.kind === 'update' ? update() : undefined);
+handle('retry', () => perform(async () => {
+  const failure = await launch.describeFailure();
+  if (failure.fixLabel) {
+    if (platform === 'win32' && failure.kind === 'windows') {
+      const answer = await confirm({ type: 'question', title: 'Set Up ElastOS', message: 'Set up ElastOS on this computer?',
+        detail: 'Windows may ask for permission to enable Linux support and may need to restart.',
+        buttons: ['Cancel', 'Set Up'], defaultId: 0, cancelId: 0, noLink: true });
+      if (answer.response !== 1) return;
+    }
+    const result = await launch.fixFailure();
+    const windowsReady = failure.kind === 'windows' && !(await launch.getPreflight()).checks
+      .some(check => check.id === 'windows' && check.level === 'block');
+    if (windowsReady && retry) await retry();
+    else if (result === 'ready') {
+      if (await launch.isInstalled()) { await openHome(); closeWindow(); }
+      else showWindow({ kind: 'install' });
+    }
+    else await showError(new Error((await launch.describeFailure()).message), retry);
+  } else if (retry) await retry();
+  else await showLogs();
+}));
+handle('openHome', async () => { await openApp(); if (windowState.kind !== 'error') closeWindow(); });
+handle('copyDiagnostics', copyDiagnostics);
+handle('releaseNotes', () => { if (offer?.releaseUrl && /^https:\/\//.test(offer.releaseUrl)) return shell.openExternal(offer.releaseUrl); });
+handle('closeWindow', closeWindow);
+ipcMain.on('elastos:contentSize', (event, height: unknown) => {
+  if (!mainWindow || event.sender !== mainWindow.webContents || typeof height !== 'number' || !Number.isFinite(height) || height <= 0) return;
+  const bounds = mainWindow.getBounds();
+  mainWindow.setBounds(contentWindowBounds(Math.max(320, height), bounds, mainWindow.getContentBounds(), screen.getDisplayMatching(bounds).workArea));
+});
+app.on('second-instance', () => { void app.whenReady().then(openApp); });
+app.on('activate', () => { void openApp(); });
+app.on('window-all-closed', () => {});
 app.whenReady().then(async () => {
-  backgroundLogin = isLoginLaunch(process.platform, process.argv,
-    process.platform === 'darwin' ? app.getLoginItemSettings() : {});
-  if (backgroundLogin) app.dock?.hide();
-  createWindow();
-  if (process.platform === 'darwin') {
-    Menu.setApplicationMenu(Menu.buildFromTemplate([{ label: 'ElastOS', submenu: [
-      { role: 'about' }, { type: 'separator' }, { label: 'Quit and stop Home', accelerator: 'Command+Q', click: () => app.quit() },
-    ] }, { role: 'editMenu' }, { role: 'windowMenu' }]));
-  }
-  createTray();
-  // Refresh while the window is hidden too. Runtime's signed Home controller
-  // owns System updates and keeps its child alive across binary replacement.
+  app.dock?.hide();
+  app.setAboutPanelOptions({ applicationName: 'ElastOS', applicationVersion: '2.0.0', version: '', copyright: 'Copyright © Elacity Labs', iconPath: path.join(__dirname, '../../resources/icon.png') });
+  if (platform !== 'darwin') Menu.setApplicationMenu(null);
+  tray = new Tray(nativeImage.createFromPath(path.join(__dirname, '../../resources/tray/stoppedTemplate.png')));
+  (global as typeof globalThis & { __elastosTray?: true }).__elastosTray = true;
+  updateMenu();
+  // macOS and Linux show their attached context menu on primary activation.
+  if (platform === 'win32') tray.on('click', () => tray?.popUpContextMenu());
+  const login = isLoginLaunch(platform, process.argv, platform === 'darwin' ? app.getLoginItemSettings() : {});
+  if (launch.getOpenAtLogin()) launch.setOpenAtLogin(true);
+  if (login) await perform(() => startHomeAtLogin(launch.getOpenAtLogin(), launch));
+  else if (await launch.resumeInstallPlan() === 'install') {
+    await install(launch.getOpenAtLogin());
+    launch.finishResumeInstall(windowState.ready === true);
+  } else await openApp();
+  void refreshMaintenance();
   let checkingStatus = false;
   const statusTimer = setInterval(async () => {
-    if (checkingStatus || isQuitting) return;
+    if (busy || isQuitting || checkingStatus) return;
     checkingStatus = true;
+    const generation = actionGeneration;
     try {
-      currentStatus = await launch.getStatus();
-      mainWindow?.webContents.send('elastos:status', currentStatus);
-      updateTrayMenu();
-    } catch (err) {
-      log.error(err instanceof Error ? err.message : String(err));
-    } finally {
-      checkingStatus = false;
-    }
+      const status = await launch.getStatus();
+      if (!busy && generation === actionGeneration) { currentStatus = status; updateMenu(); }
+    } catch (error) { log.error(String(error)); }
+    finally { checkingStatus = false; }
   }, 2000);
   statusTimer.unref();
-  if (launch.getOpenAtLogin()) launch.setOpenAtLogin(true);
-  try {
-    await startHomeAtLogin(backgroundLogin && launch.getOpenAtLogin(), launch);
-  } catch (err) {
-    log.error(err instanceof Error ? err.message : String(err));
-  }
-});
-
-app.on('window-all-closed', () => {
-  if (homeLaunchForPlatform(process.platform).quitWhenLastWindowCloses) {
-    isQuitting = true;
-    app.quit();
-  }
-});
-
-app.on('activate', showWindow);
-
-app.on('before-quit', (event) => {
+  const updateTimer = setInterval(() => { if (!busy && !isQuitting) void refreshMaintenance(); }, 60 * 60 * 1000);
+  updateTimer.unref();
+}).catch(error => { void showError(error); });
+app.on('before-quit', event => {
   isQuitting = true;
-  if (!stopHomeOnQuit) return;
-  void finishQuitAfterGatewayStop(quitGate, event, () => launch.shutdown(), () => {
-    app.quit();
-  }, {
-    log: (line) => log.error(line),
-    onBudget: () => launch.forceStopGateway(),
-    onStopping: () => {
-      currentStatus = 'stopping';
-      tray?.setToolTip('Stopping ElastOS…');
-      mainWindow?.webContents.send('elastos:status', 'stopping');
-      updateTrayMenu();
-      log.info('Stopping ElastOS before quit.');
-    },
-  }).catch((err: unknown) => {
-    log.error(err instanceof Error ? err.message : String(err));
-  });
+  void finishQuitAfterGatewayStop(quitGate, event, () => launch.shutdown(), () => app.quit(), {
+    log: line => log.error(line), onBudget: () => launch.forceStopGateway(),
+    onStopping: () => { currentStatus = 'stopping'; updateMenu(); log.info('Stopping Home before quit.'); },
+  }).catch(error => log.error(String(error)));
 });

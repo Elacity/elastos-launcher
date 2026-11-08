@@ -68,7 +68,7 @@ export interface LaunchTarget {
   install(onProgress: (message: string) => void): Promise<void>;
   update(onProgress: (message: string) => void): Promise<void>;
   rollback(onProgress?: (message: string) => void): Promise<void>;
-  uninstall(): Promise<void>;
+  uninstall(deleteData?: boolean): Promise<void>;
   getVersion(): string;
   checkForUpdate(): Promise<UpdateCheck>;
   openInBrowser(): void;

@@ -136,172 +136,46 @@ async function main() {
   }
 
   try {
-    if (process.platform === 'win32') {
-      await electronApp.evaluate(({ shell }) => {
-        global.__launcherOpened = [];
-        shell.openExternal = async (url) => { global.__launcherOpened.push(url); };
-      });
-    }
+    await electronApp.evaluate(({ shell }) => {
+      global.__openedHome = [];
+      shell.openExternal = async url => { global.__openedHome.push(url); };
+    });
     const page = await electronApp.firstWindow();
-    const readyDeadline = Date.now() + 60000;
-    let clicked = '';
-    while (Date.now() < readyDeadline && !clicked) {
-      const label = (await page.locator('#open-label').innerText({ timeout: 5000 })).trim();
-      const disabled = await page.locator('#open-btn').isDisabled();
-      if (label === 'Install' && !disabled) {
-        // firstWindow can precede startup navigation. Instrument only after
-        // the real Install screen is ready, before its first control action.
-        if (process.platform === 'darwin') {
-          await electronApp.evaluate(({ shell }) => {
-            global.__installBrowserCalls = [];
-            shell.openExternal = async (url) => { global.__installBrowserCalls.push(url); };
-          });
+    await page.locator('#primary').waitFor({ state: 'visible' });
+    if ((await page.locator('#primary').innerText()) !== 'Install') throw new Error('Expected Install');
+    if (process.platform === 'darwin') {
+      const native = require('./mac-native').nativeControls(electronApp, page);
+      await native.drag();
+      await native.click('#primary');
+    } else await page.click('#primary');
+    const { waitFor } = require('./tray-e2e');
+    let fixedWindows = false;
+    await waitFor(async () => {
+      const kind = await page.getAttribute('body', 'data-state');
+      const label = await page.locator('#primary').innerText();
+      if (kind === 'error') {
+        const message = await page.locator('#message').innerText();
+        if (process.platform === 'win32' && !fixedWindows) {
+          fixedWindows = true; await page.click('#primary'); return false;
         }
-        await page.click('#open-btn');
-        clicked = label;
-        break;
+        throw new Error(message);
       }
-      await page.waitForTimeout(200);
-    }
-    if (!clicked) {
-      const label = (await page.locator('#open-label').innerText()).trim();
-      const logs = await page.locator('#logs-content').textContent();
-      console.log('----- install log -----');
-      console.log(logs);
-      throw new Error(`Install button did not become ready (button is ${label})`);
-    }
-    console.log(`Clicked ${clicked}`);
-
-    // Windows has no ElastOS distro yet, so Install stops on "Click Set up".
-    // Fix it imports that distro and leaves the gateway down, so the button
-    // returns to Install and the click has to run the real install.
-    const budgetMs = process.platform === 'win32' ? 45 * 60 * 1000 : 20 * 60 * 1000;
-    const deadline = Date.now() + budgetMs;
-    let lastPrinted = 0;
-    let label = '';
-    let windowsFix = 'pending';
-    while (Date.now() < deadline) {
-      label = (await page.locator('#open-label').innerText()).trim();
-      const logs = await page.locator('#logs-content').textContent();
-      const errorVisible = await page.locator('#status-text').getAttribute('data-error') === 'true';
-      const errorText = (await page.locator('#status-text').innerText()).trim();
-      const openDisabled = await page.locator('#open-btn').isDisabled();
-      if (Date.now() - lastPrinted > 30000) {
-        const tail = logs.split('\n').filter(Boolean).slice(-3).join(' | ');
-        console.log(`button=${label} log=${tail || '(empty)'}`);
-        lastPrinted = Date.now();
-      }
-      if (label === 'Open Home') {
-        console.log('----- install log -----');
-        console.log(logs);
-        for (const line of REQUIRED_LOGS) {
-          if (!logs.includes(line)) {
-            throw new Error(`Install log is missing: ${line}`);
-          }
-        }
-        if (HOME_URL !== EXPECTED_HOME) {
-          throw new Error(`The launcher opens ${HOME_URL}, not ${EXPECTED_HOME}`);
-        }
-        const shown = (await page.locator('#url-value').innerText()).trim();
-        if (shown !== EXPECTED_HOME) {
-          throw new Error(`The window shows ${shown}, expected ${EXPECTED_HOME}`);
-        }
-        const health = await probeGatewayHealth();
-        if (!isHealthOk(health)) {
-          throw new Error(`/healthz on localhost was not OK (${health ? `HTTP ${health.status}` : 'no answer'})`);
-        }
-        console.log(`Home is ${HOME_URL}; /healthz is OK on ${health.addresses.join(', ')}`);
-        const browserRowHidden = await page.locator('#browser-row').evaluate((node) => node.classList.contains('hidden'));
-        const browserText = (await page.locator('#browser-note').innerText()).trim();
-        if (process.platform === 'win32') {
-          if (browserRowHidden || browserText !== 'Browser is not available on this computer yet.') {
-            throw new Error(`Windows must say the Browser is not available yet (shown: ${browserRowHidden ? 'hidden' : browserText})`);
-          }
-          console.log(`Browser note: ${browserText}`);
-        } else if (!browserRowHidden) {
-          throw new Error(`Only Windows shows a Browser note (shown: ${browserText})`);
-        }
-        console.log('Install reached Open Home');
-        if (process.platform === 'darwin') {
-          if ((await electronApp.evaluate(() => global.__installBrowserCalls)).length !== 0) {
-            throw new Error('Mac Install opened a duplicate browser tab after home --browser');
-          }
-          console.log('PASS Mac Install leaves the browser open to home --browser without a duplicate launcher call');
-          electronApp = await require('./mac-lifecycle-e2e')(electronApp, page, home, {
-            executablePath: electronPath, cwd: root, args, env, timeout: 120000,
-          });
-        }
-        if (process.platform === 'linux') {
-          await require('./linux-lifecycle-e2e')(electronApp, page, home, {
-            executablePath: electronPath, cwd: root, args, env, timeout: 120000,
-          });
-        }
-        if (process.platform === 'win32') {
-          const opened = await electronApp.evaluate(() => global.__launcherOpened);
-          if (!Array.isArray(opened) || opened.length !== 0) {
-            throw new Error(`Install opened a browser tab after Start: ${JSON.stringify(opened)}`);
-          }
-          console.log('PASS install did not open a second browser tab');
-          electronApp = await require('./windows-lifecycle-e2e')(electronApp, page, home);
-        }
-        return;
-      }
-      if (errorVisible && errorText && /Set up ElastOS on Windows|Windows needs Linux support|Windows needs one step|ElastOS on Windows/.test(errorText)) {
-        const fixHidden = await page.locator('#fix-btn').evaluate((node) => node.classList.contains('hidden'));
-        const fixDisabled = await page.locator('#fix-btn').isDisabled();
-        if (process.platform === 'win32' && windowsFix === 'pending' && !fixHidden && !fixDisabled) {
-          await page.click('#fix-btn');
-          windowsFix = 'running';
-          console.log('Clicked Fix it to add the ElastOS Linux environment');
-        } else if (process.platform === 'win32' && windowsFix === 'running' && !fixHidden && !fixDisabled) {
-          // Fix it imports the distro and leaves the gateway down, so the
-          // screen can say it still needs attention. Install is the next click.
-          if ((label === 'Install' || label === 'Try again') && !openDisabled) {
-            await page.click('#open-btn');
-            windowsFix = 'installing';
-            console.log('Clicked Install after Windows setup');
-            await page.waitForTimeout(1000);
-            continue;
-          }
-          console.log('----- install log -----');
-          console.log(logs);
-          throw new Error(errorText);
-        }
-        await page.waitForTimeout(1000);
-        continue;
-      }
-      const fixHidden = errorVisible
-        ? await page.locator('#fix-btn').evaluate((node) => node.classList.contains('hidden'))
-        : true;
-      const fixDisabled = await page.locator('#fix-btn').isDisabled();
-      if (process.platform === 'win32' && windowsFix === 'running' && (label === 'Install' || label === 'Try again') && !openDisabled && fixHidden && !fixDisabled) {
-        await page.click('#open-btn');
-        windowsFix = 'installing';
-        console.log('Clicked Install after Windows setup');
-        await page.waitForTimeout(1000);
-        continue;
-      }
-      if ((windowsFix === 'running' || windowsFix === 'installing') && (label === 'Working…' || openDisabled)) {
-        await page.waitForTimeout(1000);
-        continue;
-      }
-      const windowsSetupRunning = process.platform === 'win32' && windowsFix === 'running';
-      if (errorVisible && errorText && !(windowsSetupRunning && errorText === 'That still needs attention.')) {
-        console.log('----- install log -----');
-        console.log(logs);
-        throw new Error(errorText);
-      }
-      if (label === 'Try again') {
-        console.log('----- install log -----');
-        console.log(logs);
-        throw new Error(errorText || 'Install ended on Try again');
-      }
-      await page.waitForTimeout(1000);
-    }
-    const logs = await page.locator('#logs-content').textContent();
-    console.log('----- install log -----');
-    console.log(logs);
-    throw new Error(`Install did not reach Open Home (button is ${label})`);
+      if (fixedWindows && kind === 'install' && label === 'Install') { await page.click('#primary'); return false; }
+      return label === 'Open Home' && kind === 'install';
+    }, process.platform === 'win32' ? 45*60*1000 : 20*60*1000, 'Install did not reach Home is ready');
+    if (await page.locator('#message').innerText() !== 'Home is ready.') throw new Error('Missing ready confirmation');
+    const diagnostics = await page.evaluate(() => window.elastos.copyDiagnostics());
+    const text = await electronApp.evaluate(({clipboard})=>clipboard.readText());
+    for (const line of REQUIRED_LOGS) if (!text.includes(line)) throw new Error(`Missing install evidence: ${line}`);
+    if (HOME_URL !== EXPECTED_HOME || !isHealthOk(await probeGatewayHealth())) throw new Error('Home is not healthy');
+    console.log('PASS install through window reaches Home is ready with signed-install evidence');
+    if (process.platform === 'darwin') await require('./mac-native').nativeControls(electronApp,page).click('#primary');
+    else await page.click('#primary');
+    await waitFor(()=>electronApp.evaluate(()=>global.__openedHome.includes('http://localhost:8090/home/')),10000,'Open Home did not open localhost');
+    await require('./tray-e2e').noWindow(electronApp);
+    const options = {executablePath:electronPath,cwd:root,args,env,timeout:120000};
+    electronApp = await require(`./${process.platform === 'darwin' ? 'mac' : process.platform === 'win32' ? 'windows' : 'linux'}-lifecycle-e2e`)(electronApp, page, home, options);
+    return;
   } finally {
     const exiting = electronApp.evaluate(({ app }) => {
       app.exit(0);

@@ -57,17 +57,6 @@ function deps(overrides = {}) {
   return world;
 }
 
-test('the error screen offers Try again and Fix it', () => {
-  const html = fs.readFileSync(path.join(__dirname, '../src/renderer/index.html'), 'utf8');
-  const app = fs.readFileSync(path.join(__dirname, '../src/renderer/app.js'), 'utf8');
-  assert.match(html, /id="status-text" role="status"/);
-  assert.match(html, /id="fix-btn"/);
-  assert.match(html, />Fix it</);
-  assert.equal(require('../src/renderer/flow').primaryAction({ status: 'error' }).label, 'Try again');
-  assert.match(app, /describeFailure/);
-  assert.match(app, /fixFailure/);
-});
-
 test('an offline failure does not install', async () => {
   const input = facts({
     checks: [{ id: 'network', level: 'block', message: 'You appear to be offline.' }],

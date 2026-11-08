@@ -2,6 +2,7 @@ const assert = require('node:assert/strict');
 const { spawnSync } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
+const { clickMenu, trayState, noWindow } = require('./tray-e2e');
 const { isHealthOk, probeGatewayHealth } = require('../dist/main/targets/runtimeGateway');
 const { runtimeDataDir, runtimeUpdateCheckPath } = require('../dist/main/targets/runtimePaths');
 
@@ -23,12 +24,6 @@ async function waitFor(check, timeoutMs, message) {
   throw new Error(message);
 }
 
-async function status(page, wanted) {
-  await waitFor(async () => await page.evaluate(() => window.elastos.getStatus()) === wanted,
-    180000, `Launcher status did not become ${wanted}`);
-  await waitFor(async () => (await page.locator('#status-text').innerText()).toLowerCase() === `home is ${wanted}`,
-    10000, `Window status did not become ${wanted}`);
-}
 
 function proveLiveController() {
   const script = [
@@ -151,34 +146,24 @@ module.exports = async function (app, page, home) {
     global.__openedHome = [];
     shell.openExternal = async (url) => { global.__openedHome.push(url); };
   });
-  await page.click('#open-btn');
+  await clickMenu(app, 'Open Home');
   assert.deepEqual(await app.evaluate(() => global.__openedHome), ['http://localhost:8090/home/']);
   const response = await fetch('http://localhost:8090/home/');
   assert.equal(response.status, 200);
   console.log('PASS Open Home invokes the browser with localhost:8090/home/ and Home returns HTTP 200');
 
-  await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].close());
-  await new Promise((resolve) => setTimeout(resolve, 2500));
-  assert.equal(await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].isVisible()), false);
+  await noWindow(app);
   await health(true);
-  console.log('PASS closing the window keeps Home running');
-  await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].show());
-
-  await page.click('#power-btn');
-  await status(page, 'stopped');
+  await clickMenu(app, 'Stop Home');
+  await trayState(app, 'stopped');
   await health(false);
   console.log('PASS Stop Home closes the listener');
-  await page.click('#open-btn');
-  await status(page, 'running');
+  await clickMenu(app, 'Start Home');
+  await trayState(app, 'running');
   await health(true);
   console.log('PASS Start Home becomes healthy');
   assert.deepEqual(await app.evaluate(() => global.__openedHome), ['http://localhost:8090/home/']);
-  const logs = await page.locator('#logs-content').textContent();
-  assert.equal(logs.includes('Keep this terminal open. Press Ctrl+C to stop Home.'), false);
   proveLiveController();
-
-  const checked = await page.evaluate(() => window.elastos.checkForUpdate());
-  assert.equal(checked.updateAvailable, false);
   const runtime = distroUpdateCheck();
   if (runtime) {
     assert.equal(runtime.outcome, 'up_to_date');
@@ -191,5 +176,9 @@ module.exports = async function (app, page, home) {
     assert.equal(launcher.offered, false);
     console.log('PASS elastos update --check stores up_to_date in the launcher record');
   }
+  const closed = app.waitForEvent('close');
+  await clickMenu(app, 'Quit ElastOS'); await closed;
+  await health(false);
+  console.log('PASS Quit ElastOS stops Home');
   return app;
 };

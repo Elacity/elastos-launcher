@@ -8,7 +8,6 @@ const { removeVerifiedTarget, resetRuntime, sweepRemovalHoldings } = require('..
 const { foreignRuntimeDataMessage, isRuntimeDataName, launcherOwnedDirectories, signedInstallRecord } = require('../dist/main/targets/runtimePaths');
 const { ForeignGatewayError } = require('../dist/main/targets/runtimeGateway');
 const { applyFix, failureScreen } = require('../dist/main/targets/runtimeRecovery');
-const flow = require('../src/renderer/flow.js');
 
 test('reset removes the runtime program, data, and unfinished install', async () => {
   const home = require('node:path').join(require('node:fs').realpathSync(require('node:os').tmpdir()), 'fixture-home');
@@ -170,15 +169,7 @@ test('reset refuses a foreign directory, a live foreign host, and a misnamed sta
     remove,
   }), /install stage/);
 
-  const copy = flow.resetCopy();
-  assert.equal(copy.title, 'Reset ElastOS?');
-  assert.match(copy.body, /install it again/);
-  assert.equal(/terminal|sudo|powershell/i.test(copy.body), false);
-  const html = fs.readFileSync(path.join(__dirname, '../src/renderer/index.html'), 'utf8');
-  const app = fs.readFileSync(path.join(__dirname, '../src/renderer/app.js'), 'utf8');
-  assert.match(html, /id="reset-btn"/);
-  assert.match(app, /resetRuntime/);
-  assert.match(app, /resetCopy/);
+
 });
 
 test('reset refuses a symlink and a dotted foreign directory', async () => {
@@ -960,4 +951,23 @@ test('Fix it after a tampered install record runs install.sh, and then Reset goe
     fs.writeFileSync(record, SIGNED_HEAD.toString('utf8').replace('"version":"0.8.0-alpha.22"', '"version":"0.8.0-alpha.23"'));
     assert.equal(signedInstallRecord(path.dirname(path.dirname(record))), false);
   });
+});
+
+test('program-only Uninstall keeps Home on Mac and Linux and honors the existing stop refusal', async () => {
+  const { uninstallRuntime } = require('../dist/main/targets/runtimeUninstall');
+  for (const platform of ['darwin','linux']) {
+    const home=fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()),'elastos-keep-home-'));
+    const binary=path.join(home,'.local/bin/elastos');
+    const dataDir=platform==='darwin'?path.join(home,'Library/Application Support/elastos'):path.join(home,'.local/share/elastos');
+    fs.mkdirSync(path.dirname(binary),{recursive:true});fs.writeFileSync(binary,'program');
+    fs.mkdirSync(path.join(dataDir,'Users/alice'),{recursive:true});fs.writeFileSync(path.join(dataDir,'Users/alice/note'),'keep me');
+    try {
+      const deps={homeDir:home,platform,env:{},binary,dataDir,...(platform==='darwin'?{deleteData:false}:{}),stop:async()=>{},remove:removeVerifiedTarget};
+      await assert.rejects(uninstallRuntime({...deps,stop:async()=>{throw new ForeignGatewayError();}}),/another window/);
+      assert.equal(fs.existsSync(binary),true);
+      await uninstallRuntime(deps);
+      assert.equal(fs.existsSync(binary),false);
+      assert.equal(fs.readFileSync(path.join(dataDir,'Users/alice/note'),'utf8'),'keep me');
+    } finally {fs.rmSync(home,{recursive:true,force:true});}
+  }
 });

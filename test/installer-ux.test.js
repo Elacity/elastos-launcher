@@ -14,24 +14,8 @@ const {
   publisherOffline,
 } = require('../dist/main/targets/preflight');
 const { linuxAutostartFile, linuxAutostartExecPath, syncLinuxAutostart } = require('../dist/main/targets/openAtLogin');
-const flow = require('../src/renderer/flow.js');
 
-test('launcher logs omit terminal-only advice and retain replacement diagnostics', () => {
-  assert.equal(flow.launcherLog('Keep this terminal open. Press Ctrl+C to stop Home.'), '');
-  assert.equal(flow.launcherLog('Home ready\nKeep this terminal open. Press Ctrl+C to stop Home.\nRuntime binary replaced; exit 75'),
-    'Home ready\nRuntime binary replaced; exit 75');
-});
-
-const base = {
-  platform: 'linux',
-  arch: 'x64',
-  freeBytes: DISK_FLOOR_BYTES,
-  portBusy: false,
-  healthOk: false,
-  offline: false,
-  wsl: false,
-  kvm: true,
-};
+const base = { platform: 'linux', arch: 'x64', freeBytes: DISK_FLOOR_BYTES, portBusy: false, healthOk: false, offline: false, wsl: false, kvm: true };
 
 test('preflight blocks disk, offline, a busy port, and Intel Mac', () => {
   assert.equal(evaluatePreflight(base).ok, true);
@@ -121,18 +105,6 @@ test('sign-in launch writes a desktop file and can remove it', () => {
   assert.equal(files.size, 0);
 });
 
-test('the install button is the primary action until the computer is healthy', () => {
-  assert.equal(flow.primaryAction({ targetId: 'runtime', status: 'not-installed', busy: false }).label, 'Install');
-  assert.equal(flow.primaryAction({ targetId: 'runtime', status: 'running', busy: false }).label, 'Open Home');
-  const otherHome = flow.primaryAction({ targetId: 'runtime', status: 'other-home', busy: false });
-  assert.equal(otherHome.enabled, false);
-  assert.equal(otherHome.label, 'another ElastOS Home is running');
-  assert.equal(flow.primaryAction({ targetId: 'runtime', status: 'error', busy: false }).id, 'retry');
-  const copy = flow.confirmCopy('runtime', []);
-  assert.match(copy.title, /ElastOS/);
-  assert.match(copy.body, /removes the ElastOS program/);
-});
-
 test('the port check covers 127.0.0.1 and ::1, and a host without IPv6 checks 127.0.0.1 only', async () => {
   const asked = [];
   const answer = (map) => async (port, host) => { asked.push(host); return map[host]; };
@@ -166,23 +138,4 @@ test('preflight blocks when localhost does not point to this computer', () => {
     assert.equal(report.checks.find((check) => check.id === 'localhost').message, LOCALHOST_MESSAGE);
   }
   assert.equal(evaluatePreflight(base).checks.some((check) => check.id === 'localhost'), false);
-});
-
-test('Windows shows that its Browser is not available yet, and only Windows', () => {
-  const { browserNote, WINDOWS_BROWSER_MESSAGE } = require('../dist/main/targets/runtimeSupport');
-  assert.equal(WINDOWS_BROWSER_MESSAGE, 'Browser is not available on this computer yet.');
-  assert.equal(browserNote('win32'), WINDOWS_BROWSER_MESSAGE);
-  for (const platform of ['darwin', 'linux']) assert.equal(browserNote(platform), null);
-  assert.equal(flow.browserNoteText({ browserNote: WINDOWS_BROWSER_MESSAGE }), WINDOWS_BROWSER_MESSAGE);
-  assert.equal(flow.browserNoteText({ browserNote: null }), '');
-  assert.equal(flow.browserNoteText(undefined), '');
-  assert.equal(flow.shouldOpenBrowserAfterStart({ runtimeOpensBrowser: true }), false);
-  assert.equal(flow.shouldOpenBrowserAfterStart({ runtimeOpensBrowser: false }), true);
-  assert.equal(flow.shouldOpenBrowserAfterStart(undefined), true);
-  const html = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'index.html'), 'utf8');
-  assert.match(html, /<p class="note hidden" id="browser-row">/);
-  const app = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'app.js'), 'utf8');
-  assert.match(app, /browserRow\.classList\.toggle\('hidden', !browserText\)/);
-  const controller = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'launchController.ts'), 'utf8');
-  assert.match(controller, /browserNote: browserNote\(process\.platform\)/);
 });

@@ -1,6 +1,7 @@
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const { clickMenu, trayState, noWindow } = require('./tray-e2e');
 const { isHealthOk, probeGatewayHealth } = require('../dist/main/targets/runtimeGateway');
 
 async function health(wanted) {
@@ -21,12 +22,6 @@ async function waitFor(check, timeoutMs, message) {
   throw new Error(message);
 }
 
-async function status(page, wanted) {
-  await waitFor(async () => await page.evaluate(() => window.elastos.getStatus()) === wanted,
-    180000, `Launcher status did not become ${wanted}`);
-  await waitFor(async () => (await page.locator('#status-text').innerText()).toLowerCase() === `home is ${wanted}`,
-    10000, `Window status did not become ${wanted}`);
-}
 
 async function liveController(data) {
   const statusPath = path.join(data, 'update-controller', 'status.json');
@@ -58,22 +53,6 @@ async function liveController(data) {
   throw new Error(`Home system update check did not reach a live controller (${last})`);
 }
 
-async function clickTray(app, id) {
-  const exit = new Promise((resolve) => app.process().once('exit', resolve));
-  const clicked = app.evaluate((_electron, itemId) => {
-    const menu = global.__elastosTrayMenu;
-    const item = menu && menu.getMenuItemById(itemId);
-    if (!item || !item.enabled) return false;
-    item.click();
-    return true;
-  }, id).catch(() => false);
-  const ok = await Promise.race([
-    clicked,
-    exit.then(() => true),
-  ]);
-  assert.equal(ok, true, id);
-  await exit;
-}
 
 function portClosed(port, host) {
   const net = require('node:net');
@@ -97,25 +76,20 @@ module.exports = async function (app, page, home, launch) {
     global.__openedHome = [];
     shell.openExternal = async (url) => { global.__openedHome.push(url); };
   });
-  await page.click('#open-btn');
+  await clickMenu(app, 'Open Home');
   assert.deepEqual(await app.evaluate(() => global.__openedHome), ['http://localhost:8090/home/']);
   const response = await fetch('http://localhost:8090/home/');
   assert.equal(response.status, 200);
   console.log('PASS Open Home invokes the browser with localhost:8090/home/ and Home returns HTTP 200');
 
-  await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].close());
-  await new Promise((resolve) => setTimeout(resolve, 2500));
-  assert.equal(await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].isVisible()), false);
+  await noWindow(app);
   await health(true);
-  console.log('PASS closing the window keeps Home running');
-  await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].show());
-
-  await page.click('#power-btn');
-  await status(page, 'stopped');
+  await clickMenu(app, 'Stop Home');
+  await trayState(app, 'stopped');
   await health(false);
   console.log('PASS Stop Home closes the listener');
-  await page.click('#open-btn');
-  await status(page, 'running');
+  await clickMenu(app, 'Start Home');
+  await trayState(app, 'running');
   await health(true);
   console.log('PASS Start Home becomes healthy');
 
@@ -126,34 +100,19 @@ module.exports = async function (app, page, home, launch) {
   console.log('NOT EXERCISED a full System update because no newer signed release exists');
   console.log('NOT EXERCISED the owner System summary because that route needs a wallet token');
 
-  const checked = await page.evaluate(() => window.elastos.checkForUpdate());
-  assert.equal(checked.updateAvailable, false);
   const nativeUpdate = path.join(data, 'update-check.json');
   const update = JSON.parse(fs.readFileSync(fs.existsSync(nativeUpdate) ? nativeUpdate
     : path.join(home, '.elastos-launcher', 'update-check.json'), 'utf8'));
   assert.equal(update.outcome, 'up_to_date');
   console.log('PASS elastos update --check writes up_to_date');
 
-  const keptPid = controller.controller_pid;
-  await clickTray(app, 'quit-keep-home');
-  await health(true);
-  assert.equal(fs.existsSync(`/proc/${keptPid}`), true);
-  console.log('PASS Quit and keep Home leaves the controller running');
-
-  const { _electron: electron } = require('playwright');
-  const reopened = await electron.launch(launch);
-  try {
-    const again = await reopened.firstWindow();
-    await status(again, 'running');
-    assert.equal(await again.locator('#open-label').innerText(), 'Open Home');
-    console.log('PASS a reopened launcher sees the retained Home');
-    await clickTray(reopened, 'quit-stop-home');
-  } finally {
-    await reopened.close().catch(() => {});
-  }
+  const stoppedPid = controller.controller_pid;
+  const closed = app.waitForEvent('close');
+  await clickMenu(app, 'Quit ElastOS'); await closed;
   await health(false);
   assert.equal(await portClosed(8090, '127.0.0.1'), true);
   assert.equal(await portClosed(8090, '::1'), true);
-  assert.equal(fs.existsSync(`/proc/${keptPid}`), false);
-  console.log('PASS Quit and stop Home after reopen stops the retained Home');
+  assert.equal(fs.existsSync(`/proc/${stoppedPid}`), false);
+  console.log('PASS Quit ElastOS stops Home and its controller');
+  return app;
 };

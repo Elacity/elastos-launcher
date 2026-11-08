@@ -27,9 +27,9 @@ Intel Macs stop with “Intel Mac is not supported yet.” Nothing is downloaded
 ## macOS
 
 1. Download the app and open it. macOS may ask whether to open an app that was downloaded from the internet. That dialog is from macOS.
-2. Click Install.
+2. Review Start Home at Login (checked by default), then click Install.
 3. The app checks the signed release, downloads the pinned installer, and downloads a pinned Python only when the Mac cannot already run `python3 -c ''`.
-4. The button becomes Open my computer. The page is `http://localhost:8090/home/` in the system browser.
+4. The window says Home is ready, points to the menu bar and offers Open Home. The page is `http://localhost:8090/home/` in the system browser.
 5. There is no Terminal window, no `xcode-select --install` prompt, and no administrator password for Install.
 
 The macOS test hides Command Line Tools, curl, and python3 from the installer and clicks Install on a `macos-14` runner. It is not a freshly imaged Mac.
@@ -38,7 +38,7 @@ The macOS test hides Command Line Tools, curl, and python3 from the installer an
 
 1. Open the app and click Install.
 2. On glibc Linux with bash, that is the only step. The app supplies curl and, when needed, Python. No administrator password.
-3. The button becomes Open my computer.
+3. The button becomes Open Home.
 4. `/dev/kvm` is optional. Without it, Install still finishes and the system browser opens. The separate in-computer browser stays off. That later piece can ask for a password; it is not part of this click.
 
 A musl system, or a system without bash, stops with one sentence. Install does not continue.
@@ -50,17 +50,25 @@ The Linux test is an `ubuntu:24.04` container with curl, python3, and gcc absent
 1. If Linux support is off, the screen says Windows needs Linux support. The person clicks Enable. They do not type a command.
 2. Windows asks for permission once. If Windows says a restart is required, ElastOS says: Restart Windows. When you open ElastOS again, Install continues.
 3. After the restart, if Linux support is on, opening ElastOS continues Install. The app adds its own Linux environment, installs python3 and curl there if they are missing, and installs the runtime. If Linux support is still off, Install waits.
-4. The button becomes Open my computer. The page opens in the Windows browser at `http://localhost:8090/home/`.
-5. The info panel says: Browser is not available on this computer yet. The in-computer Browser does not run on Windows yet. Home opens in the Windows browser.
+4. The window says Home is ready, points to the menu bar and offers Open Home. The page opens in the Windows browser at `http://localhost:8090/home/`.
+5. ElastOS is in the system tray; its menu opens, starts, stops and updates Home. The in-computer Browser does not run on Windows yet.
 
 The ElastOS Linux environment is not removed by Remove PC2.
 
 ## Gaps
 
 - The macOS click test hides developer tools on a GitHub `macos-14` runner. It does not boot a blank Mac.
-- The Windows runner cannot turn Linux support off and reboot in the same job, so it cannot click from “WSL disabled” through to Open my computer. The Enable command, the restart sentence, and the decision to continue Install only after Linux support is on are tested. A runner that already has Linux support can install and open Home.
+- The Windows runner cannot turn Linux support off and reboot in the same job, so it cannot click from “WSL disabled” through to Open Home. The Enable command, the restart sentence, and the decision to continue Install only after Linux support is on are tested. A runner that already has Linux support can install and open Home.
 - A musl system is refused. ElastOS does not ship a musl runtime.
 - A Linux system without bash is refused. The app does not bundle bash.
-- The in-computer browser on Linux can still ask for a password later. Install and Open my computer do not.
+- The in-computer browser on Linux can still ask for a password later. Install and Open Home do not.
 - Gatekeeper on macOS can still ask the person to confirm the downloaded app. The app cannot remove that system dialog.
 - This environment has not notarized a build. Notarization stays on the existing tag-build path.
+
+## Background operation
+
+After installation there is no standing app window. Opening ElastOS opens Home; if stopped, Home starts first. Closing an action window leaves Home available through the menu. Quit ElastOS stops Home. Start Home at Login controls hidden app startup and Home startup together.
+
+The pinned 2.0.0 command is `home --browser`: it starts the signed controller and opens the system browser. It has no supported quiet-start flag. Login and install therefore still open the browser on a cold start; the launcher avoids adding a second tab. The native update menu appears only for the Runtime's signed offer. The current offer format has no release-notes URL, so What's new is hidden unless a real link is supplied.
+
+Electron 28 accepts the `sublabel` field in its menu model but its native macOS menu implementation does not render it. The menu mock includes the requested `localhost:8090` sublabel; native display needs an Electron upgrade and packaged verification. No dependency upgrade is included in this UI change.

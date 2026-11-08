@@ -101,7 +101,7 @@ export function applyOpenAtLogin(enabled: boolean, homeDir: string = os.homedir(
   }
 }
 
-/** Login launches keep the launcher in the tray until the user opens its window. */
+/** Login launches keep the app in the tray while Home starts. */
 export function isLoginLaunch(platform: string, argv: readonly string[], settings: { wasOpenedAtLogin?: boolean }): boolean {
   return platform === 'darwin' ? settings.wasOpenedAtLogin === true : argv.includes('--login');
 }

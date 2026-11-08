@@ -243,9 +243,5 @@ test('save support bundle writes only ElastOS-support.txt outside the data dirs'
     /another name/,
   );
 
-  const html = fs.readFileSync(path.join(__dirname, '../src/renderer/index.html'), 'utf8');
-  const app = fs.readFileSync(path.join(__dirname, '../src/renderer/app.js'), 'utf8');
-  assert.match(html, /id="support-btn"/);
-  assert.match(html, /Save support file/);
-  assert.match(app, /saveSupportBundle/);
+
 });
