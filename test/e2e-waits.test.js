@@ -12,7 +12,7 @@ function clock(t) {
   return () => now;
 }
 
-function fixture(t, focused) {
+function fixture(t, focused, nullFocusedWindow = false) {
   const now = clock(t);
   const calls = [];
   const logs = path.join(__dirname, `.e2e-logs-${process.pid}`);
@@ -31,7 +31,7 @@ function fixture(t, focused) {
     } } },
   })({
     app: { focus: options => calls.push({ ...options }), getPath: () => path.join(logs, 'different-electron-log-folder') },
-    BrowserWindow: { getAllWindows: () => [win], getFocusedWindow: () => win.isFocused() ? win : null },
+    BrowserWindow: { getAllWindows: () => [win], getFocusedWindow: () => !nullFocusedWindow && win.isFocused() ? win : null },
   }, arg) };
   t.mock.method(console, 'error', () => {});
   global.__openedHome = ['http://localhost:8090/home/'];
@@ -44,6 +44,12 @@ test('focusWindow requests app and window focus and waits for the actual focused
   await waits.focusWindow(app);
   assert.equal(now(), 750);
   assert.deepEqual(calls, [{ steal: true }, 'window.focus']);
+});
+
+test('focusWindow uses the window own focus when the global focused window stays null', async t => {
+  const { app, now } = fixture(t, now => now >= 750, true);
+  await waits.focusWindow(app);
+  assert.equal(now(), 750);
 });
 
 test('focusWindow fails with focus, renderer state, browser calls and exactly the last 60 log lines', async t => {

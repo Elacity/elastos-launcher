@@ -2,6 +2,7 @@ const assert = require('node:assert/strict');
 const { spawnSync } = require('node:child_process');
 const os = require('node:os');
 const path = require('node:path');
+const { focusWindow } = require('./tray-e2e');
 function nativeControls(app, page) {
   const helper = path.join(os.tmpdir(), `elastos-click-${process.pid}`);
   const compiled = spawnSync('swiftc', [path.join(__dirname,'mac-click.swift'), '-o', helper], {encoding:'utf8',timeout:120000});
@@ -13,6 +14,7 @@ function nativeControls(app, page) {
   async function bounds() {return app.evaluate(({BrowserWindow})=>BrowserWindow.getAllWindows()[0].getContentBounds());}
   return {
     async click(selector) {
+      await focusWindow(app);
       const deadline = Date.now() + 10000;
       let before = await bounds();
       while (Date.now() < deadline) {

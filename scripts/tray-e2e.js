@@ -62,8 +62,9 @@ async function focusWindow(app) {
     win.focus();
     return win.id;
   });
+  // Dock-hidden apps can have no global focused window. Check this window itself.
   await waitFor(() => app.evaluate(({ BrowserWindow }, id) =>
-    BrowserWindow.getFocusedWindow()?.id === id, id), 10000, 'Launcher window did not gain focus', app);
+    BrowserWindow.getAllWindows().find(win => win.id === id)?.isFocused(), id), 10000, 'Launcher window did not gain focus', app);
 }
 async function clickMenu(app, label) {
   await app.evaluate((_electron, label) => {

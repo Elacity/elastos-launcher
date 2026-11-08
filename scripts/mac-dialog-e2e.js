@@ -16,6 +16,7 @@ async function main() {
   const watchdog=setTimeout(()=>app.process().kill('SIGKILL'),180000);
   try {
     const page=await app.firstWindow();
+    const native=nativeControls(app,page);
     await page.locator('#primary').waitFor();
     await app.evaluate(({app,dialog,shell})=>{
       const root=app.getAppPath();
@@ -43,7 +44,6 @@ async function main() {
       pc2.describeLegacyPc2OnThisComputer=async()=>f.removed?[]:[{path:'/Users/runner/.pc2',label:'PC2 data'}];
       pc2.removeLegacyPc2OnThisComputer=async choice=>{f.calls.push(['pc2',choice]);f.removed=true;return {ok:true};};
     });
-    const native=nativeControls(app,page);
     await native.drag();
     await native.click('#login');
     await waitFor(async()=>!(await page.locator('#login').isChecked()),10000,'Native login click did not uncheck Open at Login');
@@ -71,11 +71,13 @@ async function main() {
     assert.ok(calls.some(c=>c[0]==='uninstall'&&c[1]===true));
     assert.ok(calls.some(c=>c[0]==='pc2'&&c[1].backup&&c[1].paths[0]==='/Users/runner/.pc2'));
     await clickMenu(app,'Update to 2.0.1…');
-    const update=await app.firstWindow();await update.locator('#cancel').waitFor();
-    const updateNative=nativeControls(app,update);await updateNative.click('#cancel');await noWindow(app);
+    const update=await app.firstWindow();const updateNative=nativeControls(app,update);
+    await update.locator('#cancel').waitFor();
+    await updateNative.click('#cancel');await noWindow(app);
     await clickMenu(app,'Update to 2.0.1…');
-    const confirming=await app.firstWindow();await confirming.locator('#primary').waitFor();
-    await nativeControls(app,confirming).click('#primary');
+    const confirming=await app.firstWindow();const confirmingNative=nativeControls(app,confirming);
+    await confirming.locator('#primary').waitFor();
+    await confirmingNative.click('#primary');
     await waitFor(()=>app.evaluate(()=>global.__fixture.calls.some(c=>c[0]==='update')),10000,'Update did not run');
     await noWindow(app);
     console.log('PASS native update window supports Not Now and Update then closes');

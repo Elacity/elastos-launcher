@@ -143,10 +143,10 @@ async function main() {
       shell.openExternal = async url => { global.__openedHome.push(url); };
     });
     const page = await electronApp.firstWindow();
+    const native = process.platform === 'darwin' ? require('./mac-native').nativeControls(electronApp, page) : null;
     await page.locator('#primary').waitFor({ state: 'visible' });
     if ((await page.locator('#primary').innerText()) !== 'Install') throw new Error('Expected Install');
     if (process.platform === 'darwin') {
-      const native = require('./mac-native').nativeControls(electronApp, page);
       await focusWindow(electronApp);
       await native.drag();
       await native.click('#primary');
@@ -184,8 +184,7 @@ async function main() {
       if ((await electronApp.evaluate(() => global.__openedHome)).length !== 0) {
         throw new Error('Mac Install opened a duplicate browser tab after home --browser');
       }
-      await focusWindow(electronApp);
-      await require('./mac-native').nativeControls(electronApp,page).click('#primary');
+      await native.click('#primary');
     }
     else await page.click('#primary');
     await waitFor(()=>electronApp.evaluate(()=>global.__openedHome.includes('http://localhost:8090/home/')),10000,'Open Home did not open localhost');

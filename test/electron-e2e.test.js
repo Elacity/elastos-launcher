@@ -115,7 +115,7 @@ for (const mode of ['delayed focus', 'never focused', 'duplicate tab']) {
     t.mock.method(Date, 'now', () => now);
     t.mock.method(global, 'setTimeout', (fn, ms) => { now += ms; queueMicrotask(fn); });
     const waits = require('../scripts/tray-e2e');
-    let ready = false, closed = false, focusAt, nativeClicks = 0;
+    let ready = false, closed = false, focusAt, nativeClicks = 0, compiles = 0;
     const focusCalls = [];
     const logs = [];
     const shell = {};
@@ -124,10 +124,14 @@ for (const mode of ['delayed focus', 'never focused', 'duplicate tab']) {
       id: 1, getTitle: () => 'ElastOS', isVisible: () => !closed,
       isFocused: () => !ready || (mode !== 'never focused' && focusAt !== undefined && now - focusAt >= 750),
       focus: () => { focusAt = now; focusCalls.push('window.focus'); },
+      getContentBounds: () => ({ x: 10, y: 20, width: 360, height: 400 }),
       webContents: { executeJavaScript: async () => ({ kind: 'install', message: 'Home is ready.' }) },
     };
     const page = {
-      locator: selector => ({ waitFor: async () => {}, innerText: async () => selector === '#message' ? 'Home is ready.' : ready ? 'Open Home' : 'Install' }),
+      locator: selector => ({ waitFor: async () => {}, innerText: async () => selector === '#message' ? 'Home is ready.' : ready ? 'Open Home' : 'Install',
+        boundingBox: async () => ({ x: 5, y: 300, width: 360, height: 40 }),
+      }),
+      waitForTimeout: async () => {},
       getAttribute: async () => 'install', evaluate: async () => {},
     };
     const app = {
@@ -144,6 +148,31 @@ for (const mode of ['delayed focus', 'never focused', 'duplicate tab']) {
       }, arg),
       process: () => ({ kill() {} }),
     };
+    t.mock.method(require('node:child_process'), 'spawnSync', (file, args) => {
+      if (file === 'swiftc') {
+        compiles++;
+        now += 20000;
+        focusAt = undefined;
+      } else if (args.length === 4) {
+        win.getContentBounds = () => ({ x: 70, y: 65, width: 360, height: 400 });
+      } else {
+        nativeClicks++;
+        assert.equal(win.isFocused(), true, 'native click reached an inactive window');
+        if (!ready) {
+          ready = true;
+          focusAt = undefined; // home --browser brings another app to the front.
+          if (mode === 'duplicate tab') shell.openExternal('http://localhost:8090/home/');
+        } else {
+          shell.openExternal('http://localhost:8090/home/');
+          closed = true;
+        }
+      }
+      return { status: 0 };
+    });
+    const nativeFile = require.resolve('../scripts/mac-native');
+    delete require.cache[nativeFile];
+    const native = require(nativeFile);
+    t.after(() => { delete require.cache[nativeFile]; });
     let finish;
     const done = new Promise(resolve => { finish = resolve; });
     const script = path.resolve(__dirname, '../scripts/electron-e2e.js');
@@ -159,18 +188,7 @@ for (const mode of ['delayed focus', 'never focused', 'duplicate tab']) {
         if (name === 'node:fs') return { mkdirSync() {}, chmodSync() {}, mkdtempSync: () => '/fixture/home' };
         if (name === '../dist/main/targets/runtimeGateway') return { HOME_URL: 'http://localhost:8090/home/', isHealthOk: () => true, probeGatewayHealth: async () => ({}) };
         if (name === './tray-e2e') return waits;
-        if (name === './mac-native') return { nativeControls: () => ({ drag: async () => {}, click: async () => {
-          nativeClicks++;
-          if (!ready) {
-            ready = true;
-            focusAt = undefined; // home --browser brings another app to the front.
-            if (mode === 'duplicate tab') await shell.openExternal('http://localhost:8090/home/');
-          } else {
-            assert.equal(win.isFocused(), true, 'native Open Home click reached an inactive window');
-            await shell.openExternal('http://localhost:8090/home/');
-            closed = true;
-          }
-        } }) };
+        if (name === './mac-native') return native;
         if (name === './mac-lifecycle-e2e') return async () => app;
         return require(name);
       },
@@ -180,9 +198,10 @@ for (const mode of ['delayed focus', 'never focused', 'duplicate tab']) {
     vm.runInNewContext(fs.readFileSync(script, 'utf8'), sandbox, { filename: script });
     assert.equal(await done, mode === 'delayed focus' ? 0 : 1, logs.join('\n'));
     assert.equal(nativeClicks, mode === 'delayed focus' ? 2 : 1);
+    assert.equal(compiles, 1, 'compile the helper once per app and page');
     if (mode === 'delayed focus') {
-      assert.equal(now, 750);
-      assert.deepEqual(focusCalls, [{ steal: true }, 'window.focus', { steal: true }, 'window.focus']);
+      assert.equal(now, 20950);
+      assert.deepEqual(focusCalls, [{ steal: true }, 'window.focus', { steal: true }, 'window.focus', { steal: true }, 'window.focus']);
     } else if (mode === 'never focused') {
       assert.match(logs.join('\n'), /Launcher window did not gain focus/);
       assert.match(logs.join('\n'), /current window state:.*Home is ready/);
