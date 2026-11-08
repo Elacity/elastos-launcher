@@ -753,12 +753,12 @@ export async function pidOwnsGatewayPort(
   return listenerOwnership(listeners, wants, answered) === 'owned';
 }
 
-export function createDefaultGatewaySupervisor(binary: string): GatewaySupervisor {
+export function createDefaultGatewaySupervisor(binary: string, platform: string = process.platform): GatewaySupervisor {
   return createGatewaySupervisor({
     binary,
-    args: process.platform === 'darwin' ? ['home', '--browser'] : GATEWAY_ARGS,
-    adoptForControls: process.platform === 'darwin',
-    healthTimeoutMs: process.platform === 'darwin' ? 150000 : 60000,
+    args: platform === 'darwin' ? ['home', '--browser'] : GATEWAY_ARGS,
+    adoptForControls: platform === 'darwin',
+    healthTimeoutMs: platform === 'darwin' ? 150000 : 60000,
     spawn: spawnGatewayProcess,
     fetchHealth: () => probeGatewayHealth(),
     sleep: (ms) => new Promise((resolve) => { setTimeout(resolve, ms); }),
@@ -767,7 +767,7 @@ export function createDefaultGatewaySupervisor(binary: string): GatewaySuperviso
     log: (line) => logSink(line),
     confirmForeign: confirmInstalledGateway,
     foreignIsLegacy: async () => (await installedGatewayOnThisComputer()) === 'legacy',
-    listenerOwned: (pid, health) => process.platform === 'darwin'
+    listenerOwned: (pid, health) => platform === 'darwin'
       ? confirmInstalledGateway()
       : pidOwnsGatewayPort(pid, LOOPBACK_ADDRESSES, health.addresses ?? []),
     adoptInstalled: adoptInstalledGatewayProcess,

@@ -19,12 +19,16 @@ jobs:
         include:
           - os: ubuntu-24.04
             platform: linux-x64
-          - os: macos-14
+          - os: macos-latest
             platform: darwin-arm64
     runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+
+      - name: Require Apple silicon for the Mac lane
+        if: runner.os == 'macOS'
+        run: test "$(uname -m)" = arm64
 
       - name: Install pinned runtime and require a healthy Home
         run: bash scripts/runtime-smoke.sh
@@ -61,7 +65,7 @@ jobs:
         include:
           - os: ubuntu-24.04
             platform: linux-x64
-          - os: macos-14
+          - os: macos-latest
             platform: darwin-arm64
     runs-on: ${{ matrix.os }}
     steps:
@@ -73,6 +77,10 @@ jobs:
         with:
           node-version: '20'
           cache: npm
+
+      - name: Require Apple silicon for the Mac lane
+        if: runner.os == 'macOS'
+        run: test "$(uname -m)" = arm64
 
       - name: Install display libraries
         if: runner.os == 'Linux'

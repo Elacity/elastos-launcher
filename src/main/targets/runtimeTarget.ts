@@ -36,7 +36,7 @@ import {
 } from './windowsRuntime';
 import { LaunchTarget, UpdateCheck } from './types';
 
-export function createRuntimeTarget(): LaunchTarget {
+export function createRuntimeTarget(platform: NodeJS.Platform = process.platform): LaunchTarget {
   let supervisor: GatewaySupervisor | null = null;
   let updating = false;
 
@@ -46,9 +46,9 @@ export function createRuntimeTarget(): LaunchTarget {
 
   async function stopGateway(adopt: boolean): Promise<void> {
     if (!supervisor) {
-      supervisor = process.platform === 'win32'
+      supervisor = platform === 'win32'
         ? createDistroGatewaySupervisor()
-        : createDefaultGatewaySupervisor(binary() ?? runtimeBinaryPath(os.homedir()));
+        : createDefaultGatewaySupervisor(binary() ?? runtimeBinaryPath(os.homedir()), platform);
     }
     await supervisor.stop({ adopt });
   }
@@ -62,35 +62,35 @@ export function createRuntimeTarget(): LaunchTarget {
       if (supervisor) {
         const phase = supervisor.phase();
         if (phase === 'starting' || phase === 'stopping' || phase === 'error'
-          || (phase === 'running' && process.platform !== 'darwin')) {
+          || (phase === 'running' && platform !== 'darwin')) {
           return phase;
         }
       }
-      if (process.platform === 'win32') {
+      if (platform === 'win32') {
         if (!distroIsInstalled()) return 'not-installed';
         if (isHealthOk(await readHealth())) return 'running';
         return 'stopped';
       }
-      if (runtimeInstallBlock(process.platform, process.arch)) return 'not-installed';
+      if (runtimeInstallBlock(platform, process.arch)) return 'not-installed';
       if (!(await runtimeIsInstalled())) return 'not-installed';
       if (isHealthOk(await readHealth())) {
-        if (process.platform === 'darwin' && !(await confirmInstalledGateway())) throw new Error('Another program is answering on port 8090. Home was not adopted.');
+        if (platform === 'darwin' && !(await confirmInstalledGateway())) throw new Error('Another program is answering on port 8090. Home was not adopted.');
         return 'running';
       }
       return 'stopped';
     },
     start: async () => {
-      if (process.platform === 'win32') {
+      if (platform === 'win32') {
         if (!distroIsInstalled()) throw new Error('ElastOS is not installed yet. Click Install.');
         if (!supervisor) supervisor = createDistroGatewaySupervisor();
         await supervisor.start();
         return;
       }
-      const block = runtimeInstallBlock(process.platform, process.arch);
+      const block = runtimeInstallBlock(platform, process.arch);
       if (block) throw new Error(block);
       const file = binary();
       if (!file) throw new Error('ElastOS is not installed yet. Click Install.');
-      if (!supervisor) supervisor = createDefaultGatewaySupervisor(file);
+      if (!supervisor) supervisor = createDefaultGatewaySupervisor(file, platform);
       await supervisor.start();
     },
     stop: () => stopGateway(false),
@@ -100,7 +100,7 @@ export function createRuntimeTarget(): LaunchTarget {
     },
     restart: async () => {
       await stopGateway(false);
-      if (process.platform === 'win32') {
+      if (platform === 'win32') {
         if (!distroIsInstalled()) throw new Error('ElastOS is not installed yet. Click Install.');
         if (!supervisor) supervisor = createDistroGatewaySupervisor();
         await supervisor.start();
@@ -108,12 +108,12 @@ export function createRuntimeTarget(): LaunchTarget {
       }
       const file = binary();
       if (!file) throw new Error('ElastOS is not installed yet. Click Install.');
-      if (!supervisor) supervisor = createDefaultGatewaySupervisor(file);
+      if (!supervisor) supervisor = createDefaultGatewaySupervisor(file, platform);
       await supervisor.start();
     },
     install: (onProgress) => runtimeInstall.installRuntimeOnThisComputer(onProgress),
     update: async (onProgress) => {
-      if (process.platform !== 'darwin') return applyRuntimeUpdate(runtimeCommand(), runtimeHeadStore(), headVerify(), onProgress);
+      if (platform !== 'darwin') return applyRuntimeUpdate(runtimeCommand(), runtimeHeadStore(), headVerify(), onProgress);
       if (updating) throw new Error('An ElastOS update is already running.');
       updating = true;
       try {
@@ -124,7 +124,7 @@ export function createRuntimeTarget(): LaunchTarget {
         try {
           const file = binary();
           if (!file) throw new Error('ElastOS is not installed yet. Click Install.');
-          supervisor = createDefaultGatewaySupervisor(file);
+          supervisor = createDefaultGatewaySupervisor(file, platform);
           await supervisor.start();
         } finally {
           updating = false;
@@ -132,8 +132,8 @@ export function createRuntimeTarget(): LaunchTarget {
       }
     },
     // On Windows the launch controller runs uninstallRuntimeInDistro (windowsUninstall.ts) with the two answers.
-    uninstall: () => (process.platform === 'win32' ? Promise.reject(new Error('Uninstall on Windows needs your answer in the Uninstall window. Nothing was removed.')) : runtimeUninstall(() => stopGateway(true))),
-    getVersion: () => (process.platform === 'win32' ? readDistroVersion() : readRuntimeVersion()),
+    uninstall: () => (platform === 'win32' ? Promise.reject(new Error('Uninstall on Windows needs your answer in the Uninstall window. Nothing was removed.')) : runtimeUninstall(() => stopGateway(true))),
+    getVersion: () => (platform === 'win32' ? readDistroVersion() : readRuntimeVersion()),
     checkForUpdate: () => runtimeCheckForUpdate(),
     openInBrowser: () => openRuntimeHome(),
     getLogs: async (lines) => supervisor?.getLogs(lines) ?? '',
@@ -233,6 +233,7 @@ async function runtimeIsInstalled(): Promise<boolean> {
     pathEnv: process.env.PATH,
   });
   if (probe.kind !== 'version') return false;
+  if (!runtimeInstall.versionAtLeast(probe.version, loadActiveRuntimePin().version)) return false;
   const components = runtimeComponentsPath(runtimeDataDir(process.platform, homeDir, process.env));
   try {
     return fs.statSync(components).isFile();

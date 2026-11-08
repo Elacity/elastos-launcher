@@ -15,9 +15,22 @@ async function health(wanted) {
   throw new Error(`Home health did not become ${wanted}`);
 }
 
+async function waitFor(check, timeoutMs, message) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await check()) return;
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+  throw new Error(message);
+}
+
 async function status(page, wanted) {
-  await page.waitForFunction(async (next) => await window.elastos.getStatus() === next, wanted, { timeout: 180000 });
-  await page.waitForFunction((next) => document.querySelector('#status-text').textContent.toLowerCase() === next, wanted, { timeout: 10000 });
+  // Poll from Node. Playwright's waitForFunction compiles a predicate inside
+  // the page, where the launcher's strict CSP correctly refuses unsafe-eval.
+  await waitFor(async () => await page.evaluate(() => window.elastos.getStatus()) === wanted,
+    180000, `Launcher status did not become ${wanted}`);
+  await waitFor(async () => (await page.locator('#status-text').innerText()).toLowerCase() === wanted,
+    10000, `Window status did not become ${wanted}`);
 }
 
 module.exports = async function (app, page, home, options) {
@@ -57,8 +70,8 @@ module.exports = async function (app, page, home, options) {
   // its real handler and terminal command against the current signed release.
   await page.evaluate(() => document.querySelector('#update-btn').classList.remove('hidden'));
   await page.click('#update-btn');
-  await page.waitForFunction(() => document.querySelector('#update-btn').classList.contains('hidden')
-    || document.querySelector('#update-btn-label').textContent === 'Retry', undefined, { timeout: 20 * 60 * 1000 });
+  await waitFor(() => page.evaluate(() => document.querySelector('#update-btn').classList.contains('hidden')
+    || document.querySelector('#update-btn-label').textContent === 'Retry'), 20 * 60 * 1000, 'Update did not finish');
   assert.notEqual(await page.locator('#update-btn-label').innerText(), 'Retry', await page.locator('#error-text').innerText());
   await status(page, 'running');
   await health(true);

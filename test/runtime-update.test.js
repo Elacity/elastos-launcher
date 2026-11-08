@@ -175,9 +175,6 @@ test('a cancelled update is an error', async () => {
 });
 
 test('Mac Update stops Home, runs the update and starts the current binary even after failure', async (t) => {
-  const platform = Object.getOwnPropertyDescriptor(process, 'platform');
-  Object.defineProperty(process, 'platform', { value: 'darwin' });
-  t.after(() => Object.defineProperty(process, 'platform', platform));
   const gateway = require('../dist/main/targets/runtimeGateway');
   const updates = require('../dist/main/targets/runtimeUpdate');
   const probe = require('../dist/main/targets/runtimeProbe');
@@ -192,7 +189,7 @@ test('Mac Update stops Home, runs the update and starts the current binary even 
     calls.push('update');
     if (fail) throw new Error('update failed');
   });
-  const target = createRuntimeTarget();
+  const target = createRuntimeTarget('darwin');
   await target.update();
   assert.deepEqual(calls, ['stop', 'update', 'start-current-binary']);
   calls.length = 0;
