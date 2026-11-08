@@ -38,7 +38,7 @@ import {
 } from './windowsRuntime';
 import { LaunchTarget, UpdateCheck } from './types';
 
-export function createRuntimeTarget(platform: NodeJS.Platform = process.platform): LaunchTarget {
+export function createRuntimeTarget(platform: NodeJS.Platform = process.platform, arch: string = process.arch): LaunchTarget {
   let supervisor: GatewaySupervisor | null = null;
   let updating = false;
 
@@ -75,7 +75,7 @@ export function createRuntimeTarget(platform: NodeJS.Platform = process.platform
         if (isHealthOk(await readHealth())) return 'running';
         return 'stopped';
       }
-      if (runtimeInstallBlock(platform, process.arch)) return 'not-installed';
+      if (runtimeInstallBlock(platform, arch)) return 'not-installed';
       const installed = await runtimeIsInstalled();
       if (updating) return 'starting';
       if (!installed) return 'not-installed';
@@ -98,7 +98,7 @@ export function createRuntimeTarget(platform: NodeJS.Platform = process.platform
         await supervisor.start();
         return;
       }
-      const block = runtimeInstallBlock(platform, process.arch);
+      const block = runtimeInstallBlock(platform, arch);
       if (block) throw new Error(block);
       const file = binary();
       if (!file) throw new Error('ElastOS is not installed yet. Click Install.');
@@ -145,8 +145,8 @@ export function createRuntimeTarget(platform: NodeJS.Platform = process.platform
     },
     // On Windows the launch controller runs uninstallRuntimeInDistro (windowsUninstall.ts) with the two answers.
     uninstall: () => (platform === 'win32' ? Promise.reject(new Error('Uninstall on Windows needs your answer in the Uninstall window. Nothing was removed.')) : runtimeUninstall(() => stopGateway(true))),
-    getVersion: () => (platform === 'win32' ? readDistroVersion() : readRuntimeVersion(platform)),
-    checkForUpdate: () => runtimeCheckForUpdate(platform),
+    getVersion: () => (platform === 'win32' ? readDistroVersion() : readRuntimeVersion(platform, arch)),
+    checkForUpdate: () => runtimeCheckForUpdate(platform, arch),
     openInBrowser: () => openRuntimeHome(),
     getLogs: async (lines) => supervisor?.getLogs(lines) ?? '',
   };
@@ -161,7 +161,7 @@ function readHostUpdateStatus(platform: NodeJS.Platform): string {
   return fs.readFileSync(runtimeUpdateCheckPath(runtimeDataDir(platform, home, process.env)), 'utf8');
 }
 
-async function runtimeCheckForUpdate(platform: NodeJS.Platform): Promise<UpdateCheck> {
+async function runtimeCheckForUpdate(platform: NodeJS.Platform, arch: string): Promise<UpdateCheck> {
   let releaseUrl = '';
   try {
     releaseUrl = loadActiveRuntimePin().publisherGateway;
@@ -174,9 +174,9 @@ async function runtimeCheckForUpdate(platform: NodeJS.Platform): Promise<UpdateC
     latest: null,
   }, releaseUrl);
   const windows = platform === 'win32';
-  if (windows ? !distroIsInstalled() : runtimeInstallBlock(platform, process.arch)
+  if (windows ? !distroIsInstalled() : runtimeInstallBlock(platform, arch)
     || !findRuntimeBinary(os.homedir(), process.env.PATH ?? '')) return notInstalled;
-  const current = windows ? readDistroVersion() : readRuntimeVersion(platform);
+  const current = windows ? readDistroVersion() : readRuntimeVersion(platform, arch);
   const store = launcherUpdateStatusStore(os.homedir());
   const fallback = async () => {
     await writeSignedUpdateCheck(current, loadActiveRuntimePin(), runtimeInstall.fetchRuntimeText, store.write);
@@ -208,8 +208,8 @@ function headVerify(): HeadVerify {
   };
 }
 
-function readRuntimeVersion(platform: NodeJS.Platform = process.platform): string {
-  const block = runtimeInstallBlock(platform, process.arch);
+function readRuntimeVersion(platform: NodeJS.Platform = process.platform, arch: string = process.arch): string {
+  const block = runtimeInstallBlock(platform, arch);
   if (block) return block;
   const file = findRuntimeBinary(os.homedir(), process.env.PATH ?? '');
   if (!file) return 'not installed';

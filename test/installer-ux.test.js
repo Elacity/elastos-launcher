@@ -16,6 +16,12 @@ const {
 const { linuxAutostartFile, syncLinuxAutostart } = require('../dist/main/targets/openAtLogin');
 const flow = require('../src/renderer/flow.js');
 
+test('launcher logs omit terminal-only advice and retain replacement diagnostics', () => {
+  assert.equal(flow.launcherLog('Keep this terminal open. Press Ctrl+C to stop Home.'), '');
+  assert.equal(flow.launcherLog('Home ready\nKeep this terminal open. Press Ctrl+C to stop Home.\nRuntime binary replaced; exit 75'),
+    'Home ready\nRuntime binary replaced; exit 75');
+});
+
 const base = {
   platform: 'linux',
   arch: 'x64',

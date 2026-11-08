@@ -41,6 +41,7 @@ async function status(page, wanted) {
 }
 
 module.exports = async function (app, page, home, options) {
+  assert.equal((await page.locator('#logs-content').innerText()).includes('Keep this terminal open'), false);
   await app.evaluate(({ shell }) => {
     global.__openedHome = [];
     shell.openExternal = async (url) => { global.__openedHome.push(url); };

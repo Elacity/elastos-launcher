@@ -189,6 +189,8 @@ function updateStatus(status) {
 }
 
 function addLog(message) {
+  message = flow.launcherLog(message);
+  if (!message) return;
   logs.push(message);
   if (logs.length > MAX_LOGS) logs.shift();
   logsContent.textContent = logs.join('\n');
@@ -216,7 +218,7 @@ async function runInstall() {
     renderSteps('Starting');
     await window.elastos.start();
     renderSteps('Your computer is ready');
-    await window.elastos.openBrowser();
+    if (window.elastos.platform !== 'darwin') await window.elastos.openBrowser();
   } catch (err) {
     showError(err && err.message ? err.message : 'Something went wrong. Try again.');
     updateStatus('error');
@@ -299,7 +301,7 @@ powerBtn.addEventListener('click', async () => {
 logsBtn.addEventListener('click', async () => {
   if (logsPanel.classList.contains('hidden')) {
     const logText = await window.elastos.getLogs(100);
-    logs = logText.split('\n').filter((line) => line.trim());
+    logs = flow.launcherLog(logText).split('\n').filter((line) => line.trim());
     logsContent.textContent = logs.join('\n');
     logsContent.scrollTop = logsContent.scrollHeight;
     logsPanel.classList.remove('hidden');

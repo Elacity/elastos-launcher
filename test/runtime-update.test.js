@@ -360,7 +360,7 @@ for (const platform of ['darwin', 'linux', 'win32']) {
     t.mock.method(install, 'fetchRuntimeText', async () => { fetched++; return fixture.signedHead({ version: '2.0.1' }); });
     let native;
     t.mock.method(windows, 'readDistroUpdateStatus', () => { if (!native) throw new Error('ENOENT'); return native; });
-    const target = require('../dist/main/targets/runtimeTarget').createRuntimeTarget(platform);
+    const target = require('../dist/main/targets/runtimeTarget').createRuntimeTarget(platform, platform === 'darwin' ? 'arm64' : 'x64');
     assert.equal((await target.checkForUpdate()).updateAvailable, true);
     const file = path.join(home, '.elastos-launcher', 'update-check.json');
     const saved = fs.readFileSync(file, 'utf8');

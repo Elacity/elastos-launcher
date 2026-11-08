@@ -137,6 +137,12 @@ async function main() {
 
   try {
     const page = await electronApp.firstWindow();
+    if (process.platform === 'darwin') {
+      await electronApp.evaluate(({ shell }) => {
+        global.__installBrowserCalls = [];
+        shell.openExternal = async (url) => { global.__installBrowserCalls.push(url); };
+      });
+    }
     const readyDeadline = Date.now() + 60000;
     let clicked = '';
     while (Date.now() < readyDeadline && !clicked) {
@@ -209,6 +215,10 @@ async function main() {
         }
         console.log('Install reached Open my computer');
         if (process.platform === 'darwin') {
+          if ((await electronApp.evaluate(() => global.__installBrowserCalls)).length !== 0) {
+            throw new Error('Mac Install opened a duplicate browser tab after home --browser');
+          }
+          console.log('PASS Mac Install leaves the browser open to home --browser without a duplicate launcher call');
           electronApp = await require('./mac-lifecycle-e2e')(electronApp, page, home, {
             executablePath: electronPath, cwd: root, args, env, timeout: 120000,
           });

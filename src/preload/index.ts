@@ -3,6 +3,7 @@ import { contextBridge, ipcRenderer } from 'electron';
 export type RuntimeStatus = 'running' | 'stopped' | 'starting' | 'stopping' | 'error' | 'not-installed';
 
 contextBridge.exposeInMainWorld('elastos', {
+  platform: process.platform,
   start: () => ipcRenderer.invoke('elastos:start'),
   stop: () => ipcRenderer.invoke('elastos:stop'),
   restart: () => ipcRenderer.invoke('elastos:restart'),
@@ -66,6 +67,7 @@ contextBridge.exposeInMainWorld('elastos', {
 declare global {
   interface Window {
     elastos: {
+      platform: NodeJS.Platform;
       start: () => Promise<void>;
       stop: () => Promise<void>;
       restart: () => Promise<void>;
