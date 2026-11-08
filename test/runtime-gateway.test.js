@@ -531,6 +531,66 @@ test('a gateway on 127.0.0.1:8090 is another Home and receives no signal', async
   assert.deepEqual(spawned, [['gateway', '--addr', 'localhost:8090']]);
 });
 
+test('upgrade: a gateway an earlier launcher started on 127.0.0.1 is stopped and started on localhost', async () => {
+  const legacyLock = JSON.stringify({ pid: 7, role: 'gateway', addr: '127.0.0.1:8090' });
+  const legacyFacts = {
+    lockText: legacyLock,
+    command: '/home/user/.local/bin/elastos gateway --addr 127.0.0.1:8090',
+    pidAlive: () => true,
+    ownsSocket: (_pid, wants) => wants.length === 1 && wants[0] === '127.0.0.1',
+  };
+  assert.equal(installedGatewayKind(legacyFacts), 'legacy');
+  assert.equal(foreignListenerIsElastos(legacyFacts), false);
+  assert.equal(installedGatewayKind({ ...legacyFacts, lockText: JSON.stringify({ pid: 7, addr: '0.0.0.0:8090' }) }), null);
+  assert.equal(installedGatewayKind({ ...legacyFacts, ownsSocket: () => false }), null);
+
+  const spawned = [];
+  const opened = [];
+  const logs = [];
+  let legacyRunning = true;
+  const legacySignals = [];
+  const legacy = {
+    pid: 7,
+    onOutput() {},
+    onExit() {},
+    hasExited: () => !legacyRunning,
+    signal(sig) { legacySignals.push(sig); legacyRunning = false; },
+  };
+  let mine = null;
+  const sup = createGatewaySupervisor({
+    binary: '/bin/elastos',
+    spawn(_binary, args) {
+      spawned.push([...args]);
+      const proc = fakeProcess(50 + spawned.length);
+      if (legacyRunning) {
+        queueMicrotask(() => {
+          proc.emit('another ElastOS host already owns this data directory\n');
+          proc.exit(1);
+        });
+      } else {
+        mine = proc;
+      }
+      return proc;
+    },
+    fetchHealth: async () => (legacyRunning || mine ? { status: 200, body: 'OK', addresses: ['127.0.0.1'] } : null),
+    sleep: async () => {},
+    now: () => 0,
+    openUrl: (url) => opened.push(url),
+    log: (line) => logs.push(line),
+    confirmForeign: async () => foreignListenerIsElastos(legacyFacts),
+    foreignIsLegacy: async () => installedGatewayKind(legacyFacts) === 'legacy',
+    adoptInstalled: () => legacy,
+    listenerOwned: (pid) => Boolean(mine && pid === mine.pid),
+  });
+  assert.equal(await sup.start(), 'started');
+  assert.deepEqual(legacySignals, ['SIGTERM']);
+  assert.deepEqual(spawned, [['gateway', '--addr', 'localhost:8090'], ['gateway', '--addr', 'localhost:8090']]);
+  assert.deepEqual(opened, []);
+  assert.ok(logs.some((line) => /older ElastOS is running on 127\.0\.0\.1:8090/.test(line)));
+  sup.openHome();
+  assert.deepEqual(opened, ['http://localhost:8090/home/']);
+});
+
 test('upgrade: a legacy gateway that cannot be adopted is not opened and says so', async () => {
   const opened = [];
   const sup = createGatewaySupervisor({

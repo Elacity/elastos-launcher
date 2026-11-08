@@ -129,7 +129,7 @@ export function createRuntimeTarget(platform: NodeJS.Platform = process.platform
     isInstalled: () => runtimeIsInstalled(),
     getStatus: async () => {
       if (updating) return 'starting';
-      if (platform === 'linux' && (await installedGatewayOnThisComputer()) === 'legacy') {
+      if (platform === 'linux' && (await installedGatewayOnThisComputer(platform)) === 'legacy') {
         return 'other-home';
       }
       const observedSupervisor = supervisor;

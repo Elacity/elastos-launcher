@@ -1183,7 +1183,7 @@ export function createDefaultGatewaySupervisor(binary: string, platform: string 
     openUrl: openRuntimeHome,
     log: (line) => logSink(line),
     confirmForeign: confirmInstalledGateway,
-    reportLegacyHome: async () => (await installedGatewayOnThisComputer()) === 'legacy',
+    reportLegacyHome: async () => (await installedGatewayOnThisComputer(platform)) === 'legacy',
     listenerOwned: (pid, health) => platform === 'darwin'
       ? confirmInstalledGateway()
       : platform === 'linux'
@@ -1359,9 +1359,9 @@ function controllerExeFromProc(pid: number): string | null {
 }
 
 /** The installed binary, and the controller copy Runtime stores under the data dir. */
-function allowedControllerExes(dataDir: string): string[] {
+function allowedControllerExes(homeDir: string, dataDir: string): string[] {
   const files = [
-    runtimeBinaryPath(os.homedir()),
+    runtimeBinaryPath(homeDir),
     `${dataDir}/update-controller/runtime`,
   ];
   const allowed: string[] = [];
@@ -1372,8 +1372,8 @@ function allowedControllerExes(dataDir: string): string[] {
   return allowed;
 }
 
-function observeRecordedController(): ControllerObservation {
-  const data = runtimeDataDir('linux', os.homedir(), process.env);
+function observeRecordedController(homeDir: string): ControllerObservation {
+  const data = runtimeDataDir('linux', homeDir, process.env);
   const statusText = readRegularText(`${data}/update-controller/status.json`, HOME_RECORD_MAX);
   const lockText = readRegularText(runtimeHostLockPath(data), HOME_RECORD_MAX);
   const boot = readProcOptional('/proc/sys/kernel/random/boot_id', 128);
@@ -1386,7 +1386,7 @@ function observeRecordedController(): ControllerObservation {
     bootId: boot ?? null,
     controllerStat: stat ?? null,
     exePath: pid > 0 ? controllerExeFromProc(pid) : null,
-    allowedExes: allowedControllerExes(data),
+    allowedExes: allowedControllerExes(homeDir, data),
   };
 }
 
@@ -1400,18 +1400,18 @@ export function linuxControllerAdopt(lockText: string | null): 'controller' | 'o
 }
 
 /** Linux Home. Signal only the recorded update controller. A legacy gateway is not adopted. */
-async function adoptLinuxGatewayProcess(): Promise<GatewayProcess | null> {
-  const data = runtimeDataDir('linux', os.homedir(), process.env);
+async function adoptLinuxGatewayProcess(homeDir: string): Promise<GatewayProcess | null> {
+  const data = runtimeDataDir('linux', homeDir, process.env);
   const lockText = readRegularText(runtimeHostLockPath(data), HOME_RECORD_MAX);
   if (linuxControllerAdopt(lockText) !== 'controller') return null;
-  return controllerGateway(observeRecordedController);
+  return controllerGateway(() => observeRecordedController(homeDir));
 }
 
 export async function adoptInstalledGatewayProcess(
   platform: string = process.platform, homeDir: string = os.homedir(),
 ): Promise<GatewayProcess | null> {
   if (platform === 'win32') return null;
-  if (platform === 'linux') return adoptLinuxGatewayProcess();
+  if (platform === 'linux') return adoptLinuxGatewayProcess(homeDir);
   const { text, pid } = readHostLock(platform, homeDir);
   const hostIdentity = platform === 'darwin' ? macProcessIdentity(pid) : null;
   if (pid <= 0 || !(await hostLockGatewayKind(text, pid, platform, homeDir))) return null;
