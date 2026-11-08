@@ -58,6 +58,7 @@ module.exports = async function (context) {
   if (process.platform !== 'darwin') return [];
   const strict = process.env.MAC_RELEASE_STRICT === 'true';
   if (process.env.NOTARIZE_MAC !== 'true') {
+    if (strict) throw new Error('[notarize] A release build must be notarized.');
     console.log('[notarize] Skipped because notarization was not requested.');
     return [];
   }

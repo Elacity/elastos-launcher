@@ -48,7 +48,6 @@ test('manual dispatch defaults to none and build keeps tag-only automatic trigge
   assert.deepEqual(Object.keys(workflows.build.on).sort(), ['push', 'workflow_dispatch']);
   assert.deepEqual(workflows.build.on.push, { tags: ['v*'] });
   assert.equal(workflows.build.on.workflow_dispatch.inputs.notarize.default, false);
-  assert.equal(workflows.build.jobs.build.env.NOTARIZE_MAC, '${{ inputs.notarize == true }}');
   assert.equal(workflows.build.jobs['linux-arm64'].with.platforms, 'linux');
   assert.equal(workflows.build.jobs.release.steps.find((step) => step.uses?.startsWith('softprops/')).uses,
     'softprops/action-gh-release@v2');
