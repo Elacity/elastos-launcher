@@ -58,27 +58,6 @@ export function parseUpdateCheckStatus(raw: string): ParsedUpdateCheck {
   };
 }
 
-/** Runtime 2.0.0 prints the result and does not write update-check.json. */
-export function parseUpdateCheckText(stdout: string): ParsedUpdateCheck {
-  const latestMatch = stdout.match(/^\s*Latest available:\s*(\S+)\s*$/m);
-  const installedMatch = stdout.match(/^\s*Installed release:\s*(\S+)\s*$/m);
-  const latest = latestMatch ? latestMatch[1] : null;
-  const installed = installedMatch && installedMatch[1] !== 'unknown' ? installedMatch[1] : null;
-  if (/^\s*Installed release is up to date\.\s*$/m.test(stdout)) {
-    const version = installed || latest || '';
-    return {
-      updateAvailable: false,
-      detail: version,
-      latest: latest || installed,
-    };
-  }
-  if (/Run `elastos update` to install\./.test(stdout)) {
-    if (!latest) throw new Error(UPDATE_STATUS_UNREADABLE);
-    return { updateAvailable: true, detail: latest, latest };
-  }
-  throw new Error(UPDATE_STATUS_UNREADABLE);
-}
-
 export function parseHeadCid(stdout: string): string | null {
   for (const line of stdout.split(/\r?\n/)) {
     const match = line.match(/^\s*Head CID:\s*(\S+)/);
@@ -123,7 +102,7 @@ export async function checkRuntimeUpdate(
   try {
     raw = readStatus();
   } catch {
-    return parseUpdateCheckText(result.stdout);
+    throw new Error(UPDATE_STATUS_UNREADABLE);
   }
   return parseUpdateCheckStatus(raw);
 }
