@@ -93,7 +93,7 @@ function lifecycle(t, mode) {
     if (failStop) throw new Error('mutation ran without a successful stop');
     entered(); await pending;
   });
-  const target = targets.createRuntimeTarget('darwin', 'arm64');
+  const target = targets.createRuntimeTarget('darwin', 'arm64', gateway.createGatewayLifetime());
   // Until the fix, Undo reaches this exported production entry point.
   target.rollback ??= targets.rollbackRuntimeUpdate;
   return { calls, target, supervisors, running, finish, failStop() { failStop = true; } };
@@ -118,9 +118,9 @@ for (const mode of ['update', 'rollback']) {
       let stopping;
       if (control === 'quit') {
         const { createLaunchController } = require('../dist/main/launchController');
-        const launch = createLaunchController({ env: {} });
         // Exercise the real shutdown path with this target's lifecycle state.
-        launch.target.stop = w.target.stop;
+        t.mock.method(require('../dist/main/targets'), 'createLaunchTarget', () => w.target);
+        const launch = createLaunchController({ env: {} });
         stopping = launch.shutdown();
       } else stopping = w.target[control]();
       assert.deepEqual(w.calls, control === 'forceStop' ? ['stop-1', mode, 'force-stop'] : ['stop-1', mode]);

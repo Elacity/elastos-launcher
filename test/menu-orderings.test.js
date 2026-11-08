@@ -1,7 +1,7 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
 const { mainFixture, tick } = require('./main-fixture');
-const { controllerFixture } = require('./controller-fixture');
+const { runtimeFixtures } = require('./controller-fixture');
 const statuses = ['running', 'stopped', 'starting', 'stopping', 'error', 'not-installed', 'other-home'];
 const labels = {
   running: 'Home is running', stopped: 'Home is stopped', starting: 'Home is starting',
@@ -53,12 +53,16 @@ function* histories(model = initial, path = []) {
   if (!children) yield path;
 }
 
-test('real menu obeys the state table for every legal event ordering through depth 4', async t => {
+for (const platform of ['darwin', 'linux', 'win32']) {
+test(`${platform} real menu and target obey the state table through depth 4`, async t => {
+  const fixture = runtimeFixtures(t, platform);
   let sequences = 0, steps = 0;
   const failures = new Map();
   for (const history of histories()) {
-    const { launch, runtime } = controllerFixture();
-    const f = await mainFixture({ controller: launch, ...(process.env.ELASTOS_MENU_ENTRY ? { entry: process.env.ELASTOS_MENU_ENTRY } : {}) });
+    const { launch, runtime } = fixture();
+    await launch.start();
+    runtime.calls.length = 0;
+    const f = await mainFixture({ controller: launch, platform, ...(process.env.ELASTOS_MENU_ENTRY ? { entry: process.env.ELASTOS_MENU_ENTRY } : {}) });
     let model = initial, observed = 'running', action, read, pending;
     let quitCallIndex;
     f.launch.target.getStatus = async () => observed;
@@ -107,6 +111,7 @@ test('real menu obeys the state table for every legal event ordering through dep
             await f.click('Reset ElastOS…');
           }
         } else if (event === 'resolve' || event === 'reject') {
+          runtime.wait = {};
           if (event === 'reject') action.reject(new Error('raw failure'));
           else action.resolve();
           await tick(); await tick();
@@ -163,3 +168,4 @@ test('real menu obeys the state table for every legal event ordering through dep
   t.diagnostic(`${sequences} histories, ${steps} checked steps, depth 4, ${failures.size} failed invariants`);
   assert.deepEqual([...failures], []);
 });
+}

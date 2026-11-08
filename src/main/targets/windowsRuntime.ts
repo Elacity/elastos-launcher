@@ -14,6 +14,8 @@ import {
   createGatewaySupervisor,
   emitRuntimeLog,
   GatewayProcess,
+  GatewayLifetime,
+  homeGatewayLifetime,
   InstalledGatewayKind,
   installedGatewayKind,
   listenerOwnership,
@@ -1356,8 +1358,9 @@ export function spawnDistroGatewayProcess(): GatewayProcess {
   };
 }
 
-export function createDistroGatewaySupervisor() {
+export function createDistroGatewaySupervisor(lifetime: GatewayLifetime = homeGatewayLifetime) {
   return createGatewaySupervisor({
+    lifetime,
     binary: '/root/.local/bin/elastos',
     platform: 'win32',
     args: ['home', '--browser'],

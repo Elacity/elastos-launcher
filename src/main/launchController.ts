@@ -200,6 +200,7 @@ export function createLaunchController(options: LaunchControllerOptions = {}): L
     }
   }
 
+  // Also refuse new update/rollback commands and UI success events after Quit.
   function runWhileActive(action: () => Promise<void>): Promise<void> {
     return shuttingDown ? Promise.resolve() : runRuntime(action, true);
   }
@@ -365,6 +366,7 @@ export function createLaunchController(options: LaunchControllerOptions = {}): L
     async shutdown() {
       // Shutdown ends this controller's lifetime, even if stopping fails.
       shuttingDown = true;
+      active.beginShutdown();
       try {
         await active.stop();
       } catch (err) {

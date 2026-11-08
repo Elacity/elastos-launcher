@@ -334,14 +334,14 @@ for (const mode of ['update', 'rollback']) {
         entered();
         await pending;
       });
-      const target = createRuntimeTarget('win32');
+      const target = createRuntimeTarget('win32', 'x64', require('../dist/main/targets/runtimeGateway').createGatewayLifetime());
       const operation = target[mode]();
       await running;
       let stopping;
       if (control === 'quit') {
         const { createLaunchController } = require('../dist/main/launchController');
+        t.mock.method(require('../dist/main/targets'), 'createLaunchTarget', () => target);
         const launch = createLaunchController({ env: {} });
-        launch.target.stop = target.stop;
         stopping = launch.shutdown();
       } else if (control === 'forceStop') {
         target.forceStop();

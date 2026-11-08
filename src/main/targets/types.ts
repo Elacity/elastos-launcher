@@ -59,6 +59,8 @@ export interface LaunchTarget {
   isInstalled(): Promise<boolean>;
   getStatus(): Promise<TargetStatus>;
   start(): Promise<void>;
+  /** Permanently refuse Home starts before waiting for shutdown work. */
+  beginShutdown(): void;
   /** Stop this window's gateway; on macOS, also adopt a proved installed Home. */
   stop(): Promise<void>;
   /** Reset and Uninstall, after the confirm dialog, may adopt the installed gateway. */

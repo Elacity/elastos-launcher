@@ -8,6 +8,8 @@ import {
   installedGatewayOnThisComputer,
   ForeignGatewayError,
   GatewaySupervisor,
+  GatewayLifetime,
+  homeGatewayLifetime,
   homeLaunchForPlatform,
   isHealthOk,
   openRuntimeHome,
@@ -40,7 +42,7 @@ import {
 } from './windowsRuntime';
 import { LaunchTarget, UpdateCheck } from './types';
 
-export function createRuntimeTarget(platform: NodeJS.Platform = process.platform, arch: string = process.arch): LaunchTarget {
+export function createRuntimeTarget(platform: NodeJS.Platform = process.platform, arch: string = process.arch, lifetime: GatewayLifetime = homeGatewayLifetime): LaunchTarget {
   let supervisor: GatewaySupervisor | null = null;
   let updating = false;
   let requestedRunning = false;
@@ -56,13 +58,13 @@ export function createRuntimeTarget(platform: NodeJS.Platform = process.platform
     if (!requestedRunning) return;
     if (platform === 'win32') {
       if (!distroIsInstalled()) throw new Error('ElastOS is not installed yet. Click Install.');
-      if (!supervisor) supervisor = createDistroGatewaySupervisor();
+      if (!supervisor) supervisor = createDistroGatewaySupervisor(lifetime);
     } else {
       const block = runtimeInstallBlock(platform, arch);
       if (block) throw new Error(block);
       const file = binary();
       if (!file) throw new Error('ElastOS is not installed yet. Click Install.');
-      if (!supervisor) supervisor = createDefaultGatewaySupervisor(file, platform);
+      if (!supervisor) supervisor = createDefaultGatewaySupervisor(file, platform, lifetime);
     }
     await supervisor.start();
   }
@@ -98,8 +100,8 @@ export function createRuntimeTarget(platform: NodeJS.Platform = process.platform
   async function stopGateway(adopt: boolean): Promise<void> {
     if (!supervisor) {
       supervisor = platform === 'win32'
-        ? createDistroGatewaySupervisor()
-        : createDefaultGatewaySupervisor(binary() ?? runtimeBinaryPath(os.homedir()), platform);
+        ? createDistroGatewaySupervisor(lifetime)
+        : createDefaultGatewaySupervisor(binary() ?? runtimeBinaryPath(os.homedir()), platform, lifetime);
     }
     await supervisor.stop({ adopt });
   }
@@ -111,12 +113,11 @@ export function createRuntimeTarget(platform: NodeJS.Platform = process.platform
       await stopGateway(true);
       await action();
     } finally {
-      supervisor = null;
       try {
-        const file = binary();
-        if (!file) throw new Error('ElastOS is not installed yet. Click Install.');
-        supervisor = createDefaultGatewaySupervisor(file, platform);
-        await supervisor.start();
+        if (requestedRunning) {
+          supervisor = null;
+          await startGateway();
+        }
       } finally {
         updating = false;
       }
@@ -173,6 +174,7 @@ export function createRuntimeTarget(platform: NodeJS.Platform = process.platform
       requestedRunning = true;
       return serialize(startGateway);
     },
+    beginShutdown: () => { lifetime.shutdown(); },
     stop: () => requestStop(false),
     stopForRemoval: () => requestStop(true),
     forceStop: () => {
@@ -191,12 +193,14 @@ export function createRuntimeTarget(platform: NodeJS.Platform = process.platform
       const action = () => applyRuntimeUpdate(runtimeCommand(platform), runtimeHeadStore(), headVerify(platform), onProgress);
       if (platform === 'darwin' || platform === 'win32') return changeRuntime(action);
       if (!homeLaunchForPlatform(platform).updateRestartsHome) return serialize(action);
+      requestedRunning = true;
       return serialize(() => runWithHomeRestart(action));
     },
     rollback: (onProgress) => {
       const action = () => rollbackRuntime(runtimeCommand(platform), runtimeHeadStore(), headVerify(platform), onProgress);
       if (platform === 'darwin' || platform === 'win32') return changeRuntime(action);
       if (!homeLaunchForPlatform(platform).rollbackRestartsHome) return serialize(action);
+      requestedRunning = true;
       return serialize(() => runWithHomeRestart(action));
     },
     // On Windows the launch controller runs uninstallRuntimeInDistro (windowsUninstall.ts) with the two answers.

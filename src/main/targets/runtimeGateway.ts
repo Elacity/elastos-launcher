@@ -178,7 +178,21 @@ export function foreignListenerIsElastos(input: Parameters<typeof installedGatew
   return installedGatewayKind(input) === 'current';
 }
 
+/** One irreversible lifetime for all Home supervisors in this launcher process. */
+export interface GatewayLifetime {
+  readonly shuttingDown: boolean;
+  shutdown(): void;
+}
+
+export function createGatewayLifetime(): GatewayLifetime {
+  let closed = false;
+  return { get shuttingDown() { return closed; }, shutdown() { closed = true; } };
+}
+
+export const homeGatewayLifetime = createGatewayLifetime();
+
 export interface GatewaySupervisorDeps {
+  lifetime?: GatewayLifetime;
   platform?: string;
   binary: string;
   args?: readonly string[];
@@ -227,7 +241,7 @@ export interface GatewaySupervisorDeps {
 }
 
 export interface GatewaySupervisor {
-  start(): Promise<'started' | 'already-running'>;
+  start(): Promise<'started' | 'already-running' | 'stopped'>;
   /**
    * Stop the gateway this window started. `adopt` is only for Reset and
    * Uninstall, after the person confirmed. Quit, Stop, and Restart omit it.
@@ -842,6 +856,7 @@ export function launcherLogText(text: string, hideTerminalKeepLine: boolean, pla
 }
 
 export function createGatewaySupervisor(deps: GatewaySupervisorDeps): GatewaySupervisor {
+  const lifetime = deps.lifetime ?? homeGatewayLifetime;
   const graceMs = deps.graceMs ?? STOP_GRACE_MS;
   const healthTimeoutMs = deps.healthTimeoutMs ?? 60_000;
   const pollMs = deps.pollMs ?? 250;
@@ -895,7 +910,9 @@ export function createGatewaySupervisor(deps: GatewaySupervisorDeps): GatewaySup
     return null;
   }
 
-  async function launchOnce(): Promise<'ready' | 'replaced' | 'already'> {
+  async function launchOnce(): Promise<'ready' | 'replaced' | 'already' | 'stopped'> {
+    // No await between this refusal and spawn, including replacement retries.
+    if (lifetime.shuttingDown) return 'stopped';
     intentionalStop = false;
     foreign = false;
     const proc = deps.spawn(deps.binary, deps.args ?? GATEWAY_ARGS);
@@ -1036,14 +1053,19 @@ export function createGatewaySupervisor(deps: GatewaySupervisorDeps): GatewaySup
 
   const supervisor: GatewaySupervisor = {
     async start() {
+      if (lifetime.shuttingDown) return 'stopped';
       if (owned && current === 'running') {
-        if (!(await owned.hasExited())) return 'started';
+        const exited = await owned.hasExited();
+        if (lifetime.shuttingDown) return 'stopped';
+        if (!exited) return 'started';
         owned = null;
       }
       current = 'starting';
       let legacyStopped = false;
       for (;;) {
         const result = await launchOnce();
+        if (result === 'stopped') return 'stopped';
+        if (lifetime.shuttingDown) return 'stopped';
         if (result === 'replaced') continue;
         if (result === 'already') {
           if (deps.reportLegacyHome && await deps.reportLegacyHome()) {
@@ -1060,6 +1082,7 @@ export function createGatewaySupervisor(deps: GatewaySupervisorDeps): GatewaySup
               current = 'error';
               throw new Error(LEGACY_STILL_RUNNING_MESSAGE);
             }
+            if (lifetime.shuttingDown) { adopted.dispose?.(); return 'stopped'; }
             ownAdopted(adopted);
             try {
               await stopProcess(adopted);
@@ -1080,9 +1103,11 @@ export function createGatewaySupervisor(deps: GatewaySupervisorDeps): GatewaySup
             current = 'error';
             throw new Error('Something is answering on port 8090, but it is not the ElastOS gateway. Home was not opened.');
           }
+          const adopted = deps.adoptForControls ? await findInstalled() : null;
+          if (lifetime.shuttingDown) { adopted?.dispose?.(); return 'stopped'; }
           foreign = true;
           intentionalStop = false;
-          ownAdopted(deps.adoptForControls ? await findInstalled() : null);
+          ownAdopted(adopted);
           current = 'running';
           deps.openUrl(HOME_URL);
           return 'already-running';
@@ -1477,9 +1502,10 @@ export function platformAdoptsInstalledHome(platform: string): boolean {
   return platform === 'darwin' || platform === 'linux';
 }
 
-export function createDefaultGatewaySupervisor(binary: string, platform: string = process.platform): GatewaySupervisor {
+export function createDefaultGatewaySupervisor(binary: string, platform: string = process.platform, lifetime: GatewayLifetime = homeGatewayLifetime): GatewaySupervisor {
   const launch = homeLaunchForPlatform(platform);
   return createGatewaySupervisor({
+    lifetime,
     binary,
     platform,
     args: launch.args,
