@@ -70,7 +70,7 @@ async function main() {
     await page.reload();
     await page.locator('#remove-pc2-btn').waitFor({ state: 'visible' });
     await page.waitForTimeout(2100);
-    assert.equal(await page.locator('#status-text').innerText(), 'Stopped', 'fixture survives the production status poll');
+    assert.equal(await page.locator('#status-text').textContent(), 'Stopped', 'fixture survives the production status poll');
     assert.equal(await page.locator('#uninstall-btn').isEnabled(), true);
 
     async function check(label, selector) {
