@@ -87,6 +87,8 @@ export interface GatewayProcess {
   onExit(listener: (code: number | null) => void): void;
   signal(signal: NodeJS.Signals): void;
   hasExited(): boolean | Promise<boolean>;
+  /** Drop a pidfd helper. A spawned process and a Mac process have none. */
+  dispose?(): void;
 }
 
 /**
@@ -605,6 +607,16 @@ export function controllerGateway(
     signal(signal) {
       signalRecordedController(signal, { readRecord, readProc, openPidfd }, held);
     },
+    dispose() {
+      const pidfd = held.pidfd;
+      held.pidfd = null;
+      if (!pidfd) return;
+      try {
+        pidfd.close();
+      } catch {
+        // Stop still reports its own error. close() has already dropped the helper.
+      }
+    },
   };
 }
 
@@ -858,8 +870,13 @@ export function createGatewaySupervisor(deps: GatewaySupervisorDeps): GatewaySup
       : `ElastOS stopped (exit ${code}). Click Start to try again.`);
   }
 
-  function ownAdopted(proc: GatewayProcess | null): void {
+  function replaceOwned(proc: GatewayProcess | null): void {
+    if (owned && owned !== proc) owned.dispose?.();
     owned = proc;
+  }
+
+  function ownAdopted(proc: GatewayProcess | null): void {
+    replaceOwned(proc);
     proc?.onExit((code) => recordExit(proc, code));
   }
 
@@ -880,7 +897,7 @@ export function createGatewaySupervisor(deps: GatewaySupervisorDeps): GatewaySup
     intentionalStop = false;
     foreign = false;
     const proc = deps.spawn(deps.binary, deps.args ?? GATEWAY_ARGS);
-    owned = proc;
+    replaceOwned(proc);
     let output = '';
     let exited = false;
     let exitCode: number | null = null;
@@ -992,20 +1009,25 @@ export function createGatewaySupervisor(deps: GatewaySupervisorDeps): GatewaySup
   async function stopProcess(proc: GatewayProcess): Promise<void> {
     intentionalStop = true;
     current = 'stopping';
-    proc.signal('SIGTERM');
-    if (await confirmedStopped(proc, graceMs)) {
-      owned = null;
-      current = 'stopped';
-      return;
+    try {
+      proc.signal('SIGTERM');
+      if (await confirmedStopped(proc, graceMs)) {
+        owned = null;
+        current = 'stopped';
+        return;
+      }
+      proc.signal('SIGKILL');
+      if (await confirmedStopped(proc, graceMs)) {
+        owned = null;
+        current = 'stopped';
+        return;
+      }
+      current = 'error';
+      throw new Error('ElastOS is still running.');
+    } catch (err) {
+      proc.dispose?.();
+      throw err;
     }
-    proc.signal('SIGKILL');
-    if (await confirmedStopped(proc, graceMs)) {
-      owned = null;
-      current = 'stopped';
-      return;
-    }
-    current = 'error';
-    throw new Error('ElastOS is still running.');
   }
 
   const supervisor: GatewaySupervisor = {
@@ -1100,11 +1122,13 @@ export function createGatewaySupervisor(deps: GatewaySupervisorDeps): GatewaySup
     },
     forceKill() {
       if (!owned) return;
+      const failed = current === 'error';
       try {
         owned.signal('SIGKILL');
       } catch {
         // Quit still closes. The error from stop() is logged by the caller.
       }
+      if (failed) owned.dispose?.();
     },
     openHome() {
       deps.openUrl(HOME_URL);
