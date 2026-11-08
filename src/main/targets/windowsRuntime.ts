@@ -324,8 +324,6 @@ export async function ensureElastosDistro(deps: {
     if (code !== 0) throw new Error(DISTRO_IMPORT_FAILED);
     deps.onProgress('Starting the Linux environment for the first time');
   }
-  // Set up imports the distro and returns while it is still stopped.
-  // The first command blocks in first boot. The tool check allows 20 seconds.
   let booted: WslResult;
   try {
     booted = await run(['true'], DISTRO_FIRST_BOOT_MS);
@@ -416,7 +414,6 @@ function distroInstallDeps(): RuntimeInstallDeps {
 
 export async function installRuntimeInsideDistro(
   onProgress: (message: string) => void = () => {},
-  // Tests pass host so this function can run without wsl.exe. Production omits it.
   host: {
     lookupWsl?: () => Promise<boolean>;
     listDistros?: () => Promise<string>;
