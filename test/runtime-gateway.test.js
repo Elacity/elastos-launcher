@@ -820,6 +820,11 @@ test('logs omit attach secrets', async () => {
   assert.equal(text.includes('sekrit'), false);
   assert.match(text, /omitted a line/);
   assert.equal(scrubRuntimeLog('attach_secret=nope').includes('nope'), false);
+  const { HOME_TERMINAL_LINE } = require('../dist/main/targets/runtimeGateway');
+  const hidden = scrubRuntimeLog(`Home: http://localhost:8090/home/\n${HOME_TERMINAL_LINE}\nStill starting Home (10 s)...\n`);
+  assert.equal(hidden.includes(HOME_TERMINAL_LINE), false);
+  assert.match(hidden, /Still starting Home/);
+  assert.match(scrubRuntimeLog(`${HOME_TERMINAL_LINE}\nattach_secret=nope\n`), /omitted a line/);
 });
 
 test('uninstall removes only the runtime binary and data dir', async () => {

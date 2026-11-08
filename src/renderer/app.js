@@ -216,7 +216,10 @@ async function runInstall() {
     renderSteps('Starting');
     await window.elastos.start();
     renderSteps('Your computer is ready');
-    await window.elastos.openBrowser();
+    const started = await window.elastos.getLaunchInfo();
+    if (flow.shouldOpenBrowserAfterStart(started)) {
+      await window.elastos.openBrowser();
+    }
   } catch (err) {
     showError(err && err.message ? err.message : 'Something went wrong. Try again.');
     updateStatus('error');

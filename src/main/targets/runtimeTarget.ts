@@ -56,6 +56,31 @@ export function createRuntimeTarget(platform: NodeJS.Platform = process.platform
     await supervisor.stop({ adopt });
   }
 
+  /** Stop Home, run one release command, then start `home --browser` again. */
+  async function restartHomeAfter(run: () => Promise<void>): Promise<void> {
+    if (updating) throw new Error('An ElastOS update is already running.');
+    updating = true;
+    try {
+      await stopGateway(true);
+      await run();
+    } finally {
+      supervisor = null;
+      try {
+        if (platform === 'win32') {
+          if (!distroIsInstalled()) throw new Error('ElastOS is not installed yet. Click Install.');
+          supervisor = createDistroGatewaySupervisor();
+        } else {
+          const file = binary();
+          if (!file) throw new Error('ElastOS is not installed yet. Click Install.');
+          supervisor = createDefaultGatewaySupervisor(file, platform);
+        }
+        await supervisor.start();
+      } finally {
+        updating = false;
+      }
+    }
+  }
+
   return {
     id: 'runtime',
     descriptor: RUNTIME_TARGET,
@@ -65,13 +90,20 @@ export function createRuntimeTarget(platform: NodeJS.Platform = process.platform
       if (supervisor) {
         const phase = supervisor.phase();
         if (phase === 'starting' || phase === 'stopping' || phase === 'error'
-          || (phase === 'running' && platform !== 'darwin')) {
+          || (phase === 'running' && platform !== 'darwin' && platform !== 'win32')) {
           return phase;
         }
       }
       if (platform === 'win32') {
         if (!distroIsInstalled()) return 'not-installed';
-        if (isHealthOk(await readHealth())) return 'running';
+        if (isHealthOk(await readHealth())) {
+          // A live controller keeps Home up after the child pid changes. Health
+          // and the distro facts are the status, not the supervisor's old phase.
+          if (!(await confirmInstalledGateway())) {
+            throw new Error('Another program is answering on port 8090. Home was not adopted.');
+          }
+          return 'running';
+        }
         return 'stopped';
       }
       if (runtimeInstallBlock(platform, process.arch)) return 'not-installed';
@@ -116,24 +148,14 @@ export function createRuntimeTarget(platform: NodeJS.Platform = process.platform
     },
     install: (onProgress) => runtimeInstall.installRuntimeOnThisComputer(onProgress),
     update: async (onProgress) => {
-      if (platform !== 'darwin') return applyRuntimeUpdate(runtimeCommand(), runtimeHeadStore(), headVerify(), onProgress);
-      if (updating) throw new Error('An ElastOS update is already running.');
-      updating = true;
-      try {
-        await stopGateway(true);
-        await applyRuntimeUpdate(runtimeCommand(), runtimeHeadStore(), headVerify(), onProgress);
-      } finally {
-        supervisor = null;
-        try {
-          const file = binary();
-          if (!file) throw new Error('ElastOS is not installed yet. Click Install.');
-          supervisor = createDefaultGatewaySupervisor(file, platform);
-          await supervisor.start();
-        } finally {
-          updating = false;
-        }
+      if (platform !== 'darwin' && platform !== 'win32') {
+        return applyRuntimeUpdate(runtimeCommand(), runtimeHeadStore(), headVerify(), onProgress);
       }
+      await restartHomeAfter(() => applyRuntimeUpdate(runtimeCommand(), runtimeHeadStore(), headVerify(), onProgress));
     },
+    rollback: (onProgress) => (platform === 'win32'
+      ? restartHomeAfter(() => rollbackRuntimeUpdate(onProgress))
+      : rollbackRuntimeUpdate(onProgress)),
     // On Windows the launch controller runs uninstallRuntimeInDistro (windowsUninstall.ts) with the two answers.
     uninstall: () => (platform === 'win32' ? Promise.reject(new Error('Uninstall on Windows needs your answer in the Uninstall window. Nothing was removed.')) : runtimeUninstall(() => stopGateway(true))),
     getVersion: () => (platform === 'win32' ? readDistroVersion() : readRuntimeVersion()),

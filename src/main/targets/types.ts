@@ -66,6 +66,8 @@ export interface LaunchTarget {
   restart(): Promise<void>;
   install(onProgress: (message: string) => void): Promise<void>;
   update(onProgress: (message: string) => void): Promise<void>;
+  /** Stop Home, restore the previous release, and start it again on Windows. */
+  rollback(onProgress: (message: string) => void): Promise<void>;
   uninstall(): Promise<void>;
   getVersion(): string;
   checkForUpdate(): Promise<UpdateCheck>;

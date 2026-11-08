@@ -13,6 +13,11 @@ const {
   distroListenerKind,
   assertDistroPath,
   distroGatewayArgs,
+  distroHomeSpawnOptions,
+  distroStopPid,
+  parseDistroStopReport,
+  DISTRO_CONTROLLER_COMMAND,
+  DISTRO_STOP_READER,
   distroInstallerArgs,
   distroRuntimeArgs,
   distroPackageArgs,
@@ -67,7 +72,7 @@ test('distro paths stay POSIX and the installer uses ELASTOS_HEAD_CID', () => {
   assert.deepEqual(Object.keys(wslEnv).sort(), ['PATH', 'WSLENV', 'WSL_UTF8']);
   assert.deepEqual([...wslCommandPrefix(), ...args].slice(0, 4), ['-d', 'ElastOS', '-u', 'root']);
   assert.equal(wslSpawnEnv({}).WSL_UTF8, '1');
-  assert.deepEqual(distroGatewayArgs().slice(-3), ['gateway', '--addr', 'localhost:8090']);
+  assert.deepEqual(distroGatewayArgs().slice(-3), ['/root/.local/bin/elastos', 'home', '--browser']);
   assert.deepEqual(distroRuntimeArgs(['update', '--check']), ['/root/.local/bin/elastos', 'update', '--check']);
   assert.equal(runtimeUpdateCheckPath(runtimeDataDir('linux', '/root', {})), '/root/.local/share/elastos/update-check.json');
   assert.match(distroPackageArgs().join(' '), /nameserver 8\.8\.8\.8/);
@@ -252,7 +257,10 @@ test('the distro gateway identity uses the lock pid socket and a positive wsl pi
   const stopped = [];
   signalDistroGateway(42, 'SIGTERM', (pid, signal) => { killed.push([pid, signal]); }, (name) => { stopped.push(name); });
   assert.deepEqual(stopped, ['TERM']);
-  assert.deepEqual(killed, [[42, 'SIGTERM']]);
+  assert.deepEqual(killed, []);
+  signalDistroGateway(42, 'SIGKILL', (pid, signal) => { killed.push([pid, signal]); }, (name) => { stopped.push(name); });
+  assert.deepEqual(stopped, ['TERM', 'KILL']);
+  assert.deepEqual(killed, [[42, 'SIGKILL']]);
 
   const skipped = [];
   signalDistroGateway(0, 'SIGTERM', () => { skipped.push('kill'); }, () => { skipped.push('lock'); });
@@ -546,4 +554,97 @@ test('Reset adopts the distro pid the identity facts proved, not a second lock r
   });
   assert.equal(later, null);
   assert.deepEqual(rewritten, [7]);
+});
+
+test('a distro Home started with home --browser is the current listener', () => {
+  const facts = {
+    lock: JSON.stringify({ pid: 7, role: 'gateway', addr: 'localhost:8090', generation: 'abc' }),
+    command: '/root/.local/bin/elastos home --browser',
+    tcp: [TCP_HEADER, V4_LISTEN(4242)].join('\n'),
+    tcp6: TCP6_HEADER,
+    links: ['socket:[4242]'],
+    alive: true,
+  };
+  assert.equal(factsAreElastos(JSON.stringify(facts)), true);
+});
+
+test('Stop signals the proved update controller and otherwise the host pid', () => {
+  assert.equal(
+    DISTRO_CONTROLLER_COMMAND,
+    '/root/.local/share/elastos/update-controller/runtime __update-controller',
+  );
+  const command = `${DISTRO_CONTROLLER_COMMAND} --receipt /root/.local/share/elastos/update-controller/receipt.json`;
+  const report = (overrides = {}) => ({
+    lockText: JSON.stringify({ pid: 7, generation: 'abc', addr: 'localhost:8090' }),
+    statusText: JSON.stringify({ host_pid: 7, controller_pid: 4, generation: 'abc', phase: 'ready' }),
+    procs: {
+      4: { ppid: 1, command },
+      7: { ppid: 4, command: '/root/.local/bin/elastos home --browser' },
+    },
+    ...overrides,
+  });
+  assert.equal(distroStopPid(report()), 4);
+  assert.equal(distroStopPid(report({
+    procs: {
+      4: { ppid: 1, command: '/root/.local/bin/elastos gateway --addr localhost:8090' },
+      7: { ppid: 4, command: '/root/.local/bin/elastos home --browser' },
+    },
+  })), 7);
+  assert.equal(distroStopPid(report({
+    statusText: JSON.stringify({ host_pid: 7, controller_pid: 4, generation: 'other' }),
+  })), 7);
+  assert.equal(distroStopPid(report({ statusText: null })), 7);
+  assert.equal(distroStopPid(report({
+    procs: {
+      4: { ppid: 1, command },
+      7: { ppid: 9, command: '/root/.local/bin/elastos home --browser' },
+    },
+  })), 7);
+  assert.equal(distroStopPid({ lockText: '{', statusText: null, procs: {} }), null);
+
+  const signals = [];
+  const adopted = adoptDistroGatewayProcess({
+    readPid: () => 7,
+    alive: () => true,
+    signal: (pid, signal) => { signals.push([pid, signal]); },
+    report: () => report(),
+  });
+  assert.equal(adopted && adopted.pid, 7);
+  adopted.signal('SIGTERM');
+  adopted.signal('SIGKILL');
+  assert.deepEqual(signals, [[4, 'SIGTERM'], [4, 'SIGKILL'], [7, 'SIGKILL']]);
+  const hostOnly = adoptDistroGatewayProcess({
+    readPid: () => 7,
+    alive: () => false,
+    signal: (pid, signal) => { signals.push([pid, signal]); },
+    report: () => report({ lockText: JSON.stringify({ pid: 8, generation: 'abc' }) }),
+  });
+  hostOnly.signal('SIGTERM');
+  assert.deepEqual(signals, [[4, 'SIGTERM'], [4, 'SIGKILL'], [7, 'SIGKILL'], [7, 'SIGTERM']]);
+  assert.equal(hostOnly.hasExited(), true);
+
+  const spawnOptions = distroHomeSpawnOptions(wslSpawnEnv({
+    PATH: 'C:\\Windows',
+    ELASTOS_UPDATE_CONTROLLER_HOST: '1',
+  }));
+  assert.equal(spawnOptions.detached, true);
+  assert.deepEqual(spawnOptions.stdio, ['ignore', 'pipe', 'pipe']);
+  assert.equal(spawnOptions.env.WSL_UTF8, '1');
+  assert.equal(Object.hasOwn(spawnOptions.env, 'ELASTOS_UPDATE_CONTROLLER_HOST'), false);
+
+  const parsed = parseDistroStopReport(JSON.stringify({
+    lock: report().lockText,
+    status: report().statusText,
+    procs: { 4: { ppid: 1, command }, 7: { ppid: 4, command: '/root/.local/bin/elastos home --browser' } },
+  }));
+  assert.equal(parsed && distroStopPid(parsed), 4);
+  assert.equal(parseDistroStopReport('{"lock":1}'), null);
+
+  const syntax = require('node:child_process').spawnSync('python3', ['-c', 'import ast,sys; ast.parse(sys.stdin.read())'], {
+    input: DISTRO_STOP_READER,
+    encoding: 'utf8',
+  });
+  assert.equal(syntax.status, 0, syntax.stderr);
+  assert.equal(DISTRO_STOP_READER.includes("split('\\n')"), true);
+  assert.equal(DISTRO_STOP_READER.includes("b'\\x00'"), true);
 });

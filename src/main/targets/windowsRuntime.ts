@@ -13,7 +13,6 @@ import { WINDOWS_NATIVE_MESSAGE } from './runtimeSupport';
 import {
   createGatewaySupervisor,
   emitRuntimeLog,
-  GATEWAY_ARGS,
   GatewayProcess,
   InstalledGatewayKind,
   installedGatewayKind,
@@ -185,8 +184,233 @@ export function distroInstallerArgs(
   ];
 }
 
+/** Runtime 2.0.0 enters the update controller only through this command. */
 export function distroGatewayArgs(): string[] {
-  return [...wslCommandPrefix(), '/root/.local/bin/elastos', ...GATEWAY_ARGS];
+  return [...wslCommandPrefix(), '/root/.local/bin/elastos', 'home', '--browser'];
+}
+
+/**
+ * The controller binary the host lock's parent must be running.
+ * `queue_update` accepts a request only while that process is the live controller.
+ */
+export const DISTRO_CONTROLLER_COMMAND =
+  `${runtimeDataDir('linux', DISTRO_HOME, {})}/update-controller/runtime __update-controller`;
+
+/** Home's controller can take the runtime's full ready budget (120s) plus margin. Mac uses the same budget. */
+export const DISTRO_HOME_READY_MS = 150_000;
+
+export function distroHomeSpawnOptions(env: NodeJS.ProcessEnv = wslSpawnEnv()): {
+  detached: true;
+  windowsHide: true;
+  stdio: ['ignore', 'pipe', 'pipe'];
+  env: NodeJS.ProcessEnv;
+} {
+  return {
+    detached: true,
+    windowsHide: true,
+    stdio: ['ignore', 'pipe', 'pipe'],
+    env,
+  };
+}
+
+export interface DistroProcFact {
+  ppid: number | null;
+  command: string | null;
+}
+
+/** Raw files from the distro. The stop decision does not trust this until `distroStopPid`. */
+export interface DistroStopReport {
+  lockText: string;
+  statusText: string | null;
+  procs: Readonly<Record<string, DistroProcFact>>;
+}
+
+/**
+ * Pid to signal. A proved controller is the host's parent, shares the lock
+ * generation, and is the update-controller binary. Otherwise the host pid.
+ * Null when the lock names no usable pid.
+ */
+export function distroStopPid(report: DistroStopReport): number | null {
+  let lock: { pid?: unknown; generation?: unknown };
+  try {
+    lock = JSON.parse(report.lockText) as { pid?: unknown; generation?: unknown };
+  } catch {
+    return null;
+  }
+  const host = lock.pid;
+  if (typeof host !== 'number' || !Number.isInteger(host) || host <= 1) return null;
+  if (!report.statusText) return host;
+  let status: { host_pid?: unknown; generation?: unknown; controller_pid?: unknown };
+  try {
+    status = JSON.parse(report.statusText) as { host_pid?: unknown; generation?: unknown; controller_pid?: unknown };
+  } catch {
+    return host;
+  }
+  const controller = status.controller_pid;
+  const proved = status.host_pid === host
+    && typeof status.generation === 'string'
+    && status.generation.length > 0
+    && status.generation === lock.generation
+    && typeof controller === 'number'
+    && Number.isInteger(controller)
+    && controller > 1
+    && controller !== host;
+  if (!proved) return host;
+  const controllerFact = report.procs[String(controller)];
+  const hostFact = report.procs[String(host)];
+  if (!controllerFact || !hostFact) return host;
+  if (hostFact.ppid !== controller) return host;
+  if (!controllerFact.command || !controllerFact.command.includes(DISTRO_CONTROLLER_COMMAND)) return host;
+  return controller;
+}
+
+export function parseDistroStopReport(raw: string): DistroStopReport | null {
+  let parsed: { lock?: unknown; status?: unknown; procs?: unknown };
+  try {
+    parsed = JSON.parse(raw) as { lock?: unknown; status?: unknown; procs?: unknown };
+  } catch {
+    return null;
+  }
+  if (typeof parsed.lock !== 'string') return null;
+  if (parsed.status !== null && typeof parsed.status !== 'string') return null;
+  if (!parsed.procs || typeof parsed.procs !== 'object') return null;
+  const procs: Record<string, DistroProcFact> = {};
+  for (const [key, value] of Object.entries(parsed.procs as Record<string, unknown>)) {
+    if (!/^[1-9]\d*$/.test(key) || !value || typeof value !== 'object') return null;
+    const fact = value as { ppid?: unknown; command?: unknown };
+    if (fact.ppid !== null && (typeof fact.ppid !== 'number' || !Number.isInteger(fact.ppid) || fact.ppid <= 0)) return null;
+    if (fact.command !== null && typeof fact.command !== 'string') return null;
+    procs[key] = {
+      ppid: typeof fact.ppid === 'number' ? fact.ppid : null,
+      command: typeof fact.command === 'string' ? fact.command : null,
+    };
+  }
+  return {
+    lockText: parsed.lock,
+    statusText: parsed.status,
+    procs,
+  };
+}
+
+export const DISTRO_STOP_READER = `
+import json, os, stat
+LIMIT = 16384
+ROOT = '/root/.local/share/elastos'
+LOCK = ROOT + '/host-process.lock'
+STATUS = ROOT + '/update-controller/status.json'
+
+def read_text(path, required):
+    current = ''
+    parts = path.strip('/').split('/')
+    info = None
+    for index, part in enumerate(parts):
+        current = current + '/' + part
+        try:
+            info = os.lstat(current)
+        except FileNotFoundError:
+            if required:
+                raise SystemExit(1)
+            return None
+        if stat.S_ISLNK(info.st_mode):
+            raise SystemExit(2)
+        if index == len(parts) - 1:
+            if not stat.S_ISREG(info.st_mode) or info.st_size > LIMIT:
+                raise SystemExit(2)
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    try:
+        data = os.read(fd, LIMIT + 1)
+    finally:
+        os.close(fd)
+    if len(data) > LIMIT:
+        raise SystemExit(2)
+    return data.decode('utf-8', 'replace')
+
+def read_proc(path):
+    try:
+        info = os.lstat(path)
+    except OSError:
+        return None
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode) or info.st_size > LIMIT:
+        return None
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError:
+        return None
+    try:
+        data = os.read(fd, LIMIT + 1)
+    finally:
+        os.close(fd)
+    if len(data) > LIMIT:
+        return None
+    return data
+
+def pid_of(text, key):
+    try:
+        value = json.loads(text).get(key)
+    except Exception:
+        return None
+    if type(value) is int and value > 1:
+        return value
+    return None
+
+def proc_fact(pid):
+    base = '/proc/' + str(pid)
+    try:
+        info = os.lstat(base)
+    except OSError:
+        return None
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+        return None
+    status = read_proc(base + '/status')
+    cmd = read_proc(base + '/cmdline')
+    ppid = None
+    if status:
+        for line in status.decode('utf-8', 'replace').split('\\n'):
+            if line.startswith('PPid:'):
+                raw = line[5:].strip()
+                if raw.isdigit():
+                    ppid = int(raw)
+    command = None
+    if cmd is not None:
+        command = cmd.replace(b'\\x00', b' ').decode('utf-8', 'replace').strip()
+    return {'ppid': ppid, 'command': command}
+
+lock = read_text(LOCK, True)
+status = read_text(STATUS, False)
+procs = {}
+for key, text in (('pid', lock), ('host_pid', status), ('controller_pid', status)):
+    if not text:
+        continue
+    pid = pid_of(text, key)
+    if pid and str(pid) not in procs:
+        fact = proc_fact(pid)
+        if fact:
+            procs[str(pid)] = fact
+print(json.dumps({'lock': lock, 'status': status, 'procs': procs}))
+`.trim();
+
+export function readDistroStopReport(
+  run: (args: readonly string[]) => { code: number; stdout: string } = (args) => runWslSync(args, undefined, 8000),
+): DistroStopReport | null {
+  try {
+    const result = run(['python3', '-c', DISTRO_STOP_READER]);
+    if (result.code !== 0) return null;
+    return parseDistroStopReport(result.stdout);
+  } catch {
+    return null;
+  }
+}
+
+function resolvedDistroStopPid(report: DistroStopReport | null, hostPid: number): number {
+  if (!report) return hostPid;
+  let lockPid: unknown;
+  try {
+    lockPid = (JSON.parse(report.lockText) as { pid?: unknown }).pid;
+  } catch {
+    return hostPid;
+  }
+  if (lockPid !== hostPid) return hostPid;
+  return distroStopPid(report) ?? hostPid;
 }
 
 export function distroToolCheckArgs(): readonly string[] {
@@ -477,14 +701,29 @@ function runHost(args: readonly string[], timeoutMs: number): Promise<number> {
   });
 }
 
-/** Signal the gateway recorded in the distro host lock. Never uses pid 0 or 1. */
+function signalResolvedDistroPid(name: 'TERM' | 'KILL'): void {
+  const report = readDistroStopReport();
+  const host = (() => {
+    try {
+      return (JSON.parse(report?.lockText ?? '') as { pid?: unknown }).pid;
+    } catch {
+      return null;
+    }
+  })();
+  if (typeof host !== 'number' || !Number.isInteger(host) || host <= 1) return;
+  const pid = resolvedDistroStopPid(report, host);
+  if (!Number.isInteger(pid) || pid <= 1) return;
+  runWslSync(distroStopArgs(name, pid), undefined, 5000);
+  // SIGKILL cannot ask the controller to drain its child. Stop the host group too.
+  if (name === 'KILL' && pid !== host) {
+    runWslSync(distroStopArgs(name, host), undefined, 5000);
+  }
+}
+
+/** Signal the proved controller, or the host lock pid when no controller is proved. Never uses pid 0 or 1. */
 export function signalDistroLock(
   signal: NodeJS.Signals,
-  stopInside: (name: 'TERM' | 'KILL') => void = (name) => {
-    const pid = readDistroLockPid();
-    if (pid == null || pid <= 1) return;
-    runWslSync(distroStopArgs(name, pid), undefined, 5000);
-  },
+  stopInside: (name: 'TERM' | 'KILL') => void = signalResolvedDistroPid,
 ): void {
   const name = signal === 'SIGKILL' ? 'KILL' : 'TERM';
   stopInside(name);
@@ -494,17 +733,16 @@ export function signalDistroGateway(
   wslPid: number,
   signal: NodeJS.Signals,
   kill: (pid: number, signal: NodeJS.Signals) => void = process.kill,
-  stopInside: (name: 'TERM' | 'KILL') => void = (name) => {
-    const pid = readDistroLockPid();
-    if (pid == null || pid <= 1) return;
-    runWslSync(distroStopArgs(name, pid), undefined, 5000);
-  },
+  stopInside: (name: 'TERM' | 'KILL') => void = signalResolvedDistroPid,
 ): void {
   try {
     signalDistroLock(signal, stopInside);
   } catch {
     // The lock may already be gone.
   }
+  // SIGTERM lets the controller drain Home. wsl.exe exits when that command exits.
+  // SIGKILL also ends wsl.exe if the distro command is still there.
+  if (signal !== 'SIGKILL') return;
   if (!Number.isInteger(wslPid) || wslPid <= 0) return;
   try {
     kill(wslPid, signal);
@@ -519,11 +757,7 @@ export function signalDistroGateway(
 }
 
 export function spawnDistroGatewayProcess(): GatewayProcess {
-  const child = spawn('wsl.exe', distroGatewayArgs(), {
-    windowsHide: true,
-    env: wslSpawnEnv(),
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
+  const child = spawn('wsl.exe', distroGatewayArgs(), distroHomeSpawnOptions());
   const outputListeners: Array<(chunk: string) => void> = [];
   const exitListeners: Array<(code: number | null) => void> = [];
   let exited = false;
@@ -557,6 +791,8 @@ export function createDistroGatewaySupervisor() {
     now: () => Date.now(),
     openUrl: openRuntimeHome,
     log: emitRuntimeLog,
+    adoptForControls: true,
+    healthTimeoutMs: DISTRO_HOME_READY_MS,
     confirmForeign: confirmDistroGateway,
     foreignIsLegacy: async () => (await distroListenerKind()) === 'legacy',
     // The Windows side of the forward has no pid this launcher can check.
@@ -652,16 +888,18 @@ export async function distroListenerKind(
 }
 
 /**
- * Adopt the installed distro gateway. The signal goes to the pid read from
- * the lock, not to whatever the lock says later. hasExited asks the distro
- * whether that pid is still there and treats an error as still running.
- * A missing pid is not adopted, and pid 0 is never signaled.
+ * Adopt the installed distro Home. The host pid is the one the caller proved.
+ * A controller is signaled only when this same lock says it is that host's
+ * parent. hasExited asks the distro whether those pids are still there and
+ * treats an error as still running. A missing pid is not adopted, and pid 0
+ * is never signaled.
  */
 export function adoptDistroGatewayProcess(deps: {
   readPid?: () => number | null;
   alive?: (pid: number) => boolean | Promise<boolean>;
   signal?: (pid: number, signal: NodeJS.Signals) => void;
   runStop?: (args: readonly string[]) => void;
+  report?: () => DistroStopReport | null;
 } = {}): GatewayProcess | null {
   const readPid = deps.readPid ?? (() => readDistroLockPid());
   const alive = deps.alive ?? ((pid: number) => distroPidAlive(pid));
@@ -675,22 +913,42 @@ export function adoptDistroGatewayProcess(deps: {
   });
   const pid = readPid();
   if (pid == null || pid <= 1) return null;
+  let stopPid = pid;
+  if (deps.report) {
+    try {
+      stopPid = resolvedDistroStopPid(deps.report(), pid);
+    } catch {
+      stopPid = pid;
+    }
+  }
+  if (!Number.isInteger(stopPid) || stopPid <= 1) stopPid = pid;
+  const gone = (target: number): boolean | Promise<boolean> => {
+    try {
+      const result = alive(target);
+      if (result && typeof (result as Promise<boolean>).then === 'function') {
+        return (result as Promise<boolean>).then((still) => still === false).catch(() => false);
+      }
+      return result === false;
+    } catch {
+      return false;
+    }
+  };
   return {
     pid,
     onOutput() {},
     onExit() {},
     hasExited() {
-      try {
-        const result = alive(pid);
-        if (result && typeof (result as Promise<boolean>).then === 'function') {
-          return (result as Promise<boolean>).then((still) => still === false).catch(() => false);
-        }
-        return result === false;
-      } catch {
-        return false;
+      const hostGone = gone(pid);
+      const controllerGone = stopPid === pid ? true : gone(stopPid);
+      if (hostGone instanceof Promise || controllerGone instanceof Promise) {
+        return Promise.all([hostGone, controllerGone]).then((both) => both.every(Boolean));
       }
+      return hostGone && controllerGone;
     },
-    signal(signal) { signalInside(pid, signal); },
+    signal(signal) {
+      signalInside(stopPid, signal);
+      if (signal === 'SIGKILL' && stopPid !== pid) signalInside(pid, signal);
+    },
   };
 }
 
@@ -707,7 +965,10 @@ export async function adoptInstalledDistroGateway(deps: {
   adopt?: (pid: number) => GatewayProcess | null;
 } = {}): Promise<GatewayProcess | null> {
   const identify = deps.identify ?? (() => distroListenerIdentity());
-  const adopt = deps.adopt ?? ((pid: number) => adoptDistroGatewayProcess({ readPid: () => pid }));
+  const adopt = deps.adopt ?? ((pid: number) => adoptDistroGatewayProcess({
+    readPid: () => pid,
+    report: () => readDistroStopReport(),
+  }));
   let seen: DistroListenerIdentity;
   try {
     seen = await identify();

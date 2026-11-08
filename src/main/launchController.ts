@@ -10,7 +10,6 @@ import { setRuntimeLogSink } from './targets/runtimeGateway';
 import { loadActiveRuntimePin } from './targets/runtimePin';
 import { browserNote } from './targets/runtimeSupport';
 import { runtimeHeadStore } from './targets/runtimeUpdate';
-import { rollbackRuntimeUpdate } from './targets/runtimeTarget';
 import { BackupDescription, describeRuntimeBackupOnThisComputer } from './targets/runtimeBackup';
 import { resetRuntimeOnThisComputer, ResetResult } from './targets/runtimeUninstall';
 import { describeDistroBackupOnThisComputer, resetRuntimeInDistroOnThisComputer } from './targets/windowsReset';
@@ -126,6 +125,8 @@ export interface LaunchInfo {
   browserNote: string | null;
   /** Windows: Uninstall saves the whole Linux environment as one file, then removes it. */
   uninstallRemovesLinux: boolean;
+  /** `home --browser` opens one tab. The launcher does not open a second one after Start. */
+  runtimeOpensBrowser: boolean;
   preflight: PreflightReport;
   openAtLogin: boolean;
   canRollback: boolean;
@@ -258,7 +259,7 @@ export function createLaunchController(options: LaunchControllerOptions = {}): L
     describeResetBackup: () => (process.platform === 'win32'
       ? describeDistroBackupOnThisComputer()
       : describeRuntimeBackupOnThisComputer()),
-    rollback: (onProgress) => runRuntime(() => rollbackRuntimeUpdate(onProgress)),
+    rollback: (onProgress) => runRuntime(() => active.rollback(onProgress ?? (() => {}))),
     getVersion: () => runRuntimeSync(() => active.getVersion()),
     checkForUpdate: () => runRuntime(() => active.checkForUpdate()),
     openInBrowser: () => {
@@ -285,6 +286,7 @@ export function createLaunchController(options: LaunchControllerOptions = {}): L
         status,
         platformNote: platform?.message ?? null,
         browserNote: browserNote(process.platform),
+        runtimeOpensBrowser: process.platform === 'darwin' || process.platform === 'win32',
         uninstallRemovesLinux: process.platform === 'win32',
         preflight,
         openAtLogin: readOpenAtLogin(),

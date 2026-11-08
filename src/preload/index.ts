@@ -95,6 +95,7 @@ declare global {
         status: RuntimeStatus;
         platformNote: string | null;
         browserNote: string | null;
+        runtimeOpensBrowser: boolean;
         uninstallRemovesLinux: boolean;
         preflight: { ok: boolean; checks: Array<{ id: string; level: string; message: string }> };
         openAtLogin: boolean;

@@ -311,12 +311,16 @@ export function isHealthOk(result: HealthResult | null): boolean {
   return Boolean(result && result.status === 200 && result.body.trim() === 'OK');
 }
 
+/** The controller prints this on its own stdout. The launcher log does not show it. */
+export const HOME_TERMINAL_LINE = 'Keep this terminal open. Press Ctrl+C to stop Home.';
+
 /** Drop lines that can carry attach_secret. The coords files stay on disk, out of the log. */
 export function scrubRuntimeLog(chunk: string): string {
   if (/attach_secret|runtime-coords\.json|gateway-runtime-coords|home-runtime-coords/i.test(chunk)) {
     return '[elastos] omitted a line that can contain a local secret\n';
   }
-  return chunk;
+  if (!chunk.includes(HOME_TERMINAL_LINE)) return chunk;
+  return chunk.split(HOME_TERMINAL_LINE).join('');
 }
 
 export function createGatewaySupervisor(deps: GatewaySupervisorDeps): GatewaySupervisor {

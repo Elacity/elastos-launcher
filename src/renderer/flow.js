@@ -141,6 +141,11 @@ function legacyPc2Copy(items) {
   };
 }
 
+/** False when `home --browser` already opens the tab. */
+function shouldOpenBrowserAfterStart(info) {
+  return !(info && info.runtimeOpensBrowser === true);
+}
+
 /** The info-panel Browser line. The main process sends it on Windows only. */
 function browserNoteText(info) {
   return info && typeof info.browserNote === 'string' ? info.browserNote : '';
@@ -162,6 +167,7 @@ const api = {
   formatBytes,
   legacyPc2Copy,
   browserNoteText,
+  shouldOpenBrowserAfterStart,
   urlLabel,
 };
 

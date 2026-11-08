@@ -198,6 +198,30 @@ test('Mac Update stops Home, runs the update and starts the current binary even 
   assert.deepEqual(calls, ['stop', 'update', 'start-current-binary']);
 });
 
+test('Windows Update and Undo stop Home, run the release command, and start home --browser again', async (t) => {
+  const windows = require('../dist/main/targets/windowsRuntime');
+  const updates = require('../dist/main/targets/runtimeUpdate');
+  const { createRuntimeTarget } = require('../dist/main/targets/runtimeTarget');
+  const calls = [];
+  t.mock.method(windows, 'createDistroGatewaySupervisor', () => ({
+    stop: async () => { calls.push('stop'); },
+    start: async () => { calls.push('start'); },
+  }));
+  t.mock.method(windows, 'distroIsInstalled', () => true);
+  t.mock.method(updates, 'applyRuntimeUpdate', async () => { calls.push('update'); });
+  t.mock.method(updates, 'rollbackRuntime', async () => { calls.push('rollback'); });
+  const target = createRuntimeTarget('win32');
+  await target.update();
+  assert.deepEqual(calls, ['stop', 'update', 'start']);
+  calls.length = 0;
+  await target.rollback();
+  assert.deepEqual(calls, ['stop', 'rollback', 'start']);
+  calls.length = 0;
+  t.mock.method(updates, 'applyRuntimeUpdate', async () => { throw new Error('update failed'); });
+  await assert.rejects(() => target.update(), /update failed/);
+  assert.deepEqual(calls, ['stop', 'start']);
+});
+
 test('Runtime 2.0.0 gets the #61 status record only after a successful check and signed head verification', async () => {
   const fixture = require('./helpers/signed-release');
   const { writeSignedUpdateCheck } = require('../dist/main/targets/runtimeUpdate');
