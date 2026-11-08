@@ -42,7 +42,7 @@ export interface LaunchController {
   rollback(onProgress?: (message: string) => void): Promise<void>;
   getVersion(): string;
   checkForUpdate(): Promise<UpdateCheck>;
-  openInBrowser(): void;
+  openInBrowser(): Promise<void>;
   getLogs(lines?: number): Promise<string>;
   isInstalled(): Promise<boolean>;
   getLaunchInfo(): Promise<LaunchInfo>;
@@ -263,9 +263,9 @@ export function createLaunchController(options: LaunchControllerOptions = {}): L
     rollback: (onProgress) => runRuntime(() => active.rollback(onProgress)),
     getVersion: () => runRuntimeSync(() => active.getVersion()),
     checkForUpdate: () => runRuntime(() => active.checkForUpdate()),
-    openInBrowser: () => {
-      runRuntimeSync(() => active.openInBrowser());
-    },
+    openInBrowser: () => runRuntime(async () => {
+      await active.openInBrowser();
+    }),
     getLogs: (lines) => {
       const count = lines ?? runtimeLogs.length;
       return Promise.resolve(runtimeLogs.slice(-count).join('\n'));

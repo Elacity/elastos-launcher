@@ -47,7 +47,7 @@ The Home address lives in one file, `src/main/targets/gatewayAddress.ts`: the la
 
 A gateway an earlier launcher started records `127.0.0.1:8090` in its host lock. When the identity check proves it is the installed gateway, Start stops it once and starts it again on `localhost:8090`. Reset and Uninstall can stop it too. Home is never opened on it. Any other lock address is not adopted.
 
-On Windows the gateway runs inside the distro and Windows forwards `localhost` to it. Inside the distro the lock pid must own every gateway socket in `/proc/net/tcp` and `/proc/net/tcp6`. On the Windows side the launcher probes each address Windows resolves `localhost` to (usually `::1` and `127.0.0.1`) and accepts whichever family the forward serves; the Windows browser tries both. Gap: the launcher cannot tell which Windows process owns the Windows end of `localhost:8090`, so a Windows program on that port is caught only when it answers without `OK`.
+On Windows the gateway runs inside the distro and Windows forwards `localhost` to it. Inside the distro the lock pid must own every gateway socket in `/proc/net/tcp` and `/proc/net/tcp6`. On the Windows side the launcher probes each address Windows resolves `localhost` to (usually `::1` and `127.0.0.1`) and reads the Windows listen table for port 8090. Every listener must be `wslrelay.exe` (NAT mode) or `wslservice.exe` (mirrored mode) in the installed WSL directory. Any other owner, or a table that cannot be read, refuses Home. The distro lock is still required. Home opens at `localhost` only after both proofs.
 
 ## 2. Paths
 

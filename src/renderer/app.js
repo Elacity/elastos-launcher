@@ -239,7 +239,11 @@ openBtn.addEventListener('click', async () => {
     return;
   }
   if (action === 'open') {
-    window.elastos.openBrowser();
+    try {
+      await window.elastos.openBrowser();
+    } catch (err) {
+      showError(err && err.message ? err.message : 'Could not open your computer in the browser.');
+    }
     return;
   }
   if (action === 'start') {

@@ -145,7 +145,7 @@ function updateTrayMenu(): void {
     {
       label: 'Open my computer',
       enabled: currentStatus === 'running',
-      click: () => launch.openInBrowser()
+      click: () => { void launch.openInBrowser(); }
     },
     { type: 'separator' },
     { label: 'Show Window', click: () => mainWindow?.show() },

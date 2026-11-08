@@ -171,6 +171,11 @@ export interface GatewaySupervisorDeps {
    */
   listenerOwned?: (pid: number, health: HealthResult) => boolean | Promise<boolean>;
   /**
+   * Sentence used when `confirmForeign` refuses an already-running listener.
+   * Windows asks for the same sentence as a foreign listener during Start.
+   */
+  foreignMessage?: string;
+  /**
    * The installed gateway when this window did not start it. Reset and
    * Uninstall call this after the confirm dialog. It is not a second prompt.
    * Returning null leaves a listener that is not that gateway running.
@@ -565,7 +570,8 @@ export function createGatewaySupervisor(deps: GatewaySupervisorDeps): GatewaySup
           const confirmed = deps.confirmForeign ? await deps.confirmForeign() : false;
           if (!confirmed) {
             current = 'error';
-            throw new Error('Something is answering on port 8090, but it is not the ElastOS gateway. Home was not opened.');
+            throw new Error(deps.foreignMessage
+              ?? 'Something is answering on port 8090, but it is not the ElastOS gateway. Home was not opened.');
           }
           foreign = true;
           intentionalStop = false;
