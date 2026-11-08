@@ -157,7 +157,7 @@ test('ensuring the distro imports the pinned rootfs and hides command failures',
     assert.equal(/wsl\.exe|powershell|\bbash\b|apt-get/.test(err.message), false);
     return true;
   });
-  assert.deepEqual(existingBoot, []);
+  assert.deepEqual(existingBoot, ['boot']);
   assert.equal(existingProgress.includes('Starting the Linux environment for the first time'), false);
 
   await assert.rejects(() => ensureElastosDistro({

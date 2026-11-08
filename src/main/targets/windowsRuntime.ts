@@ -315,24 +315,24 @@ export async function ensureElastosDistro(deps: {
     lookup: async () => true,
     listDistros: deps.listDistros,
   });
+  const run = deps.runInDistro ?? ((args, timeoutMs) => runWsl(args, timeoutMs));
   if (!facts.distroReady) {
     const rootfs = await deps.ensureRootfs();
     deps.onProgress('Rootfs SHA-256 matches the pin');
     (deps.prepareImportDir ?? prepareImportDir)(DISTRO_INSTALL_DIR);
     const code = await deps.importDistro(DISTRO_INSTALL_DIR, rootfs);
     if (code !== 0) throw new Error(DISTRO_IMPORT_FAILED);
-    // The first command can block while the rootfs finishes its first boot.
-    // The tool check's 20 seconds is too short for that.
     deps.onProgress('Starting the Linux environment for the first time');
-    const run = deps.runInDistro ?? ((args, timeoutMs) => runWsl(args, timeoutMs));
-    let booted: WslResult;
-    try {
-      booted = await run(['true'], DISTRO_FIRST_BOOT_MS);
-    } catch {
-      throw new Error(DISTRO_SETUP_FAILED);
-    }
-    if (booted.code !== 0) throw new Error(DISTRO_SETUP_FAILED);
   }
+  // Set up imports the distro and returns while it is still stopped.
+  // The first command blocks in first boot. The tool check allows 20 seconds.
+  let booted: WslResult;
+  try {
+    booted = await run(['true'], DISTRO_FIRST_BOOT_MS);
+  } catch {
+    throw new Error(DISTRO_SETUP_FAILED);
+  }
+  if (booted.code !== 0) throw new Error(DISTRO_SETUP_FAILED);
   if (!(await deps.hasTools())) {
     const code = await deps.installTools();
     if (code !== 0) throw new Error(DISTRO_SETUP_FAILED);
