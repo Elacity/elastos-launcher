@@ -166,6 +166,32 @@ function diskProbe(home) {
   };
 }
 
+test('Mac PC2 removal selects old data and refuses both Home spellings and the installed app', async () => {
+  const home = '/Users/fixture';
+  const box = world(home);
+  box.dir(home);
+  box.dir(path.join(home, '.pc2'));
+  const probe = { ...box.probe(), platform: 'darwin' };
+  const entries = discoverLegacyPc2(probe);
+  assert.deepEqual(entries.map((entry) => entry.path), [path.join(home, '.pc2')]);
+  const act = tracker();
+  for (const file of [
+    path.join(home, 'Library', 'Application Support', 'elastos'),
+    path.join(home, 'Library', 'Application Support', 'ElastOS'),
+    path.join(home, '.elastos-launcher', 'electron'),
+    '/Applications/ElastOS.app',
+  ]) {
+    const result = await removeDiscoveredLegacyPc2(
+      [{ scope: 'user', path: file, label: 'protected', bytes: 0 }], probe, act,
+    );
+    assert.equal(result.ok, false);
+  }
+  assert.deepEqual(act.calls, []);
+  const result = await removeDiscoveredLegacyPc2(entries, probe, act);
+  assert.equal(result.ok, true);
+  assert.deepEqual(act.calls, [['stop'], ['remove', path.join(home, '.pc2')]]);
+});
+
 test('refuses runtime paths, unknown paths, and the ElastOS distro', async () => {
   const home = '/home/tester';
   const box = world(home);
