@@ -107,7 +107,7 @@ async function perform(kind: HomeActionKind, action: HomeAction): Promise<void> 
 async function startHome(): Promise<void> { await launch.start(); }
 async function stopHome(): Promise<void> { await launch.stop(); }
 async function openHome(): Promise<void> {
-  await createOpenHome({ getStatus: () => launch.getStatus(), start: startHome, openInBrowser: () => launch.openInBrowser() }, () => showWindow({ kind: 'install' }), true)();
+  await createOpenHome({ getStatus: () => launch.getStatus(), start: () => launch.start(), openInBrowser: () => launch.openInBrowser() }, () => showWindow({ kind: 'install' }), true)();
 }
 async function openApp(): Promise<void> { await perform('open', openHome); }
 async function copyDiagnostics(): Promise<void> {

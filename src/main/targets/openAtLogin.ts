@@ -108,7 +108,7 @@ export function isLoginLaunch(platform: string, argv: readonly string[], setting
 
 export async function startHomeAtLogin(enabled: boolean, launch: {
   getStatus(): Promise<string>;
-  start(): Promise<void>;
+  start(): Promise<unknown>;
 }): Promise<void> {
   if (enabled && await launch.getStatus() === 'stopped') await launch.start();
 }

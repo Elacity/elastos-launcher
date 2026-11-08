@@ -31,7 +31,7 @@ async function mainFixture({ login = false, enabled = true, lock = true, platfor
     onStatusChange(fn) { statusListener = fn; }, onLog() {}, onActionSuccess() {}, getLogs: async () => '',
     getStatus: async () => installed ? status : 'not-installed',
     getOpenAtLogin: () => enabled, setOpenAtLogin(value) { enabled = value; calls.push(['login', value]); },
-    start: async () => { calls.push('start'); status = 'running'; statusListener?.(status); },
+    start: async () => { calls.push('start'); status = 'running'; statusListener?.(status); return 'started'; },
     stop: async () => { calls.push('stop'); status = 'stopped'; statusListener?.(status); },
     openInBrowser() { calls.push('open'); },
     checkForUpdate: async () => ({ latest: '2.0.1', updateAvailable: true, releaseUrl: '' }),

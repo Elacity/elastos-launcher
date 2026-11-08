@@ -40,7 +40,7 @@ import {
   readDistroVersion,
   runDistroRuntimeCommand,
 } from './windowsRuntime';
-import { LaunchTarget, UpdateCheck } from './types';
+import { HomeStartResult, LaunchTarget, UpdateCheck } from './types';
 
 export function createRuntimeTarget(platform: NodeJS.Platform = process.platform, arch: string = process.arch, lifetime: GatewayLifetime = homeGatewayLifetime): LaunchTarget {
   let supervisor: GatewaySupervisor | null = null;
@@ -48,14 +48,14 @@ export function createRuntimeTarget(platform: NodeJS.Platform = process.platform
   let requestedRunning = false;
   let lifecycle = Promise.resolve();
 
-  function serialize(action: () => Promise<void>): Promise<void> {
+  function serialize<T>(action: () => Promise<T>): Promise<T> {
     const next = lifecycle.then(action);
-    lifecycle = next.catch(() => {});
+    lifecycle = next.then(() => {}, () => {});
     return next;
   }
 
-  async function startGateway(): Promise<void> {
-    if (!requestedRunning) return;
+  async function startGateway(): Promise<HomeStartResult> {
+    if (!requestedRunning) return 'stopped';
     if (platform === 'win32') {
       if (!distroIsInstalled()) throw new Error('ElastOS is not installed yet. Click Install.');
       if (!supervisor) supervisor = createDistroGatewaySupervisor(lifetime);
@@ -66,7 +66,7 @@ export function createRuntimeTarget(platform: NodeJS.Platform = process.platform
       if (!file) throw new Error('ElastOS is not installed yet. Click Install.');
       if (!supervisor) supervisor = createDefaultGatewaySupervisor(file, platform, lifetime);
     }
-    await supervisor.start();
+    return supervisor.start();
   }
 
   function changeRuntime(action: () => Promise<void>): Promise<void> {

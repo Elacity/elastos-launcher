@@ -1,3 +1,4 @@
+import type { HomeStartResult } from './types';
 import { ChildProcess, execFile, execFileSync, spawn, spawnSync } from 'child_process';
 import * as dns from 'dns';
 import * as fs from 'fs';
@@ -241,7 +242,7 @@ export interface GatewaySupervisorDeps {
 }
 
 export interface GatewaySupervisor {
-  start(): Promise<'started' | 'already-running' | 'stopped'>;
+  start(): Promise<HomeStartResult>;
   /**
    * Stop the gateway this window started. `adopt` is only for Reset and
    * Uninstall, after the person confirmed. Quit, Stop, and Restart omit it.
@@ -1057,7 +1058,7 @@ export function createGatewaySupervisor(deps: GatewaySupervisorDeps): GatewaySup
       if (owned && current === 'running') {
         const exited = await owned.hasExited();
         if (lifetime.shuttingDown) return 'stopped';
-        if (!exited) return 'started';
+        if (!exited) return 'running';
         owned = null;
       }
       current = 'starting';

@@ -21,7 +21,7 @@ import { resetRuntimeOnThisComputer, ResetResult } from './targets/runtimeUninst
 import { describeDistroBackupOnThisComputer, resetRuntimeInDistroOnThisComputer } from './targets/windowsReset';
 import { UninstallPrompt, UninstallResult, uninstallRuntimeInDistroOnThisComputer, uninstallDistroProgramOnThisComputer } from './targets/windowsUninstall';
 import { finishResumeInstall as clearResumeInstall, fixWindowsOnThisComputer, resumeInstallPlanOnThisComputer, ResumeInstallPlan } from './targets/windowsHost';
-import { LaunchTarget, LaunchTargetId, TargetStatus, UpdateCheck } from './targets/types';
+import { HomeStartResult, LaunchTarget, LaunchTargetId, TargetStatus, UpdateCheck } from './targets/types';
 
 export type { TargetStatus };
 
@@ -43,7 +43,7 @@ export interface LaunchController {
   onLog(listener: (line: string) => void): void;
   onActionSuccess(listener: () => void): void;
   getStatus(): Promise<TargetStatus>;
-  start(): Promise<void>;
+  start(): Promise<HomeStartResult>;
   stop(): Promise<void>;
   restart(): Promise<void>;
   install(onProgress: (message: string) => void): Promise<void>;
@@ -278,7 +278,7 @@ export function createLaunchController(options: LaunchControllerOptions = {}): L
       actionListeners.push(listener);
     },
     getStatus: () => currentStatus(),
-    start: () => runWhileActive(() => active.start()),
+    start: () => shuttingDown ? Promise.resolve('stopped') : runRuntime(() => active.start(), true),
     stop: () => runRuntime(() => active.stop(), true),
     restart: () => runWhileActive(() => active.restart()),
     install: (onProgress) => runRuntime(() => active.install(onProgress), true),

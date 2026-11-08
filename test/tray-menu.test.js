@@ -50,7 +50,7 @@ test('icon states are distinct', () => {
 for (const status of ['running', 'stopped', 'error', 'not-installed', 'other-home']) {
   test(`open app = start if needed then open Home: ${status}`, async () => {
     const calls = [];
-    const open = createOpenHome({ getStatus: async () => status, start: async () => calls.push('start'), openInBrowser: () => calls.push('open') }, () => calls.push('install'));
+    const open = createOpenHome({ getStatus: async () => calls.includes('start') ? 'running' : status, start: async () => { calls.push('start'); return 'running'; }, openInBrowser: () => calls.push('open') }, () => calls.push('install'));
     if (status === 'other-home') await assert.rejects(open(), /another/i);
     else await Promise.all([open(), open()]);
     assert.deepEqual(calls, status === 'other-home' ? [] : status === 'not-installed' ? ['install'] : status === 'running' ? ['open'] : ['start', 'open']);

@@ -53,12 +53,15 @@ export interface UpdateCheck {
   releaseUrl: string;
 }
 
+/** Whether this call launched Home, opened an existing Home, reused it, or was stopped. */
+export type HomeStartResult = 'started' | 'already-running' | 'running' | 'stopped';
+
 export interface LaunchTarget {
   readonly id: LaunchTargetId;
   readonly descriptor: LaunchTargetDescriptor;
   isInstalled(): Promise<boolean>;
   getStatus(): Promise<TargetStatus>;
-  start(): Promise<void>;
+  start(): Promise<HomeStartResult>;
   /** Permanently refuse Home starts before waiting for shutdown work. */
   beginShutdown(): void;
   /** Stop this window's gateway; on macOS, also adopt a proved installed Home. */
