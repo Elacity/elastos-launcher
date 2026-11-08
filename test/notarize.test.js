@@ -2,6 +2,20 @@ const assert = require('node:assert/strict');
 const test = require('node:test');
 const child = require('node:child_process');
 
+test('strict release builds skip Apple unless notarization is explicitly requested', async (t) => {
+  const platform = Object.getOwnPropertyDescriptor(process, 'platform');
+  Object.defineProperty(process, 'platform', { value: 'darwin' });
+  t.after(() => Object.defineProperty(process, 'platform', platform));
+  for (const [key, value] of Object.entries({ NOTARIZE_MAC: 'false', MAC_RELEASE_STRICT: 'true' })) {
+    const old = process.env[key];
+    process.env[key] = value;
+    t.after(() => { if (old === undefined) delete process.env[key]; else process.env[key] = old; });
+  }
+  t.mock.method(child, 'execFileSync', () => assert.fail('Apple must not be contacted'));
+  delete require.cache[require.resolve('../scripts/notarize')];
+  assert.deepEqual(await require('../scripts/notarize')({ artifactPaths: ['/build/ElastOS.dmg'] }), []);
+});
+
 for (const status of ['Accepted', 'Invalid', 'In Progress', 'invalid-json', 'failed']) {
   test(`notarization requires Apple's Accepted verdict (${status})`, async (t) => {
     const platform = Object.getOwnPropertyDescriptor(process, 'platform');

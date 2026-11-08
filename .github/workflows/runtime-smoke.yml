@@ -1,3 +1,5 @@
+# test/launcher-mac* -> mac. test/launcher-jetson* or test/launcher-linux* -> linux x64+arm64. test/launcher-windows* -> windows.
+# PR into main or push to main -> all. Other branches -> none. Dispatch uses explicit platforms (default none).
 name: Runtime smoke
 
 # A red run fails the pull request. Each job verifies the selected channel
@@ -6,10 +8,38 @@ name: Runtime smoke
 # /home/. The Windows job imports distro ElastOS as WSL2. It does not skip.
 on:
   pull_request:
+    paths-ignore: ['**/*.md', 'docs/**']
+  push:
+    branches: [main]
   workflow_dispatch:
+    inputs:
+      platforms:
+        description: 'Platforms to run'
+        type: choice
+        options: [none, mac, linux, windows, all]
+        default: none
+
+concurrency:
+  group: runtime-smoke-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
 
 jobs:
+  plan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    outputs:
+      platforms: ${{ steps.plan.outputs.platforms }}
+      runtime: ${{ steps.plan.outputs.runtime }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: plan
+        run: node scripts/ci-plan.js
+        env:
+          INPUT_PLATFORMS: ${{ inputs.platforms }}
+
   mac-dialogs:
+    needs: [plan]
+    if: contains(needs.plan.outputs.platforms, 'mac')
     name: packaged dialog hit regions (mac)
     runs-on: macos-latest
     timeout-minutes: 15
@@ -20,19 +50,6 @@ jobs:
           node-version: '20'
           cache: npm
       - run: npm ci
-      - name: Package the pinned failing source
-        run: |
-          git fetch --depth=1 origin a66ca520bfe48a5ad916f954442a61cce3e7dda6
-          mkdir "$RUNNER_TEMP/launcher-baseline"
-          git archive a66ca520bfe48a5ad916f954442a61cce3e7dda6 | tar -x -C "$RUNNER_TEMP/launcher-baseline"
-          cd "$RUNNER_TEMP/launcher-baseline"
-          npm ci
-          npm run build:mac -- --arm64 --publish never -c.mac.identity=- -c.mac.hardenedRuntime=false -c.forceCodeSigning=false
-        env:
-          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
-          NOTARIZE_MAC: 'false'
-      - name: Reproduce drag-covered controls on a66ca52
-        run: node scripts/mac-dialog-e2e.js "$RUNNER_TEMP/launcher-baseline/dist-electron/mac-arm64/ElastOS.app" --expect-drag
       - name: Package the candidate
         run: npm run build:mac -- --arm64 --publish never -c.mac.identity=- -c.mac.hardenedRuntime=false -c.forceCodeSigning=false
         env:
@@ -42,18 +59,14 @@ jobs:
         run: node scripts/mac-dialog-e2e.js dist-electron/mac-arm64/ElastOS.app
 
   smoke:
+    needs: [plan]
+    if: contains(needs.plan.outputs.platforms, 'mac') || contains(needs.plan.outputs.platforms, 'linux')
     name: smoke (${{ matrix.platform }})
     timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - os: ubuntu-24.04
-            platform: linux-x64
-          - os: macos-latest
-            platform: darwin-arm64
-          - os: ubuntu-22.04-arm
-            platform: linux-arm64
+        include: ${{ fromJSON(needs.plan.outputs.runtime) }}
     runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout code
@@ -67,6 +80,8 @@ jobs:
         run: bash scripts/runtime-smoke.sh
 
   windows-wsl:
+    needs: [plan]
+    if: contains(needs.plan.outputs.platforms, 'windows')
     name: smoke (windows-wsl)
     timeout-minutes: 60
     runs-on: windows-2025
@@ -79,21 +94,14 @@ jobs:
         run: pwsh -File scripts/windows-elastos-distro.ps1
 
   electron-e2e:
+    needs: [plan]
+    if: contains(needs.plan.outputs.platforms, 'mac') || contains(needs.plan.outputs.platforms, 'linux')
     name: e2e (${{ matrix.platform }})
     timeout-minutes: 50
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - os: ubuntu-24.04
-            platform: linux-x64
-            packages: xvfb libnss3 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 libgbm1 libasound2t64 libgtk-3-0t64 libxss1
-          - os: ubuntu-22.04-arm
-            platform: linux-arm64
-            packages: xvfb libnss3 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 libgbm1 libasound2 libgtk-3-0 libxss1 libayatana-appindicator3-1
-          - os: macos-latest
-            platform: darwin-arm64
-            packages: ""
+        include: ${{ fromJSON(needs.plan.outputs.runtime) }}
     runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout code
@@ -142,6 +150,8 @@ jobs:
           fi
 
   electron-e2e-windows:
+    needs: [plan]
+    if: contains(needs.plan.outputs.platforms, 'windows')
     name: e2e (windows)
     timeout-minutes: 60
     runs-on: windows-2025
@@ -168,6 +178,8 @@ jobs:
         run: npm run e2e
 
   windows-app:
+    needs: [plan]
+    if: contains(needs.plan.outputs.platforms, 'windows')
     name: app install (windows-wsl)
     timeout-minutes: 60
     runs-on: windows-2025
@@ -193,6 +205,8 @@ jobs:
         run: node scripts/windows-app-install.js
 
   clean-machine-linux:
+    needs: [plan]
+    if: contains(needs.plan.outputs.platforms, 'linux')
     name: clean machine (ubuntu)
     timeout-minutes: 45
     runs-on: ubuntu-24.04
@@ -218,6 +232,8 @@ jobs:
         run: bash scripts/clean-machine-linux.sh
 
   clean-machine-windows:
+    needs: [plan]
+    if: contains(needs.plan.outputs.platforms, 'windows')
     name: clean machine (windows-wsl)
     timeout-minutes: 20
     runs-on: windows-2025

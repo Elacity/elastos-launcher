@@ -3,14 +3,46 @@ name: Linux ARM64 package
 # Ubuntu 22.04 matches the Jetson glibc (2.35).
 on:
   pull_request:
+    paths-ignore: ['**/*.md', 'docs/**']
+  push:
+    branches: [main]
   workflow_dispatch:
+    inputs:
+      platforms:
+        description: 'Platforms to run'
+        type: choice
+        options: [none, mac, linux, windows, all]
+        default: none
   workflow_call:
+    inputs:
+      platforms:
+        description: 'Platforms selected by the caller'
+        type: string
+        default: ''
 
 permissions:
   contents: read
 
+concurrency:
+  group: linux-arm64-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
 jobs:
+  plan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    outputs:
+      platforms: ${{ steps.plan.outputs.platforms }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: plan
+        run: node scripts/ci-plan.js
+        env:
+          INPUT_PLATFORMS: ${{ inputs.platforms }}
+
   package:
+    needs: [plan]
+    if: contains(needs.plan.outputs.platforms, 'linux')
     runs-on: ubuntu-22.04-arm
     timeout-minutes: 90
     steps:

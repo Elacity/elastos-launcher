@@ -2,6 +2,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const test = require('node:test');
+const { plan } = require('../scripts/ci-plan');
 
 const root = path.join(__dirname, '..');
 
@@ -28,19 +29,18 @@ test('the arm64 package job uses the Jetson glibc and the bundled fpm', () => {
   assert.equal(workflow.includes('APPIMAGE_EXTRACT_AND_RUN'), false);
   assert.equal(workflow.includes('gem install fpm'), false);
   assert.match(build, /uses: \.\/\.github\/workflows\/linux-arm64\.yml/);
-  assert.match(build, /needs: \[build, linux-arm64\]/);
+  assert.match(build, /needs: \[plan, build, linux-arm64\]/);
 });
 
 test('runtime smoke and electron e2e have a linux-arm64 row on Ubuntu 22.04', () => {
-  const workflow = fs.readFileSync(path.join(root, '.github/workflows/runtime-smoke.yml'), 'utf8');
-  assert.match(workflow, /ubuntu-24\.04/);
-  assert.match(workflow, /libasound2t64 libgtk-3-0t64/);
-  const armRows = workflow.match(/os: ubuntu-22\.04-arm\n\s+platform: linux-arm64/g) || [];
-  assert.equal(armRows.length, 2);
-  const armPackages = workflow.match(/os: ubuntu-22\.04-arm\n\s+platform: linux-arm64\n\s+packages: (.*)/);
-  assert.ok(armPackages, 'linux-arm64 e2e package list');
-  assert.equal(armPackages[1].includes('t64'), false);
-  assert.match(armPackages[1], /libasound2 libgtk-3-0 libxss1 libayatana-appindicator3-1/);
+  const rows = plan({ requested: 'linux' }).runtime;
+  assert.equal(rows.length, 2);
+  assert.equal(rows[0].os, 'ubuntu-24.04');
+  assert.match(rows[0].packages, /libasound2t64 libgtk-3-0t64/);
+  assert.equal(rows[1].os, 'ubuntu-22.04-arm');
+  assert.equal(rows[1].platform, 'linux-arm64');
+  assert.equal(rows[1].packages.includes('t64'), false);
+  assert.match(rows[1].packages, /libasound2 libgtk-3-0 libxss1 libayatana-appindicator3-1/);
 });
 
 test('the deb depends keep the electron-builder defaults and add the tray library', () => {

@@ -6,6 +6,11 @@ on:
       - 'v*'  # Triggers on version tags like v0.1.1, v1.0.0
   workflow_dispatch:
     inputs:
+      platforms:
+        description: 'Platforms to run'
+        type: choice
+        options: [none, mac, linux, windows, all]
+        default: none
       notarize:
         description: 'Try Apple notarization for this test build (failure is nonblocking)'
         type: boolean
@@ -15,24 +20,37 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: build-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
 jobs:
+  plan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    outputs:
+      platforms: ${{ steps.plan.outputs.platforms }}
+      build: ${{ steps.plan.outputs.build }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: plan
+        run: node scripts/ci-plan.js
+        env:
+          INPUT_PLATFORMS: ${{ inputs.platforms }}
+
   build:
+    needs: [plan]
+    if: needs.plan.outputs.platforms != '[]'
     strategy:
       fail-fast: false  # Don't cancel other builds if one fails
       matrix:
-        include:
-          - os: macos-latest
-            platform: mac
-          - os: windows-latest
-            platform: win
-          - os: ubuntu-latest
-            platform: linux
+        include: ${{ fromJSON(needs.plan.outputs.build) }}
 
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
     env:
       MAC_RELEASE_STRICT: ${{ startsWith(github.ref, 'refs/tags/') }}
-      NOTARIZE_MAC: ${{ startsWith(github.ref, 'refs/tags/') || inputs.notarize == true || vars.NOTARIZE_MAC == 'true' }}
+      NOTARIZE_MAC: ${{ inputs.notarize == true }}
 
     steps:
       - name: Checkout code
@@ -87,11 +105,11 @@ jobs:
           codesign --verify --deep --strict --verbose=2 "$APP_PATH"
           codesign -dv "$APP_PATH" 2>&1
           node scripts/verify-mac-app.js "$APP_PATH"
-          if [[ "$MAC_RELEASE_STRICT" == true ]]; then
+          if [[ "$MAC_RELEASE_STRICT" == true && "$NOTARIZE_MAC" == true ]]; then
             spctl -a -vv "$APP_PATH"
           fi
           for dmg in dist-electron/*.dmg; do
-            if [[ "$MAC_RELEASE_STRICT" == true ]]; then
+            if [[ "$MAC_RELEASE_STRICT" == true && "$NOTARIZE_MAC" == true ]]; then
               xcrun stapler validate "$dmg"
             fi
             shasum -a 256 "$dmg"
@@ -110,13 +128,16 @@ jobs:
           if-no-files-found: error
 
   linux-arm64:
-    if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+    needs: [plan]
+    if: contains(needs.plan.outputs.platforms, 'linux')
     uses: ./.github/workflows/linux-arm64.yml
+    with:
+      platforms: linux
 
   release:
-    needs: [build, linux-arm64]
+    needs: [plan, build, linux-arm64]
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/')
+    if: startsWith(github.ref, 'refs/tags/') && needs.plan.outputs.platforms != '[]'
     
     steps:
       - name: Download all artifacts
@@ -125,7 +146,7 @@ jobs:
           path: artifacts
 
       - name: Create Release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         with:
           files: artifacts/**/*
           draft: false

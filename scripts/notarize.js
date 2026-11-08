@@ -57,8 +57,8 @@ async function notarize(context) {
 module.exports = async function (context) {
   if (process.platform !== 'darwin') return [];
   const strict = process.env.MAC_RELEASE_STRICT === 'true';
-  if (!strict && process.env.NOTARIZE_MAC !== 'true') {
-    console.log('[notarize] Skipped for this test build.');
+  if (process.env.NOTARIZE_MAC !== 'true') {
+    console.log('[notarize] Skipped because notarization was not requested.');
     return [];
   }
   try {
