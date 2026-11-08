@@ -12,9 +12,20 @@ async function health(wanted) {
   throw new Error(`Home health did not become ${wanted}`);
 }
 
+async function waitFor(check, timeoutMs, message) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await check()) return;
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+  throw new Error(message);
+}
+
 async function status(page, wanted) {
-  await page.waitForFunction(async (next) => await window.elastos.getStatus() === next, wanted, { timeout: 180000 });
-  await page.waitForFunction((next) => document.querySelector('#status-text').textContent.toLowerCase() === next, wanted, { timeout: 10000 });
+  await waitFor(async () => await page.evaluate(() => window.elastos.getStatus()) === wanted,
+    180000, `Launcher status did not become ${wanted}`);
+  await waitFor(async () => (await page.locator('#status-text').innerText()).toLowerCase() === wanted,
+    10000, `Window status did not become ${wanted}`);
 }
 
 module.exports = async function (app, page, home) {

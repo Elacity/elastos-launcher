@@ -20,7 +20,7 @@ for (const status of ['Accepted', 'Invalid', 'In Progress', 'invalid-json', 'fai
         assert.equal(options.env.APPLE_APP_SPECIFIC_PASSWORD, 'test-credential');
         assert.match(args[1], /--wait/);
         assert.match(args[1], /--timeout 25m/);
-        if (status === 'failed') throw new Error('submission failed');
+        if (status === 'failed') throw Object.assign(new Error('submission failed'), { status: 1, stdout: 'test-credential authentication failed' });
         return status === 'invalid-json' ? 'not JSON' : JSON.stringify({ status, id: 'submission-id' });
       }
       return '';
@@ -33,7 +33,10 @@ for (const status of ['Accepted', 'Invalid', 'In Progress', 'invalid-json', 'fai
         ['stapler', 'staple', '/build/ElastOS.dmg'], ['stapler', 'validate', '/build/ElastOS.dmg'],
       ]);
     } else {
-      await assert.rejects(() => notarize({ artifactPaths: ['/build/ElastOS.dmg'] }));
+      await assert.rejects(() => notarize({ artifactPaths: ['/build/ElastOS.dmg'] }), (error) => {
+        assert.equal(error.message.includes('test-credential'), false);
+        return true;
+      });
       assert.equal(calls.length, 1);
     }
   });
