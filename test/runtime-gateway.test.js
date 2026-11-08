@@ -1051,6 +1051,152 @@ done
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
+function pidfdResources(pidFile) {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const text = fs.existsSync(pidFile) ? fs.readFileSync(pidFile, 'utf8') : '';
+  const inodes = new Set();
+  let helpers = 0;
+  let dirs = 0;
+  for (const line of text.split('\n')) {
+    const [pidText, cmd] = line.split(' ');
+    const pid = Number(pidText);
+    if (!pid || !cmd) continue;
+    try {
+      process.kill(pid, 0);
+      helpers += 1;
+    } catch {
+      // The helper has exited.
+    }
+    const fifoDir = path.dirname(cmd);
+    if (fs.existsSync(fifoDir)) dirs += 1;
+    for (const leaf of ['cmd', 'reply']) {
+      try {
+        const st = fs.statSync(path.join(fifoDir, leaf));
+        inodes.add(`${st.dev}:${st.ino}`);
+      } catch {
+        // close() removes the FIFO directory.
+      }
+    }
+  }
+  let fds = 0;
+  for (const name of fs.readdirSync('/dev/fd')) {
+    const fd = Number(name);
+    if (!Number.isInteger(fd)) continue;
+    try {
+      const st = fs.fstatSync(fd);
+      if (inodes.has(`${st.dev}:${st.ino}`)) fds += 1;
+    } catch {
+      // The fd closed while this scan was reading /dev/fd.
+    }
+  }
+  return { helpers, dirs, fds };
+}
+
+function releasePidfdLeak(pidFile, scriptDir) {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const text = fs.existsSync(pidFile) ? fs.readFileSync(pidFile, 'utf8') : '';
+  for (const line of text.split('\n')) {
+    const [pidText, cmd] = line.split(' ');
+    const pid = Number(pidText);
+    if (pid) {
+      try { process.kill(pid, 'SIGKILL'); } catch { /* already gone */ }
+    }
+    if (!cmd) continue;
+    fs.rmSync(path.dirname(cmd), { recursive: true, force: true });
+  }
+  fs.rmSync(scriptDir, { recursive: true, force: true });
+}
+
+function writePidfdHelper(mode) {
+  const fs = require('node:fs');
+  const os = require('node:os');
+  const path = require('node:path');
+  const dir = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'pidfd-leak-'));
+  const helper = path.join(dir, 'helper');
+  const pidFile = path.join(dir, 'pids');
+  const signalArm = mode === 'timeout'
+    ? 'SIGTERM|SIGKILL) ;;'
+    : "SIGTERM|SIGKILL) printf '%s\\n' 'errno EPERM' >&3 ;;";
+  fs.writeFileSync(helper, `#!/bin/sh
+printf '%s %s\\n' "$$" "$3" >> '${pidFile}'
+exec 3>"$2"
+printf '%s\\n' ready >&3
+exec 4<"$3"
+while IFS= read -r line <&4; do
+  case $line in
+    close) exit 0 ;;
+    ${signalArm}
+    *) printf '%s\\n' 'errno EINVAL' >&3 ;;
+  esac
+done
+exit 0
+`, { mode: 0o755 });
+  return { helper, pidFile, dir };
+}
+
+async function failStopTwice(helper, pattern) {
+  const sup = createGatewaySupervisor({
+    binary: '/home/tester/.local/bin/elastos',
+    args: ['home', '--browser'],
+    adoptForControls: true,
+    spawn() { throw new Error('a retained Home is not spawned'); },
+    fetchHealth: async () => ({ status: 200, body: 'OK' }),
+    adoptInstalled: () => controllerGateway(
+      () => controllerView(),
+      () => ({ controllerStat: procStat(10, 1, 100), exePath: RUNTIME_EXE }),
+      (pid) => openLinuxPidfd(pid, { helper }),
+    ),
+    now: () => Date.now(),
+    sleep: async () => {},
+    openUrl() {},
+    log() {},
+    graceMs: 30,
+    pollMs: 10,
+  });
+  await assert.rejects(() => sup.stop(), pattern);
+  await assert.rejects(() => sup.stop(), pattern);
+  assert.equal(sup.phase(), 'error');
+}
+
+async function waitForPidfdBaseline(pidFile, before) {
+  const deadline = Date.now() + 1000;
+  let after = pidfdResources(pidFile);
+  while (Date.now() < deadline) {
+    if (after.helpers === before.helpers && after.dirs === before.dirs && after.fds === before.fds) {
+      return after;
+    }
+    await new Promise((resolve) => { setTimeout(resolve, 20); });
+    after = pidfdResources(pidFile);
+  }
+  return after;
+}
+
+test('repeated Stop after a pidfd send error returns helper resources to baseline', { timeout: 10000 }, async () => {
+  const { helper, pidFile, dir } = writePidfdHelper('eperm');
+  const before = pidfdResources(pidFile);
+  try {
+    await failStopTwice(helper, /Could not signal ElastOS \(SIGTERM\): errno EPERM/);
+    const after = await waitForPidfdBaseline(pidFile, before);
+    assert.deepEqual(after, before);
+  } finally {
+    releasePidfdLeak(pidFile, dir);
+  }
+});
+
+test('repeated Stop after a pidfd timeout returns helper resources to baseline', { timeout: 20000 }, async () => {
+  const { helper, pidFile, dir } = writePidfdHelper('timeout');
+  const before = pidfdResources(pidFile);
+  try {
+    await failStopTwice(helper, /Could not signal ElastOS \(SIGTERM\): pidfd helper timed out/);
+    const after = await waitForPidfdBaseline(pidFile, before);
+    assert.deepEqual(after, before);
+  } finally {
+    releasePidfdLeak(pidFile, dir);
+  }
+});
+
 test('Quit and stop after a retained Home signals only the confirmed controller', async () => {
   let observed = controllerView();
   const kills = [];
