@@ -1,5 +1,7 @@
 const assert = require('node:assert/strict');
 const { spawnSync } = require('node:child_process');
+const fs = require('node:fs');
+const path = require('node:path');
 const { isHealthOk, probeGatewayHealth } = require('../dist/main/targets/runtimeGateway');
 const { runtimeDataDir, runtimeUpdateCheckPath } = require('../dist/main/targets/runtimePaths');
 
@@ -128,23 +130,23 @@ function distroUpdateCheck() {
     timeout: 60000,
     windowsHide: true,
   });
-  if (result.status !== 0) return null;
+  if (result.status !== 0) {
+    const detail = `${result.stderr || ''} ${result.stdout || ''}`;
+    if (!/No such file or directory/.test(detail)) {
+      throw new Error(detail.trim() || 'The update check file could not be read.');
+    }
+    return null;
+  }
   return JSON.parse(result.stdout);
 }
 
-async function launcherUpdateCheck(app) {
-  const raw = await app.evaluate(() => {
-    const fs = require('fs');
-    const os = require('os');
-    const path = require('path');
-    const file = path.join(os.homedir(), '.elastos-launcher', 'update-check.json');
-    return fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : '';
-  });
-  if (!raw) return null;
-  return JSON.parse(raw);
+function launcherUpdateCheck(home) {
+  const file = path.join(home, '.elastos-launcher', 'update-check.json');
+  if (!fs.existsSync(file)) return null;
+  return JSON.parse(fs.readFileSync(file, 'utf8'));
 }
 
-module.exports = async function (app, page) {
+module.exports = async function (app, page, home) {
   await app.evaluate(({ shell }) => {
     global.__openedHome = [];
     shell.openExternal = async (url) => { global.__openedHome.push(url); };
@@ -183,7 +185,7 @@ module.exports = async function (app, page) {
     assert.equal(runtime.offered, false);
     console.log('PASS elastos update --check keeps the Runtime up_to_date record');
   } else {
-    const launcher = await launcherUpdateCheck(app);
+    const launcher = launcherUpdateCheck(home);
     assert.ok(launcher);
     assert.equal(launcher.outcome, 'up_to_date');
     assert.equal(launcher.offered, false);

@@ -237,7 +237,7 @@ async function main() {
             throw new Error(`Install opened a browser tab after Start: ${JSON.stringify(opened)}`);
           }
           console.log('PASS install did not open a second browser tab');
-          electronApp = await require('./windows-lifecycle-e2e')(electronApp, page);
+          electronApp = await require('./windows-lifecycle-e2e')(electronApp, page, home);
         }
         return;
       }
