@@ -30,7 +30,6 @@ import {
 } from './runtimeUpdate';
 import { loadActiveRuntimePin } from './runtimePin';
 import {
-  confirmDistroGateway,
   createDistroGatewaySupervisor,
   distroIsInstalled,
   readDistroUpdateStatus,
@@ -177,12 +176,7 @@ export function createRuntimeTarget(platform: NodeJS.Platform = process.platform
     },
     getVersion: () => (platform === 'win32' ? readDistroVersion() : readRuntimeVersion(platform, arch)),
     checkForUpdate: () => runtimeCheckForUpdate(platform, arch),
-    openInBrowser: async () => {
-      if (platform === 'win32' && !(await confirmDistroGateway())) {
-        throw new Error('Another program is answering on port 8090. Home was not adopted.');
-      }
-      openRuntimeHome();
-    },
+    openInBrowser: () => openRuntimeHome(),
     getLogs: async (lines) => supervisor?.getLogs(lines) ?? '',
   };
 }

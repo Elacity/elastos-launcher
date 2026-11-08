@@ -1,4 +1,4 @@
-import { ChildProcess, execFile, spawn, spawnSync } from 'child_process';
+import { ChildProcess, spawn, spawnSync } from 'child_process';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
@@ -10,13 +10,10 @@ import { runtimeDataDir, runtimeUpdateCheckPath } from './runtimePaths';
 import { parseRuntimeVersion } from './runtimeProbe';
 import { RuntimeCommandResult } from './runtimeUpdate';
 import { WINDOWS_NATIVE_MESSAGE } from './runtimeSupport';
-import { GATEWAY_PORT } from './gatewayAddress';
 import {
   createGatewaySupervisor,
   emitRuntimeLog,
-  FOREIGN_LISTENER_MESSAGE,
   GatewayProcess,
-  HealthResult,
   InstalledGatewayKind,
   installedGatewayKind,
   listenerOwnership,
@@ -1359,255 +1356,25 @@ export function spawnDistroGatewayProcess(): GatewayProcess {
   };
 }
 
-/** One Windows LISTEN row for the gateway port, as the table printed it. */
-export interface WindowsListenRow {
-  address: string;
-  pid: number;
-  image: string;
-}
-
-export interface DistroOwnershipDeps {
-  run?: (args: readonly string[], timeoutMs: number) => Promise<WslResult>;
-  distroKind?: () => Promise<DistroListenerKind>;
-  readListeners?: () => WindowsListenRow[] | null | Promise<WindowsListenRow[] | null>;
-  programFiles?: readonly string[];
-  answered?: readonly string[];
-}
-
-export const WINDOWS_LISTENER_TIMEOUT_MS = 5000;
-export const WINDOWS_LISTENER_MAX_BYTES = 64 * 1024;
-const WINDOWS_LISTENER_MAX_ROWS = 32;
-
-/**
- * NAT mode listens in wslrelay.exe. Mirrored mode forwards bind to wslservice.exe.
- * Source: https://github.com/microsoft/WSL/blob/master/doc/docs/technical-documentation/localhost.md
- */
-const WSL_FORWARDER_NAMES = new Set(['wslrelay.exe', 'wslservice.exe']);
-
-export function windowsListenerScript(port: number): string {
-  if (!Number.isInteger(port) || port < 1 || port > 65535) {
-    throw new Error('Refusing to read a Windows listener table for this port.');
-  }
-  return [
-    "$ErrorActionPreference = 'Stop'",
-    '[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false',
-    `$rows = @(Get-NetTCPConnection -State Listen -LocalPort ${port} -ErrorAction Stop)`,
-    '$n = 0',
-    'foreach ($row in $rows) {',
-    '  $n++',
-    `  if ($n -gt ${WINDOWS_LISTENER_MAX_ROWS}) { exit 2 }`,
-    '  $procId = [int]$row.OwningProcess',
-    "  $proc = Get-CimInstance -ClassName Win32_Process -Filter ('ProcessId=' + $procId) -ErrorAction Stop",
-    '  $image = [string]$proc.ExecutablePath',
-    '  $addr = [string]$row.LocalAddress',
-    '  Write-Output ($addr + [char]9 + $procId + [char]9 + $image)',
-    '}',
-  ].join('\n');
-}
-
-export function wslProgramFiles(env: NodeJS.ProcessEnv = process.env): string[] {
-  const found: string[] = [];
-  for (const key of ['ProgramW6432', 'ProgramFiles']) {
-    const value = env[key];
-    if (typeof value !== 'string' || value === '') continue;
-    if (found.some((item) => item.toLowerCase() === value.toLowerCase())) continue;
-    found.push(value);
-  }
-  if (found.length === 0) found.push('C:\\Program Files');
-  return found;
-}
-
-export function decodeWindowsText(raw: Buffer | string): string | null {
-  const buf = Buffer.isBuffer(raw) ? raw : Buffer.from(raw);
-  if (buf.length > WINDOWS_LISTENER_MAX_BYTES) return null;
-  let text: string;
-  if (buf.length >= 2 && buf[0] === 0xff && buf[1] === 0xfe) text = buf.subarray(2).toString('utf16le');
-  else if (buf.includes(0)) text = buf.toString('utf16le');
-  else text = buf.toString('utf8');
-  if (text.charCodeAt(0) === 0xfeff) text = text.slice(1);
-  if (text.includes('\0')) return null;
-  return text;
-}
-
-export function parseWindowsListenerTable(text: string): WindowsListenRow[] | null {
-  if (text.includes('\0')) return null;
-  const lines = text.split(/\r?\n/).map((line) => line.trim()).filter((line) => line.length > 0);
-  if (lines.length > WINDOWS_LISTENER_MAX_ROWS) return null;
-  const rows: WindowsListenRow[] = [];
-  for (const line of lines) {
-    const first = line.indexOf('\t');
-    const second = first < 0 ? -1 : line.indexOf('\t', first + 1);
-    if (first <= 0 || second <= first) return null;
-    const address = line.slice(0, first).trim();
-    const pidText = line.slice(first + 1, second).trim();
-    const image = line.slice(second + 1).trim();
-    if (!/^[1-9]\d*$/.test(pidText)) return null;
-    const pid = Number(pidText);
-    if (!Number.isInteger(pid) || pid <= 0) return null;
-    if (address === '' || image === '' || /[\r\n\t]/.test(image)) return null;
-    rows.push({ address, pid, image });
-  }
-  return rows;
-}
-
-type WindowsExecResult = { code: number; stdout: Buffer | string } | null;
-
-type WindowsExec = (
-  file: string,
-  args: readonly string[],
-  timeoutMs: number,
-  maxBytes: number,
-) => WindowsExecResult | Promise<WindowsExecResult>;
-
-function defaultWindowsExec(
-  file: string,
-  args: readonly string[],
-  timeoutMs: number,
-  maxBytes: number,
-): Promise<WindowsExecResult> {
-  return new Promise((resolve) => {
-    execFile(file, [...args], {
-      windowsHide: true,
-      timeout: timeoutMs,
-      maxBuffer: maxBytes,
-      encoding: 'buffer',
-    }, (err, stdout) => {
-      if (err) {
-        resolve(null);
-        return;
-      }
-      resolve({ code: 0, stdout: stdout ?? Buffer.alloc(0) });
-    });
-  });
-}
-
-/** The Windows listen table for this port. Null when the host is not Windows or the read fails. */
-export async function readWindowsListenerTable(
-  platform: NodeJS.Platform = process.platform,
-  exec: WindowsExec = defaultWindowsExec,
-  port = GATEWAY_PORT,
-): Promise<WindowsListenRow[] | null> {
-  if (platform !== 'win32') return null;
-  let script: string;
-  try {
-    script = windowsListenerScript(port);
-  } catch {
-    return null;
-  }
-  let result: WindowsExecResult;
-  try {
-    result = await exec(
-      'powershell.exe',
-      ['-NoProfile', '-NonInteractive', '-Command', script],
-      WINDOWS_LISTENER_TIMEOUT_MS,
-      WINDOWS_LISTENER_MAX_BYTES,
-    );
-  } catch {
-    return null;
-  }
-  if (!result || result.code !== 0) return null;
-  const text = decodeWindowsText(result.stdout);
-  if (text == null) return null;
-  return parseWindowsListenerTable(text);
-}
-
-function ipv4Address(text: string): boolean {
-  const parts = text.split('.');
-  if (parts.length !== 4) return false;
-  return parts.every((part) => /^\d{1,3}$/.test(part) && Number(part) <= 255);
-}
-
-function normalizeListenAddress(raw: string): string | null {
-  let text = raw.trim().toLowerCase();
-  if (text.startsWith('[') && text.endsWith(']')) text = text.slice(1, -1);
-  if (text === '*' || text === '0.0.0.0' || text === '::' || text === '::1') return text;
-  if (ipv4Address(text)) return text;
-  if (text.startsWith('::ffff:') && ipv4Address(text.slice('::ffff:'.length))) return text;
-  if (/^[0-9a-f:]+$/.test(text) && text.includes(':')) return text;
-  return null;
-}
-
-function forwarderCovers(listen: string, want: string): boolean {
-  if (listen === want || listen === '*' || listen === '::') return true;
-  if (want === '127.0.0.1') return listen === '0.0.0.0' || listen === '::ffff:127.0.0.1';
-  return false;
-}
-
-/** True when the image is wslrelay.exe or wslservice.exe in an installed WSL directory. */
-export function isWslForwarderImage(image: string, programFiles: readonly string[]): boolean {
-  if (image === '' || /[\0\r\n]/.test(image) || !path.win32.isAbsolute(image)) return false;
-  const base = path.win32.basename(image).toLowerCase();
-  if (!WSL_FORWARDER_NAMES.has(base)) return false;
-  const dir = path.win32.normalize(path.win32.dirname(image)).replace(/[\\/]+$/, '').toLowerCase();
-  for (const root of programFiles) {
-    if (typeof root !== 'string' || root === '') continue;
-    const program = path.win32.normalize(root).replace(/[\\/]+$/, '');
-    if (dir === path.win32.join(program, 'WSL').toLowerCase()) return true;
-    const apps = path.win32.join(program, 'WindowsApps').toLowerCase();
-    const prefix = `${apps}\\`;
-    if (!dir.startsWith(prefix)) continue;
-    const packageName = dir.slice(prefix.length);
-    if (packageName.includes('\\')) continue;
-    if (packageName.startsWith('microsoftcorporationii.windowssubsystemforlinux')) return true;
-  }
-  return false;
-}
-
-/**
- * Every listener belongs to the WSL forwarder, and each answered address is one of them.
- * A missing table, an empty table, or any other owner is false.
- */
-export function windowsForwarderOwns(
-  rows: readonly WindowsListenRow[] | null,
-  answered: readonly string[] = [],
-  programFiles: readonly string[] = [],
-): boolean {
-  if (!rows || rows.length === 0) return false;
-  const listens: string[] = [];
-  for (const row of rows) {
-    if (!isWslForwarderImage(row.image, programFiles)) return false;
-    const address = normalizeListenAddress(row.address);
-    if (!address) return false;
-    listens.push(address);
-  }
-  for (const raw of answered) {
-    const want = normalizeListenAddress(raw);
-    if (!want || !listens.some((listen) => forwarderCovers(listen, want))) return false;
-  }
-  return true;
-}
-
-export function createDistroGatewaySupervisor(deps: {
-  spawn?: () => GatewayProcess;
-  fetchHealth?: () => Promise<HealthResult | null>;
-  openUrl?: (url: string) => void;
-  now?: () => number;
-  sleep?: (ms: number) => Promise<void>;
-  foreignIsLegacy?: () => Promise<boolean>;
-} & DistroOwnershipDeps = {}) {
-  const owned = (answered: readonly string[]) => confirmDistroGateway({
-    run: deps.run,
-    distroKind: deps.distroKind,
-    readListeners: deps.readListeners,
-    programFiles: deps.programFiles,
-    answered,
-  });
+export function createDistroGatewaySupervisor() {
   return createGatewaySupervisor({
     binary: '/root/.local/bin/elastos',
     args: ['home', '--browser'],
-    spawn: deps.spawn ?? (() => spawnDistroGatewayProcess()),
-    fetchHealth: deps.fetchHealth ?? (() => probeGatewayHealth()),
-    sleep: deps.sleep ?? ((ms) => new Promise((resolve) => { setTimeout(resolve, ms); })),
-    now: deps.now ?? (() => Date.now()),
-    openUrl: deps.openUrl ?? openRuntimeHome,
+    spawn: () => spawnDistroGatewayProcess(),
+    // Windows forwards localhost to the distro. Probe each address Windows
+    // resolves localhost to, the same way the Windows browser can connect.
+    fetchHealth: () => probeGatewayHealth(),
+    sleep: (ms) => new Promise((resolve) => { setTimeout(resolve, ms); }),
+    now: () => Date.now(),
+    openUrl: openRuntimeHome,
     log: emitRuntimeLog,
     adoptForControls: true,
     healthTimeoutMs: DISTRO_HOME_READY_MS,
-    confirmForeign: () => owned([]),
-    foreignIsLegacy: deps.foreignIsLegacy ?? (async () => (await distroListenerKind()) === 'legacy'),
-    foreignMessage: FOREIGN_LISTENER_MESSAGE,
-    // The distro lock does not name the Windows process that accepted the probe.
-    listenerOwned: (_pid, health) => owned(health.addresses ?? []),
+    confirmForeign: confirmDistroGateway,
+    foreignIsLegacy: async () => (await distroListenerKind()) === 'legacy',
+    // The Windows side of the forward has no pid this launcher can check.
+    // Inside the distro, the lock pid must own every gateway socket.
+    listenerOwned: () => confirmDistroGateway(),
     adoptInstalled: () => adoptInstalledDistroGateway(),
   });
 }
@@ -1826,21 +1593,6 @@ export function factsAreElastos(raw: string): boolean {
   return factsGatewayKind(raw) === 'current';
 }
 
-export async function confirmDistroGateway(deps: DistroOwnershipDeps = {}): Promise<boolean> {
-  let kind: DistroListenerKind;
-  try {
-    kind = deps.distroKind
-      ? await deps.distroKind()
-      : await distroListenerKind(deps.run ?? runWsl);
-  } catch {
-    return false;
-  }
-  if (kind !== 'elastos') return false;
-  let rows: WindowsListenRow[] | null;
-  try {
-    rows = await (deps.readListeners ?? (() => readWindowsListenerTable()))();
-  } catch {
-    return false;
-  }
-  return windowsForwarderOwns(rows, deps.answered ?? [], deps.programFiles ?? wslProgramFiles());
+export async function confirmDistroGateway(): Promise<boolean> {
+  return (await distroListenerKind()) === 'elastos';
 }

@@ -70,6 +70,6 @@ export interface LaunchTarget {
   uninstall(): Promise<void>;
   getVersion(): string;
   checkForUpdate(): Promise<UpdateCheck>;
-  openInBrowser(): Promise<void>;
+  openInBrowser(): void;
   getLogs(lines?: number): Promise<string>;
 }
