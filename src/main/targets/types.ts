@@ -12,7 +12,8 @@ export type TargetStatus =
   | 'starting'
   | 'stopping'
   | 'error'
-  | 'not-installed';
+  | 'not-installed'
+  | 'other-home';
 
 export interface TargetPlatform {
   platform: 'darwin' | 'linux' | 'win32';

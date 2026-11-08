@@ -1,6 +1,6 @@
 import { contextBridge, ipcRenderer } from 'electron';
 
-export type RuntimeStatus = 'running' | 'stopped' | 'starting' | 'stopping' | 'error' | 'not-installed';
+export type RuntimeStatus = 'running' | 'stopped' | 'starting' | 'stopping' | 'error' | 'not-installed' | 'other-home';
 
 contextBridge.exposeInMainWorld('elastos', {
   platform: process.platform,
@@ -101,6 +101,8 @@ declare global {
         preflight: { ok: boolean; checks: Array<{ id: string; level: string; message: string }> };
         openAtLogin: boolean;
         canRollback: boolean;
+        error: string | null;
+        openBrowserAfterInstall: boolean;
       }>;
       getPreflight: () => Promise<{ ok: boolean; checks: Array<{ id: string; level: string; message: string }> }>;
       getDiagnostics: () => Promise<string>;

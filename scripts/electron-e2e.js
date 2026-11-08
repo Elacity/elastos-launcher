@@ -225,6 +225,11 @@ async function main() {
             executablePath: electronPath, cwd: root, args, env, timeout: 120000,
           });
         }
+        if (process.platform === 'linux') {
+          await require('./linux-lifecycle-e2e')(electronApp, page, home, {
+            executablePath: electronPath, cwd: root, args, env, timeout: 120000,
+          });
+        }
         return;
       }
       if (errorVisible && errorText && /Set up ElastOS on Windows|Windows needs Linux support|Windows needs one step/.test(errorText)) {
@@ -299,7 +304,7 @@ async function main() {
   }
 }
 
-const capMs = process.platform === 'win32' ? 50 * 60 * 1000 : 35 * 60 * 1000;
+const capMs = process.platform === 'win32' ? 50 * 60 * 1000 : process.platform === 'linux' ? 45 * 60 * 1000 : 35 * 60 * 1000;
 setTimeout(() => {
   console.error(`e2e did not finish within ${capMs / 60000} minutes`);
   process.exit(1);

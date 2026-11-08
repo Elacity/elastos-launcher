@@ -3,7 +3,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import log from 'electron-log';
-import { createDefaultLaunchController, finishQuitAfterGatewayStop, TargetStatus } from './launchController';
+import { createDefaultLaunchController, finishQuitAfterGatewayStop, homeLaunchForPlatform, TargetStatus } from './launchController';
 import { describeLegacyPc2OnThisComputer, removeLegacyPc2OnThisComputer, withSupportBundle } from './legacyPc2Removal';
 
 // Chromium must never share the Runtime Home, including on case-insensitive Macs.
@@ -37,6 +37,7 @@ if (process.platform === 'darwin') {
 let mainWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
 let isQuitting = false;
+let stopHomeOnQuit = true;
 const quitGate = { started: false, ready: false };
 let currentStatus: TargetStatus = 'stopped';
 
@@ -87,14 +88,12 @@ function createWindow(): void {
 }
 
 function createTray(): void {
-  // Simple tray icon
   const iconPath = path.join(__dirname, '../../resources/icon.png');
   let icon: Electron.NativeImage;
   
   try {
     icon = nativeImage.createFromPath(iconPath);
     if (icon.isEmpty()) {
-      // Fallback to a simple icon
       icon = nativeImage.createFromDataURL(
         'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAABHNCSVQICAgIfAhkiAAAAAlwSFlzAAAA7AAAAOwBeShxvQAAABl0RVh0U29mdHdhcmUAd3d3Lmlua3NjYXBlLm9yZ5vuPBoAAAH5SURBVFiF7Ze/axRBFMc/M7t3yUWjhYVYiI2NjQERbfwPrGxEOwsLsRAsLPwPbGwsxMbKQrCwEWzEQrDQRhALC8FCCYiIRuNdkuzujsXu3e7l7nKXM+D3wzDM8N7MZ+a9NzOQUXAIGAN2s+0CtXBkCfgD/AJ+ArPAT2ANWBdRFXgEZuUmcAEodshrA5yECcBTcBB4BZwGfOAZ8ETESv+X+i5wEbiY9H0Z2AmMA/uTvieqGuvpxfMYOJbSrqvOIEACMpAJSAJeAF5S9gM2U2OaAYmqhcAz8BpoBc+BzuuLdEiKZrLMSj0B7JIGFQK1wBM/xhp05QfsBKoNYC8wDzzvFyQJiCeJN8DFaJHXxXJV1tQ68IaYcLrpDyLoJ5APvCOLCRwNVCcJYy2wyQs7KiZlJuoB79oj/wBwtXNOtfYmGIrLWpLK+w5c60UYTANFJOsYcKRPCHPAAWASeMojwChWBxTpFrKu2vQC4BlwyUeFE0KxP0AqYT3JQE+B4SSwH6hnQAFYBO6JqPQKkQZYS5bXgccitP8N/oEKMCGi3C/IEPARuNcvRIb+yO4nngvMAe+Tzr5BkoBBYDfwot9qSOsUyxUNjQ8i6sMggmRoD7nHI/+wHTAGPBNR7hciCRj6LpjCxBpw00d5nyAZGgT2AEv/M/4vmHGRlTWP0ioAAAAASUVORK5CYII='
       );
@@ -106,6 +105,7 @@ function createTray(): void {
   }
 
   tray = new Tray(icon.resize({ width: 16, height: 16 }));
+  (global as typeof globalThis & { __elastosTray?: true }).__elastosTray = true;
   tray.setToolTip('ElastOS');
   updateTrayMenu();
 
@@ -125,7 +125,8 @@ function updateTrayMenu(): void {
     'starting': '🟡 Starting...',
     'stopping': '🟡 Stopping...',
     'error': '🔴 Error',
-    'not-installed': '⚪ Not Installed'
+    'not-installed': '⚪ Not Installed',
+    'other-home': 'another ElastOS Home is running',
   };
 
   const contextMenu = Menu.buildFromTemplate([
@@ -138,6 +139,7 @@ function updateTrayMenu(): void {
     },
     {
       label: 'Stop',
+      visible: currentStatus !== 'other-home',
       enabled: currentStatus === 'running',
       click: () => { void launch.stop(); }
     },
@@ -149,9 +151,20 @@ function updateTrayMenu(): void {
     },
     { type: 'separator' },
     { label: 'Show Window', click: () => mainWindow?.show() },
+    ...(homeLaunchForPlatform(process.platform).offerKeepHomeOnQuit ? [{
+      id: 'quit-keep-home',
+      label: 'Quit and keep Home',
+      click: () => {
+        stopHomeOnQuit = false;
+        isQuitting = true;
+        app.quit();
+      },
+    }] : []),
     {
+      id: 'quit-stop-home',
       label: 'Quit and stop Home',
       click: () => {
+        stopHomeOnQuit = true;
         isQuitting = true;
         app.quit();
       }
@@ -159,6 +172,7 @@ function updateTrayMenu(): void {
   ]);
 
   tray?.setContextMenu(contextMenu);
+  (global as typeof globalThis & { __elastosTrayMenu?: Menu }).__elastosTrayMenu = contextMenu;
 }
 
 // Set up status change listener
@@ -285,7 +299,7 @@ app.whenReady().then(() => {
 });
 
 app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') {
+  if (homeLaunchForPlatform(process.platform).quitWhenLastWindowCloses) {
     isQuitting = true;
     app.quit();
   }
@@ -301,6 +315,7 @@ app.on('activate', () => {
 
 app.on('before-quit', (event) => {
   isQuitting = true;
+  if (!stopHomeOnQuit) return;
   void finishQuitAfterGatewayStop(quitGate, event, () => launch.shutdown(), () => {
     app.quit();
   }, {

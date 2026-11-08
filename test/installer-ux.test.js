@@ -13,7 +13,7 @@ const {
   publisherHost,
   publisherOffline,
 } = require('../dist/main/targets/preflight');
-const { linuxAutostartFile, syncLinuxAutostart } = require('../dist/main/targets/openAtLogin');
+const { linuxAutostartFile, linuxAutostartExecPath, syncLinuxAutostart } = require('../dist/main/targets/openAtLogin');
 const flow = require('../src/renderer/flow.js');
 
 test('launcher logs omit terminal-only advice and retain replacement diagnostics', () => {
@@ -108,7 +108,15 @@ test('sign-in launch writes a desktop file and can remove it', () => {
   };
   const written = syncLinuxAutostart(true, '/home/tester', '/usr/bin/elastos', fs);
   assert.match(files.get(written), /Name=ElastOS/);
+  assert.match(files.get(written), /X-GNOME-Autostart-enabled=true/);
   assert.match(linuxAutostartFile('/usr/bin/elastos'), /Exec=\/usr\/bin\/elastos/);
+  assert.equal(
+    linuxAutostartExecPath({ APPIMAGE: '/home/me/ElastOS.AppImage' }, '/tmp/.mount_abc/elastos'),
+    '/home/me/ElastOS.AppImage',
+  );
+  assert.equal(linuxAutostartExecPath({ APPIMAGE: '  ' }, '/usr/bin/elastos'), '/usr/bin/elastos');
+  assert.match(linuxAutostartFile('/home/me/ElastOS App.AppImage'), /Exec="\/home\/me\/ElastOS App\.AppImage"/);
+  assert.match(linuxAutostartFile('/home/me/ElastOS-$APP.AppImage'), /Exec="\/home\/me\/ElastOS-\\\$APP\.AppImage"/);
   assert.equal(syncLinuxAutostart(false, '/home/tester', '/usr/bin/elastos', fs), null);
   assert.equal(files.size, 0);
 });
@@ -116,6 +124,9 @@ test('sign-in launch writes a desktop file and can remove it', () => {
 test('the install button is the primary action until the computer is healthy', () => {
   assert.equal(flow.primaryAction({ targetId: 'runtime', status: 'not-installed', busy: false }).label, 'Install');
   assert.equal(flow.primaryAction({ targetId: 'runtime', status: 'running', busy: false }).label, 'Open my computer');
+  const otherHome = flow.primaryAction({ targetId: 'runtime', status: 'other-home', busy: false });
+  assert.equal(otherHome.enabled, false);
+  assert.equal(otherHome.label, 'another ElastOS Home is running');
   assert.equal(flow.primaryAction({ targetId: 'runtime', status: 'error', busy: false }).id, 'retry');
   assert.match(flow.firstRunCopy('runtime', 'not-installed'), /One button/);
   assert.equal(flow.firstRunCopy('runtime', 'running'), '');

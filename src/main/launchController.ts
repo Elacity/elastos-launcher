@@ -1,7 +1,9 @@
 import * as os from 'os';
 import { applyOpenAtLogin, readOpenAtLogin } from './targets/openAtLogin';
 import { buildDiagnostics, collectPreflight, PreflightReport, saveCollectedSupportBundle } from './targets/preflight';
-import { confirmInstalledGateway, isForeignGatewayError, isHealthOk, probeGatewayHealth, STOP_GRACE_MS } from './targets/runtimeGateway';
+import { confirmInstalledGateway, homeLaunchForPlatform, isForeignGatewayError, isHealthOk, probeGatewayHealth, STOP_GRACE_MS } from './targets/runtimeGateway';
+
+export { homeLaunchForPlatform };
 import { collectFailureFacts, failureScreen, FailureScreen, fixCollectedFailure, windowsFixResult } from './targets/runtimeRecovery';
 import { resolveLaunchTargetId } from './targets/preferences';
 import { LAUNCH_TARGET_ENV, retiredPc2Notice } from './targets/registry';
@@ -129,6 +131,7 @@ export interface LaunchInfo {
   preflight: PreflightReport;
   openAtLogin: boolean;
   canRollback: boolean;
+  openBrowserAfterInstall: boolean;
 }
 
 function messageOf(err: unknown): string {
@@ -290,6 +293,7 @@ export function createLaunchController(options: LaunchControllerOptions = {}): L
         preflight,
         openAtLogin: readOpenAtLogin(),
         canRollback: Boolean(runtimeHeadStore().get()),
+        openBrowserAfterInstall: homeLaunchForPlatform(process.platform).openBrowserAfterInstall,
       };
     },
     getPreflight: () => collectPreflight(),

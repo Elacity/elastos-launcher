@@ -13,6 +13,7 @@ const {
   BASH_MESSAGE,
   MUSL_MESSAGE,
   PYTHON_VERIFY_MESSAGE,
+  detectLinuxLibc,
   prepareInstallerEnvironment,
 } = require('../dist/main/targets/hostTools');
 const { evaluatePreflight } = require('../dist/main/targets/preflight');
@@ -256,6 +257,11 @@ test('a tampered python archive is refused and nothing is unpacked', async () =>
   );
   assert.equal(fs.existsSync(path.join(home, '.elastos-launcher', 'python', '.sha256')), false);
   assert.equal(fs.existsSync(path.join(home, '.elastos-launcher', 'python', 'python', 'bin', 'python3')), false);
+});
+
+test('a glibc computer that also has a musl loader is not musl', () => {
+  assert.equal(detectLinuxLibc('linux', () => ['ld-musl-aarch64.so.1', 'ld-linux-aarch64.so.1']), 'glibc');
+  assert.equal(detectLinuxLibc('linux', () => ['ld-musl-x86_64.so.1']), 'musl');
 });
 
 test('musl and a missing shell block install, and a bad python hash is refused', async () => {

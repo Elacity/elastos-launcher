@@ -1,19 +1,29 @@
 const assert = require('node:assert/strict');
+const { spawn } = require('node:child_process');
 const test = require('node:test');
 
-const { spawn } = require('node:child_process');
 const {
   HOME_URL,
   binaryReplacement,
   createGatewaySupervisor,
+  controllerGateway,
+  confirmedControllerPid,
+  signalRecordedController,
+  openLinuxPidfd,
+  signalProcessGroup,
   isHealthOk,
   scrubRuntimeLog,
-  signalProcessGroup,
+  launcherLogText,
+  homeLaunchForPlatform,
+  spawnGatewayProcess,
   ForeignGatewayError,
   foreignListenerIsElastos,
   installedGatewayKind,
   FOREIGN_LISTENER_MESSAGE,
   LEGACY_STILL_RUNNING_MESSAGE,
+  HOME_UNCONFIRMED_MESSAGE,
+  OTHER_HOME_MESSAGE,
+  linuxControllerAdopt,
   combineHealth,
   listenerOwnership,
   localhostIsLoopback,
@@ -23,6 +33,13 @@ const {
   procListenersFor,
   procNetAddress,
   procNetListeners,
+  procStatParent,
+  listenersFromProcSnapshot,
+  linuxProcessIdentity,
+  linuxStatStartTicks,
+  proveLinuxHome,
+  linuxControllerSignalPid,
+  platformAdoptsInstalledHome,
 } = require('../dist/main/targets/runtimeGateway');
 const { uninstallRuntime } = require('../dist/main/targets/runtimeUninstall');
 
@@ -223,6 +240,118 @@ test('the gateway must own every localhost listener, on 127.0.0.1 and on ::1', (
   assert.equal(listenerOwnership(procListenersFor(tcp, tcp6, ['socket:[4242]', 'socket:[4343]']), wants, ['::1']), 'owned');
 });
 
+function procStat(pid, ppid, start) {
+  const fields = ['S', String(ppid), ...Array(17).fill('0'), String(start)];
+  return `${pid} (elastos) ${fields.join(' ')}`;
+}
+
+test('a Home controller does not own a descendant socket', () => {
+  const tcp = [TCP_HEADER, tcpRow('0100007F', 4242)].join('\n');
+  const tcp6 = [TCP_HEADER, tcpRow(V6_LOOPBACK, 4343)].join('\n');
+  const wants = ['127.0.0.1', '::1'];
+  assert.deepEqual(procStatParent('20 (elastos home) S 10 9'), { pid: 20, ppid: 10 });
+  assert.equal(procStatParent('no-paren'), null);
+  assert.equal(linuxStatStartTicks(procStat(20, 10, 200)), '200');
+  assert.equal(linuxStatStartTicks('20 (elastos home) S 10'), null);
+  assert.equal(linuxProcessIdentity(procStat(10, 1, 100), 'boot-1'), 'linux:boot-1:100');
+  const child = [
+    { pid: 10, ppid: 1, fdLinks: ['pipe:[1]'] },
+    { pid: 20, ppid: 10, fdLinks: ['socket:[4242]', 'socket:[4343]'] },
+  ];
+  assert.equal(listenerOwnership(listenersFromProcSnapshot(tcp, tcp6, 10, child), wants), 'foreign');
+  const host = [{ pid: 20, ppid: 10, fdLinks: ['socket:[4242]', 'socket:[4343]'] }];
+  assert.equal(listenerOwnership(listenersFromProcSnapshot(tcp, tcp6, 20, host), wants), 'owned');
+  const stranger = [
+    { pid: 10, ppid: 1, fdLinks: [] },
+    { pid: 20, ppid: 10, fdLinks: ['socket:[4242]'] },
+    { pid: 30, ppid: 1, fdLinks: ['socket:[4343]'] },
+  ];
+  assert.equal(listenerOwnership(listenersFromProcSnapshot(tcp, tcp6, 10, stranger), wants), 'foreign');
+});
+
+test('Linux Home ownership follows the controller record, not a descendant or a reused pid', () => {
+  const tcp = [TCP_HEADER, tcpRow('0100007F', 4242)].join('\n');
+  const tcp6 = [TCP_HEADER, tcpRow(V6_LOOPBACK, 4343)].join('\n');
+  const bootId = 'boot-1';
+  const statusText = JSON.stringify({
+    phase: 'ready',
+    controller_pid: 10,
+    controller_start: 'linux:boot-1:100',
+    host_pid: 20,
+    generation: 'abc',
+  });
+  const lockText = JSON.stringify({
+    pid: 20, role: 'gateway', addr: 'localhost:8090', generation: 'abc',
+  });
+  const proved = proveLinuxHome({
+    statusText,
+    lockText,
+    bootId,
+    controllerStat: procStat(10, 1, 100),
+    hostStatBefore: procStat(20, 10, 200),
+    hostFdLinks: ['socket:[4242]', 'socket:[4343]'],
+    hostStatAfter: procStat(20, 10, 200),
+    tcp,
+    tcp6,
+  });
+  assert.equal(proved && proved.controllerPid, 10);
+  assert.equal(linuxControllerSignalPid(proved, 'linux:boot-1:100'), 10);
+  assert.equal(linuxControllerSignalPid(proved, 'linux:boot-1:999'), null);
+  assert.equal(linuxControllerSignalPid(proved, null), null);
+
+  const descendant = proveLinuxHome({
+    statusText,
+    lockText,
+    bootId,
+    controllerStat: procStat(10, 1, 100),
+    hostStatBefore: procStat(20, 10, 200),
+    hostFdLinks: ['pipe:[1]'],
+    hostStatAfter: procStat(20, 10, 200),
+    tcp,
+    tcp6,
+  });
+  assert.equal(descendant, null);
+
+  const reused = proveLinuxHome({
+    statusText,
+    lockText,
+    bootId,
+    controllerStat: procStat(10, 1, 100),
+    hostStatBefore: procStat(20, 10, 200),
+    hostFdLinks: ['socket:[4242]', 'socket:[4343]'],
+    hostStatAfter: procStat(20, 10, 300),
+    tcp,
+    tcp6,
+  });
+  assert.equal(reused, null);
+
+  const stale = proveLinuxHome({
+    statusText,
+    lockText,
+    bootId,
+    controllerStat: procStat(10, 1, 50),
+    hostStatBefore: procStat(20, 10, 200),
+    hostFdLinks: ['socket:[4242]', 'socket:[4343]'],
+    hostStatAfter: procStat(20, 10, 200),
+    tcp,
+    tcp6,
+  });
+  assert.equal(stale, null);
+
+  const wrongRole = proveLinuxHome({
+    statusText,
+    lockText: JSON.stringify({ pid: 20, role: 'serve', addr: 'localhost:8090', generation: 'abc' }),
+    bootId,
+    controllerStat: procStat(10, 1, 100),
+    hostStatBefore: procStat(20, 10, 200),
+    hostFdLinks: ['socket:[4242]', 'socket:[4343]'],
+    hostStatAfter: procStat(20, 10, 200),
+    tcp,
+    tcp6,
+  });
+  assert.equal(wrongRole, null);
+});
+
 test('lsof listeners name the owner pid for IPv4, [::1], and *', () => {
   const out = ['p41', 'f7', 'n127.0.0.1:8090', 'f8', 'n[::1]:8090', 'p99', 'f3', 'n*:8090', 'p100', 'n127.0.0.1:9000'].join('\n');
   assert.deepEqual(parseLsofListeners(out, 41), [
@@ -290,6 +419,14 @@ test('pidOwnsGatewayPort refuses when the listeners cannot be read', async () =>
   assert.equal(await pidOwnsGatewayPort(7, ['127.0.0.1', '::1'], [], async () => [{ address: '::1', owned: true }]), true);
 });
 
+test('the health probe returns when localhost lookup does not answer', { timeout: 2000 }, async () => {
+  const health = await probeGatewayHealth({
+    timeoutMs: 200,
+    lookup: () => new Promise(() => {}),
+  });
+  assert.equal(health, null);
+});
+
 test('the health probe asks every address localhost resolves to', async () => {
   const asked = [];
   const ok = { status: 200, body: 'OK' };
@@ -354,6 +491,57 @@ test('an OK that the started gateway does not own never opens Home', async () =>
   assert.equal(await ready.start(), 'started');
 });
 
+test('a gateway on 127.0.0.1:8090 is another Home and receives no signal', async () => {
+  const legacyLock = JSON.stringify({ pid: 7, role: 'gateway', addr: '127.0.0.1:8090' });
+  const legacyFacts = {
+    lockText: legacyLock,
+    command: '/home/user/.local/bin/elastos gateway --addr 127.0.0.1:8090',
+    pidAlive: () => true,
+    ownsSocket: (_pid, wants) => wants.length === 1 && wants[0] === '127.0.0.1',
+  };
+  assert.equal(installedGatewayKind(legacyFacts), 'legacy');
+  assert.equal(foreignListenerIsElastos(legacyFacts), false);
+  assert.equal(installedGatewayKind({ ...legacyFacts, lockText: JSON.stringify({ pid: 7, addr: '0.0.0.0:8090' }) }), null);
+  assert.equal(installedGatewayKind({ ...legacyFacts, ownsSocket: () => false }), null);
+
+  const spawned = [];
+  const opened = [];
+  const signals = [];
+  const sup = createGatewaySupervisor({
+    binary: '/bin/elastos',
+    spawn(_binary, args) {
+      spawned.push([...args]);
+      const proc = fakeProcess(50);
+      queueMicrotask(() => {
+        proc.emit('another ElastOS host already owns this data directory\n');
+        proc.exit(1);
+      });
+      return proc;
+    },
+    fetchHealth: async () => ({ status: 200, body: 'OK', addresses: ['127.0.0.1'] }),
+    sleep: async () => {},
+    now: () => 0,
+    openUrl: (url) => opened.push(url),
+    log: () => {},
+    confirmForeign: async () => foreignListenerIsElastos(legacyFacts),
+    reportLegacyHome: async () => installedGatewayKind(legacyFacts) === 'legacy',
+    adoptInstalled: () => {
+      signals.push('adopt');
+      return {
+        pid: 7,
+        onOutput() {},
+        onExit() {},
+        hasExited: () => false,
+        signal(sig) { signals.push(sig); },
+      };
+    },
+  });
+  await assert.rejects(() => sup.start(), (err) => err.message === OTHER_HOME_MESSAGE);
+  assert.deepEqual(signals, []);
+  assert.deepEqual(opened, []);
+  assert.deepEqual(spawned, [['gateway', '--addr', 'localhost:8090']]);
+});
+
 test('upgrade: a gateway an earlier launcher started on 127.0.0.1 is stopped and started on localhost', async () => {
   const legacyLock = JSON.stringify({ pid: 7, role: 'gateway', addr: '127.0.0.1:8090' });
   const legacyFacts = {
@@ -363,7 +551,6 @@ test('upgrade: a gateway an earlier launcher started on 127.0.0.1 is stopped and
     ownsSocket: (_pid, wants) => wants.length === 1 && wants[0] === '127.0.0.1',
   };
   assert.equal(installedGatewayKind(legacyFacts), 'legacy');
-  // Home never opens on the legacy gateway.
   assert.equal(foreignListenerIsElastos(legacyFacts), false);
   assert.equal(installedGatewayKind({ ...legacyFacts, lockText: JSON.stringify({ pid: 7, addr: '0.0.0.0:8090' }) }), null);
   assert.equal(installedGatewayKind({ ...legacyFacts, ownsSocket: () => false }), null);
@@ -383,7 +570,7 @@ test('upgrade: a gateway an earlier launcher started on 127.0.0.1 is stopped and
   let mine = null;
   const sup = createGatewaySupervisor({
     binary: '/bin/elastos',
-    spawn(binary, args) {
+    spawn(_binary, args) {
       spawned.push([...args]);
       const proc = fakeProcess(50 + spawned.length);
       if (legacyRunning) {
@@ -596,37 +783,19 @@ test('one failed health poll while the process is alive is not a stop', async ()
   assert.deepEqual(world.signals, ['SIGTERM', 'SIGKILL']);
 });
 
-test('signalProcessGroup uses the negative pid and surfaces a failed kill', () => {
-  const seen = [];
-  signalProcessGroup(42, 'SIGTERM', (pid, signal) => { seen.push([pid, signal]); });
-  assert.deepEqual(seen, [[-42, 'SIGTERM']]);
-  signalProcessGroup(0, 'SIGTERM', () => { throw new Error('pid 0 must not be signaled'); });
-  signalProcessGroup(-5, 'SIGTERM', () => { throw new Error('a negative pid must not be signaled'); });
-  signalProcessGroup(42, 'SIGTERM', () => {
-    const err = new Error('gone');
-    err.code = 'ESRCH';
-    throw err;
-  });
-  assert.throws(
-    () => signalProcessGroup(42, 'SIGKILL', () => {
-      const err = new Error('operation not permitted');
-      err.code = 'EPERM';
-      throw err;
-    }),
-    /Could not signal ElastOS \(SIGKILL\): operation not permitted/,
-  );
-});
-
-test('signalProcessGroup kills the leader and a child in that group', async () => {
-  const child = spawn('bash', ['-c', 'sleep 30 & echo $!; wait'], {
-    detached: true,
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
+test('a process this launcher spawned is signaled through its own handle', async () => {
+  const proc = spawnGatewayProcess(process.execPath, ['-e', `
+    const { spawn } = require('child_process');
+    const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+    process.stdout.write(String(child.pid));
+    setInterval(() => {}, 1000);
+  `], 'linux');
+  let grandchild = 0;
   try {
-    const grandchild = await new Promise((resolve, reject) => {
+    grandchild = await new Promise((resolve, reject) => {
       const timer = setTimeout(() => reject(new Error('grandchild pid was not printed')), 3000);
       let buf = '';
-      child.stdout.on('data', (chunk) => {
+      proc.onOutput((chunk) => {
         buf += chunk.toString();
         const line = buf.trim();
         if (/^\d+$/.test(line)) {
@@ -635,31 +804,454 @@ test('signalProcessGroup kills the leader and a child in that group', async () =
         }
       });
     });
-    signalProcessGroup(child.pid, 'SIGTERM');
-    await new Promise((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error('leader did not exit')), 3000);
-      child.once('exit', () => {
+    proc.signal('SIGTERM');
+    const leaderGone = await new Promise((resolve) => {
+      const timer = setTimeout(() => resolve(false), 3000);
+      proc.onExit(() => {
         clearTimeout(timer);
-        resolve();
+        resolve(true);
       });
     });
-    // The orphaned child is reaped by init, which can take longer than a
-    // fixed wait on a busy machine. Poll instead of sleeping once.
-    const gone = () => {
-      try {
-        process.kill(grandchild, 0);
-        return false;
-      } catch {
-        return true;
-      }
-    };
-    for (let waited = 0; waited < 5000 && !gone(); waited += 50) {
-      await new Promise((resolve) => setTimeout(resolve, 50));
-    }
-    assert.throws(() => process.kill(grandchild, 0));
+    assert.equal(leaderGone, true);
+    process.kill(grandchild, 0);
   } finally {
-    try { process.kill(-(child.pid), 'SIGKILL'); } catch { /* already gone */ }
+    try { if (grandchild) process.kill(grandchild, 'SIGKILL'); } catch { /* already gone */ }
+    try { proc.signal('SIGKILL'); } catch { /* already gone */ }
   }
+});
+
+function controllerView(overrides = {}) {
+  return {
+    statusText: JSON.stringify({
+      phase: 'ready',
+      controller_pid: 10,
+      controller_start: 'linux:boot-1:100',
+      host_pid: 20,
+      generation: 'abc',
+    }),
+    lockText: JSON.stringify({
+      pid: 20, role: 'gateway', addr: 'localhost:8090', generation: 'abc',
+    }),
+    bootId: 'boot-1',
+    controllerStat: procStat(10, 1, 100),
+    exePath: '/home/user/.local/share/elastos/update-controller/runtime',
+    allowedExes: [
+      '/home/user/.local/bin/elastos',
+      '/home/user/.local/share/elastos/update-controller/runtime',
+    ],
+    ...overrides,
+  };
+}
+
+const RUNTIME_EXE = '/home/user/.local/share/elastos/update-controller/runtime';
+
+function signalIo(observed, delivered) {
+  return {
+    readRecord: () => observed,
+    readProc: () => ({ controllerStat: observed.controllerStat, exePath: observed.exePath }),
+    openPidfd(pid) {
+      return {
+        send(signal) { delivered.push([pid, signal]); },
+        close() {},
+      };
+    },
+  };
+}
+
+function refusedSignal(observed) {
+  const delivered = [];
+  assert.equal(confirmedControllerPid(observed), null);
+  assert.throws(
+    () => signalRecordedController('SIGTERM', signalIo(observed, delivered), { pidfd: null }),
+    { message: HOME_UNCONFIRMED_MESSAGE },
+  );
+  assert.deepEqual(delivered, []);
+}
+
+function errno(code) {
+  return Object.assign(new Error(code), { code });
+}
+
+function controllerKernel(replaceOn) {
+  let live = { birth: 100, exe: RUNTIME_EXE };
+  const delivered = [];
+  let opens = 0;
+  const replace = () => { live = { birth: 999, exe: '/usr/bin/foreign' }; };
+  return {
+    delivered,
+    opens: () => opens,
+    replace,
+    readRecord() {
+      if (replaceOn === 'after-record') replace();
+      return controllerView();
+    },
+    readProc(pid) {
+      const statBirth = live.birth;
+      if (replaceOn === 'during-proc') replace();
+      const exe = live.exe;
+      const snap = { controllerStat: procStat(pid, 1, statBirth), exePath: exe };
+      if (replaceOn === 'after-proc') replace();
+      return snap;
+    },
+    openPidfd(pid) {
+      opens += 1;
+      const bound = { pid, birth: live.birth, exe: live.exe };
+      return {
+        send(signal) {
+          if (bound.birth !== live.birth || bound.exe !== live.exe) throw errno('ESRCH');
+          delivered.push({ pid: bound.pid, signal, birth: live.birth, exe: live.exe });
+        },
+        close() {},
+      };
+    },
+  };
+}
+
+function boundController(getView, onDelivered) {
+  return controllerGateway(
+    () => getView(),
+    () => {
+      const view = getView();
+      return { controllerStat: view.controllerStat, exePath: view.exePath };
+    },
+    (pid) => {
+      const bound = getView().controllerStat;
+      return {
+        send(signal) {
+          if (getView().controllerStat !== bound) throw errno('ESRCH');
+          onDelivered(pid, signal);
+        },
+        close() {},
+      };
+    },
+  );
+}
+
+test('a controller pid reused before the first read is not signaled', () => {
+  refusedSignal(controllerView({ controllerStat: procStat(10, 1, 999) }));
+  refusedSignal(controllerView({ statusText: null }));
+  refusedSignal(controllerView({ statusText: 'x'.repeat((16 * 1024) + 1) }));
+  refusedSignal(controllerView({
+    lockText: JSON.stringify({ pid: 20, role: 'gateway', addr: 'localhost:8090', generation: 'stale' }),
+  }));
+  refusedSignal(controllerView({ exePath: '/usr/bin/other' }));
+  refusedSignal(controllerView({ exePath: '/home/user/.local/bin/elastos (deleted)' }));
+  const installed = controllerView({ exePath: '/home/user/.local/bin/elastos' });
+  assert.equal(confirmedControllerPid(installed), 10);
+});
+
+test('a controller pid reused between the check and the signal is not signaled', () => {
+  let observed = controllerView();
+  assert.equal(confirmedControllerPid(observed), 10);
+  observed = controllerView({ controllerStat: procStat(10, 1, 999) });
+  const kills = [];
+  assert.throws(
+    () => signalRecordedController('SIGKILL', signalIo(observed, kills), { pidfd: null }),
+    { message: HOME_UNCONFIRMED_MESSAGE },
+  );
+  assert.deepEqual(kills, []);
+  const host = [];
+  signalRecordedController('SIGTERM', signalIo(controllerView(), host), { pidfd: null });
+  assert.deepEqual(host, [[10, 'SIGTERM']]);
+  assert.equal(host.some((row) => row[0] === 20 || row[0] < 0), false);
+});
+
+test('a controller replaced during the proc read is not signaled', () => {
+  const kernel = controllerKernel('during-proc');
+  assert.throws(
+    () => signalRecordedController('SIGTERM', kernel, { pidfd: null }),
+    { message: HOME_UNCONFIRMED_MESSAGE },
+  );
+  assert.deepEqual(kernel.delivered, []);
+});
+
+test('a controller replaced after the proc reads and before the signal is not signaled', () => {
+  const kernel = controllerKernel('after-proc');
+  signalRecordedController('SIGTERM', kernel, { pidfd: null });
+  assert.deepEqual(kernel.delivered, []);
+  assert.equal(kernel.opens(), 1);
+});
+
+test('a pid reused before pidfd_open fails the identity check', () => {
+  const kernel = controllerKernel('after-record');
+  assert.throws(
+    () => signalRecordedController('SIGTERM', kernel, { pidfd: null }),
+    { message: HOME_UNCONFIRMED_MESSAGE },
+  );
+  assert.deepEqual(kernel.delivered, []);
+});
+
+test('escalation sends SIGKILL through the pidfd opened for SIGTERM', () => {
+  const kernel = controllerKernel();
+  const gateway = controllerGateway(kernel.readRecord, kernel.readProc, kernel.openPidfd);
+  gateway.signal('SIGTERM');
+  gateway.signal('SIGKILL');
+  assert.equal(kernel.opens(), 1);
+  assert.deepEqual(kernel.delivered.map((row) => row.signal), ['SIGTERM', 'SIGKILL']);
+  assert.deepEqual(kernel.delivered.map((row) => row.birth), [100, 100]);
+  assert.deepEqual(kernel.delivered.map((row) => row.exe), [RUNTIME_EXE, RUNTIME_EXE]);
+});
+
+test('escalation does not signal a pid reused after SIGTERM', () => {
+  const kernel = controllerKernel();
+  const gateway = controllerGateway(kernel.readRecord, kernel.readProc, kernel.openPidfd);
+  gateway.signal('SIGTERM');
+  kernel.replace();
+  gateway.signal('SIGKILL');
+  assert.equal(kernel.opens(), 1);
+  assert.deepEqual(kernel.delivered, [{ pid: 10, signal: 'SIGTERM', birth: 100, exe: RUNTIME_EXE }]);
+});
+
+test('a missing pidfd does not signal the recorded pid', () => {
+  const delivered = [];
+  assert.throws(
+    () => signalRecordedController('SIGTERM', {
+      readRecord: () => controllerView(),
+      readProc: () => ({ controllerStat: procStat(10, 1, 100), exePath: RUNTIME_EXE }),
+      openPidfd() { throw errno('ENOSYS'); },
+    }, { pidfd: null }),
+    { message: HOME_UNCONFIRMED_MESSAGE },
+  );
+  assert.deepEqual(delivered, []);
+  if (process.platform !== 'linux') {
+    assert.throws(() => openLinuxPidfd(10), (err) => err.code === 'ENOSYS');
+  }
+});
+
+test('the linux package unpacks the pidfd helper', () => {
+  const pkg = require('../package.json');
+  assert.equal(pkg.build.asarUnpack.includes('dist/native/linux-pidfd'), true);
+  assert.equal(pkg.scripts['build:ts'].includes('scripts/build-linux-pidfd.js'), true);
+});
+
+test('the pidfd helper command is the pid and two fifo paths', { timeout: 5000 }, () => {
+  const fs = require('node:fs');
+  const os = require('node:os');
+  const path = require('node:path');
+  const dir = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'pidfd-client-'));
+  const log = path.join(dir, 'log');
+  const helper = path.join(dir, 'helper');
+  fs.writeFileSync(helper, `#!/bin/sh
+printf '%s\\n' "$#" >> '${log}'
+printf '%s\\n' "$1" >> '${log}'
+exec 3>"$2"
+printf '%s\\n' ready >&3
+exec 4<"$3"
+while IFS= read -r line <&4; do
+  printf '%s\\n' "$line" >> '${log}'
+  case $line in
+    SIGTERM|SIGKILL) printf '%s\\n' sent >&3 ;;
+    close) exit 0 ;;
+    *) printf '%s\\n' 'errno EINVAL' >&3 ;;
+  esac
+done
+`, { mode: 0o755 });
+  const pidfd = openLinuxPidfd(10, { helper });
+  try {
+    pidfd.send('SIGTERM');
+    pidfd.send('SIGKILL');
+  } finally {
+    pidfd.close();
+  }
+  const lines = fs.readFileSync(log, 'utf8').split('\n').filter(Boolean);
+  assert.deepEqual(lines.filter((line) => line !== 'close'), ['3', '10', 'SIGTERM', 'SIGKILL']);
+  assert.equal(lines.every((line) => ['3', '10', 'SIGTERM', 'SIGKILL', 'close'].includes(line)), true);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+function pidfdResources(pidFile) {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const text = fs.existsSync(pidFile) ? fs.readFileSync(pidFile, 'utf8') : '';
+  const inodes = new Set();
+  let helpers = 0;
+  let dirs = 0;
+  for (const line of text.split('\n')) {
+    const [pidText, cmd] = line.split(' ');
+    const pid = Number(pidText);
+    if (!pid || !cmd) continue;
+    try {
+      process.kill(pid, 0);
+      helpers += 1;
+    } catch {
+    }
+    const fifoDir = path.dirname(cmd);
+    if (fs.existsSync(fifoDir)) dirs += 1;
+    for (const leaf of ['cmd', 'reply']) {
+      try {
+        const st = fs.statSync(path.join(fifoDir, leaf));
+        inodes.add(`${st.dev}:${st.ino}`);
+      } catch {
+      }
+    }
+  }
+  let fds = 0;
+  for (const name of fs.readdirSync('/dev/fd')) {
+    const fd = Number(name);
+    if (!Number.isInteger(fd)) continue;
+    try {
+      const st = fs.fstatSync(fd);
+      if (inodes.has(`${st.dev}:${st.ino}`)) fds += 1;
+    } catch {
+      // The fd closed while this scan was reading /dev/fd.
+    }
+  }
+  return { helpers, dirs, fds };
+}
+
+function releasePidfdLeak(pidFile, scriptDir) {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const text = fs.existsSync(pidFile) ? fs.readFileSync(pidFile, 'utf8') : '';
+  for (const line of text.split('\n')) {
+    const [pidText, cmd] = line.split(' ');
+    const pid = Number(pidText);
+    if (pid) {
+      try { process.kill(pid, 'SIGKILL'); } catch {}
+    }
+    if (!cmd) continue;
+    fs.rmSync(path.dirname(cmd), { recursive: true, force: true });
+  }
+  fs.rmSync(scriptDir, { recursive: true, force: true });
+}
+
+function writePidfdHelper(mode) {
+  const fs = require('node:fs');
+  const os = require('node:os');
+  const path = require('node:path');
+  const dir = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'pidfd-leak-'));
+  const helper = path.join(dir, 'helper');
+  const pidFile = path.join(dir, 'pids');
+  const signalArm = mode === 'timeout'
+    ? 'SIGTERM|SIGKILL) ;;'
+    : "SIGTERM|SIGKILL) printf '%s\\n' 'errno EPERM' >&3 ;;";
+  fs.writeFileSync(helper, `#!/bin/sh
+printf '%s %s\\n' "$$" "$3" >> '${pidFile}'
+exec 3>"$2"
+printf '%s\\n' ready >&3
+exec 4<"$3"
+while IFS= read -r line <&4; do
+  case $line in
+    close) exit 0 ;;
+    ${signalArm}
+    *) printf '%s\\n' 'errno EINVAL' >&3 ;;
+  esac
+done
+exit 0
+`, { mode: 0o755 });
+  return { helper, pidFile, dir };
+}
+
+async function failStopTwice(helper, pattern) {
+  const sup = createGatewaySupervisor({
+    binary: '/home/tester/.local/bin/elastos',
+    args: ['home', '--browser'],
+    adoptForControls: true,
+    spawn() { throw new Error('a retained Home is not spawned'); },
+    fetchHealth: async () => ({ status: 200, body: 'OK' }),
+    adoptInstalled: () => controllerGateway(
+      () => controllerView(),
+      () => ({ controllerStat: procStat(10, 1, 100), exePath: RUNTIME_EXE }),
+      (pid) => openLinuxPidfd(pid, { helper }),
+    ),
+    now: () => Date.now(),
+    sleep: async () => {},
+    openUrl() {},
+    log() {},
+    graceMs: 30,
+    pollMs: 10,
+  });
+  await assert.rejects(() => sup.stop(), pattern);
+  await assert.rejects(() => sup.stop(), pattern);
+  assert.equal(sup.phase(), 'error');
+}
+
+async function waitForPidfdBaseline(pidFile, before) {
+  const deadline = Date.now() + 1000;
+  let after = pidfdResources(pidFile);
+  while (Date.now() < deadline) {
+    if (after.helpers === before.helpers && after.dirs === before.dirs && after.fds === before.fds) {
+      return after;
+    }
+    await new Promise((resolve) => { setTimeout(resolve, 20); });
+    after = pidfdResources(pidFile);
+  }
+  return after;
+}
+
+test('repeated Stop after a pidfd send error returns helper resources to baseline', { timeout: 10000 }, async () => {
+  const { helper, pidFile, dir } = writePidfdHelper('eperm');
+  const before = pidfdResources(pidFile);
+  try {
+    await failStopTwice(helper, /Could not signal ElastOS \(SIGTERM\): errno EPERM/);
+    const after = await waitForPidfdBaseline(pidFile, before);
+    assert.deepEqual(after, before);
+  } finally {
+    releasePidfdLeak(pidFile, dir);
+  }
+});
+
+test('repeated Stop after a pidfd timeout returns helper resources to baseline', { timeout: 20000 }, async () => {
+  const { helper, pidFile, dir } = writePidfdHelper('timeout');
+  const before = pidfdResources(pidFile);
+  try {
+    await failStopTwice(helper, /Could not signal ElastOS \(SIGTERM\): pidfd helper timed out/);
+    const after = await waitForPidfdBaseline(pidFile, before);
+    assert.deepEqual(after, before);
+  } finally {
+    releasePidfdLeak(pidFile, dir);
+  }
+});
+
+test('Quit and stop after a retained Home signals only the confirmed controller', async () => {
+  let observed = controllerView();
+  const kills = [];
+  const adopted = boundController(() => observed, (pid, signal) => {
+    kills.push([pid, signal]);
+    if (signal === 'SIGTERM') observed = controllerView({ controllerStat: null });
+  });
+  let health = { status: 200, body: 'OK' };
+  let clock = 0;
+  const sup = createGatewaySupervisor({
+    binary: '/home/tester/.local/bin/elastos',
+    args: ['home', '--browser'],
+    adoptForControls: true,
+    spawn() { throw new Error('a retained Home is not spawned again'); },
+    fetchHealth: async () => {
+      if (kills.length > 0) health = null;
+      return health;
+    },
+    adoptInstalled: async () => adopted,
+    now: () => clock,
+    sleep: async () => { clock += 1000; },
+    openUrl() {},
+    log() {},
+    graceMs: 3000,
+    pollMs: 1000,
+  });
+  await sup.stop();
+  assert.deepEqual(kills, [[10, 'SIGTERM']]);
+  assert.equal(sup.phase(), 'stopped');
+  sup.forceKill();
+  assert.deepEqual(kills, [[10, 'SIGTERM']]);
+
+  observed = controllerView();
+  const later = [];
+  const again = boundController(() => observed, (pid, signal) => later.push([pid, signal]));
+  again.signal('SIGTERM');
+  observed = controllerView({ controllerStat: procStat(10, 1, 999) });
+  again.signal('SIGKILL');
+  assert.deepEqual(later, [[10, 'SIGTERM']]);
+});
+
+test('a legacy 127.0.0.1 gateway is not a controller the launcher can signal', () => {
+  const legacy = JSON.stringify({ pid: 7, role: 'gateway', addr: '127.0.0.1:8090', generation: 'abc' });
+  assert.equal(linuxControllerAdopt(legacy), 'other-home');
+  assert.equal(linuxControllerAdopt(JSON.stringify({
+    pid: 7, role: 'gateway', addr: 'localhost:8090', generation: 'abc',
+  })), 'controller');
+  assert.equal(linuxControllerAdopt(null), 'none');
+  refusedSignal(controllerView({ lockText: legacy }));
 });
 
 test('stop does not kill a gateway this launcher did not start', async () => {
@@ -820,6 +1412,60 @@ test('logs omit attach secrets', async () => {
   assert.equal(text.includes('sekrit'), false);
   assert.match(text, /omitted a line/);
   assert.equal(scrubRuntimeLog('attach_secret=nope').includes('nope'), false);
+  const keep = 'Keep this terminal open. Press Ctrl+C to stop Home.\nwas replaced on disk\n';
+  assert.equal(launcherLogText(keep, true).includes('Keep this terminal open'), false);
+  assert.match(launcherLogText(keep, true), /was replaced on disk/);
+  assert.match(launcherLogText(keep, false), /Keep this terminal open/);
+  assert.deepEqual(homeLaunchForPlatform('linux').args, ['home', '--browser']);
+  assert.equal(homeLaunchForPlatform('linux').quitWhenLastWindowCloses, false);
+  assert.equal(homeLaunchForPlatform('linux').updateRestartsHome, true);
+  assert.equal(homeLaunchForPlatform('linux').rollbackRestartsHome, true);
+  assert.equal(homeLaunchForPlatform('linux').hideTerminalKeepLine, true);
+  assert.equal(homeLaunchForPlatform('linux').openBrowserAfterInstall, false);
+  assert.equal(homeLaunchForPlatform('linux').offerKeepHomeOnQuit, true);
+  assert.equal(platformAdoptsInstalledHome('linux'), true);
+  assert.equal(platformAdoptsInstalledHome('darwin'), true);
+  assert.equal(platformAdoptsInstalledHome('win32'), false);
+  assert.deepEqual(homeLaunchForPlatform('darwin').args, ['home', '--browser']);
+  assert.equal(homeLaunchForPlatform('darwin').quitWhenLastWindowCloses, false);
+  assert.equal(homeLaunchForPlatform('darwin').updateRestartsHome, true);
+  assert.equal(homeLaunchForPlatform('darwin').rollbackRestartsHome, true);
+  assert.equal(homeLaunchForPlatform('darwin').hideTerminalKeepLine, false);
+  assert.equal(homeLaunchForPlatform('darwin').openBrowserAfterInstall, true);
+  assert.equal(homeLaunchForPlatform('darwin').offerKeepHomeOnQuit, false);
+  assert.deepEqual(homeLaunchForPlatform('win32').args, ['gateway', '--addr', 'localhost:8090']);
+  assert.equal(homeLaunchForPlatform('win32').quitWhenLastWindowCloses, true);
+  assert.equal(homeLaunchForPlatform('win32').updateRestartsHome, false);
+  assert.equal(homeLaunchForPlatform('win32').openBrowserAfterInstall, true);
+  assert.equal(homeLaunchForPlatform('win32').offerKeepHomeOnQuit, false);
+});
+
+test('a Linux supervisor log drops the terminal sentence and keeps the other lines', async () => {
+  const launch = homeLaunchForPlatform('linux');
+  let proc;
+  const logs = [];
+  const sup = createGatewaySupervisor({
+    binary: '/bin/elastos',
+    args: launch.args,
+    hideTerminalKeepLine: launch.hideTerminalKeepLine,
+    spawn() {
+      proc = fakeProcess(11);
+      return proc;
+    },
+    fetchHealth: async () => {
+      proc.emit('Keep this terminal open. Press Ctrl+C to stop Home.\nHome: http://localhost:8090/home/\n');
+      return { status: 200, body: 'OK' };
+    },
+    sleep: async () => {},
+    now: () => 0,
+    openUrl() {},
+    log: (line) => logs.push(line),
+    listenerOwned: () => true,
+  });
+  await sup.start();
+  const text = logs.join('\n');
+  assert.equal(text.includes('Keep this terminal open'), false);
+  assert.match(text, /Home: http:\/\/localhost:8090\/home\//);
 });
 
 test('uninstall removes only the runtime binary and data dir', async () => {
@@ -923,4 +1569,190 @@ test('Mac adoption refuses an unproved listener without sending any signal', asy
   });
   await assert.rejects(() => sup.stop(), ForeignGatewayError);
   assert.equal(attempts, 3, 'unknown ownership is retried only a bounded number of times');
+});
+
+test('signalProcessGroup uses the negative pid and surfaces a failed kill', () => {
+  const seen = [];
+  signalProcessGroup(42, 'SIGTERM', (pid, signal) => { seen.push([pid, signal]); });
+  assert.deepEqual(seen, [[-42, 'SIGTERM']]);
+  signalProcessGroup(0, 'SIGTERM', () => { throw new Error('pid 0 must not be signaled'); });
+  signalProcessGroup(-5, 'SIGTERM', () => { throw new Error('a negative pid must not be signaled'); });
+  signalProcessGroup(42, 'SIGTERM', () => {
+    const err = new Error('gone');
+    err.code = 'ESRCH';
+    throw err;
+  });
+  assert.throws(
+    () => signalProcessGroup(42, 'SIGKILL', () => {
+      const err = new Error('operation not permitted');
+      err.code = 'EPERM';
+      throw err;
+    }),
+    /Could not signal ElastOS \(SIGKILL\): operation not permitted/,
+  );
+});
+
+function compileObservedPidfd(dir, passthroughAlarm) {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const { spawnSync } = require('node:child_process');
+  const helper = path.join(dir, 'linux-pidfd');
+  const alarmLog = path.join(dir, 'alarm');
+  const signalLog = path.join(dir, 'signals');
+  const prctlLog = path.join(dir, 'prctl');
+  const pidLog = path.join(dir, 'pid');
+  const include = path.join(__dirname, 'native/include');
+  const source = path.join(__dirname, '../src/native/linux-pidfd.c');
+  const obs = path.join(__dirname, 'native/pidfd_obs.c');
+  const quote = (file) => file.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+  const compile = (args) => {
+    const result = spawnSync('cc', args, { encoding: 'utf8' });
+    if (result.status !== 0) {
+      throw new Error(result.stderr || result.stdout || 'cc failed');
+    }
+  };
+  compile([
+    '-Wall', '-Wextra', '-Werror', '-Wno-deprecated-declarations', '-O2',
+    '-I', include,
+    '-Dalarm=pidfd_test_alarm',
+    '-Dprctl=pidfd_test_prctl',
+    '-Dsyscall=pidfd_test_syscall',
+    '-c', source, '-o', path.join(dir, 'helper.o'),
+  ]);
+  compile([
+    '-Wall', '-Wextra', '-Werror', '-O2',
+    ...(passthroughAlarm ? ['-DPIDFD_PASSTHROUGH_ALARM'] : []),
+    `-DPIDFD_ALARM_LOG="${quote(alarmLog)}"`,
+    `-DPIDFD_SIGNAL_LOG="${quote(signalLog)}"`,
+    `-DPIDFD_PRCTL_LOG="${quote(prctlLog)}"`,
+    `-DPIDFD_PID_LOG="${quote(pidLog)}"`,
+    '-c', obs, '-o', path.join(dir, 'obs.o'),
+  ]);
+  compile([path.join(dir, 'helper.o'), path.join(dir, 'obs.o'), '-o', helper]);
+  return { helper, alarmLog, signalLog, prctlLog, pidLog };
+}
+
+function releaseObservedPidfd(dir, pidLog) {
+  const fs = require('node:fs');
+  const text = pidLog && fs.existsSync(pidLog) ? fs.readFileSync(pidLog, 'utf8') : '';
+  for (const line of text.split('\n')) {
+    const pid = Number(line);
+    if (pid) {
+      try { process.kill(pid, 'SIGKILL'); } catch {}
+    }
+  }
+  fs.rmSync(dir, { recursive: true, force: true });
+}
+
+test('Stop still sends SIGKILL on the same pidfd when health outlasts the idle alarm', { timeout: 10000 }, async () => {
+  const fs = require('node:fs');
+  const os = require('node:os');
+  const path = require('node:path');
+  const dir = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'pidfd-idle-'));
+  let built = null;
+  let phase = 'adopt';
+  let waited = false;
+  let err = null;
+  try {
+    built = compileObservedPidfd(dir, false);
+    const sup = createGatewaySupervisor({
+      binary: '/home/tester/.local/bin/elastos',
+      args: ['home', '--browser'],
+      adoptForControls: true,
+      spawn() { throw new Error('a retained Home is not spawned'); },
+      fetchHealth: async () => {
+        if (phase === 'wait' && !waited) {
+          waited = true;
+          await new Promise((resolve) => setTimeout(resolve, 2000));
+        }
+        return { status: 200, body: 'OK' };
+      },
+      adoptInstalled: () => controllerGateway(
+        () => controllerView(),
+        () => ({ controllerStat: procStat(10, 1, 100), exePath: RUNTIME_EXE }),
+        (pid) => {
+          const pidfd = openLinuxPidfd(pid, { helper: built.helper });
+          return {
+            send(signal) {
+              pidfd.send(signal);
+              if (signal === 'SIGTERM') phase = 'wait';
+            },
+            close() { pidfd.close(); },
+          };
+        },
+      ),
+      now: () => Date.now(),
+      sleep: async () => {},
+      openUrl() {},
+      log() {},
+      graceMs: 30,
+      pollMs: 1,
+    });
+    try {
+      await sup.stop();
+    } catch (caught) {
+      err = caught;
+    }
+    assert.equal(fs.readFileSync(built.signalLog, 'utf8'), '15\n9\n');
+    assert.equal(fs.readFileSync(built.alarmLog, 'utf8'), '2\n0\n');
+    assert.equal(fs.readFileSync(built.prctlLog, 'utf8'), '1 9\n');
+    assert.match(String(err && err.message), /still running/);
+    const helperPid = Number(fs.readFileSync(built.pidLog, 'utf8'));
+    let helperGone = false;
+    for (let i = 0; i < 50; i += 1) {
+      try {
+        process.kill(helperPid, 0);
+      } catch {
+        helperGone = true;
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    assert.equal(helperGone, true);
+  } finally {
+    releaseObservedPidfd(dir, built && built.pidLog);
+  }
+});
+
+test('signalProcessGroup kills the leader and a child in that group', async () => {
+  const child = spawn('bash', ['-c', 'sleep 30 & echo $!; wait'], {
+    detached: true,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  try {
+    const grandchild = await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('grandchild pid was not printed')), 3000);
+      let buf = '';
+      child.stdout.on('data', (chunk) => {
+        buf += chunk.toString();
+        const line = buf.trim();
+        if (/^\d+$/.test(line)) {
+          clearTimeout(timer);
+          resolve(Number(line));
+        }
+      });
+    });
+    signalProcessGroup(child.pid, 'SIGTERM');
+    await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('leader did not exit')), 3000);
+      child.once('exit', () => {
+        clearTimeout(timer);
+        resolve();
+      });
+    });
+    const gone = () => {
+      try {
+        process.kill(grandchild, 0);
+        return false;
+      } catch {
+        return true;
+      }
+    };
+    for (let waited = 0; waited < 5000 && !gone(); waited += 50) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    assert.throws(() => process.kill(grandchild, 0));
+  } finally {
+    try { process.kill(-(child.pid), 'SIGKILL'); } catch { /* already gone */ }
+  }
 });

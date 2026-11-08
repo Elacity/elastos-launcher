@@ -1,0 +1,46 @@
+name: Linux ARM64 package
+
+# Ubuntu 22.04 matches the Jetson glibc (2.35).
+on:
+  pull_request:
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    runs-on: ubuntu-22.04-arm
+    timeout-minutes: 90
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build the arm64 AppImage and deb
+        run: npm run build:linux -- --arm64 --publish never
+
+      - name: Record checksums
+        run: |
+          set -euo pipefail
+          sha256sum dist-electron/*.AppImage dist-electron/*.deb
+          test -n "$(find dist-electron -maxdepth 1 -name '*arm64*.AppImage' -print)"
+          test -n "$(find dist-electron -maxdepth 1 -name '*arm64*.deb' -print)"
+
+      - name: Upload the arm64 packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: ElastOS-linux-arm64
+          path: |
+            dist-electron/*.AppImage
+            dist-electron/*.deb
+          if-no-files-found: error
