@@ -534,6 +534,7 @@ async function refreshLaunch() {
     platformNote.classList.add('hidden');
   }
   updateStatus(info.status || await window.elastos.getStatus());
+  if (info.error) showError(info.error);
   await refreshVersion();
   checkForUpdate();
   await refreshLegacyPc2();
@@ -563,7 +564,7 @@ async function init() {
   } catch (err) {
     console.error('Init error:', err);
     updateStatus('error');
-    showError('Could not read this computer. Quit ElastOS and open it again.');
+    showError(err && err.message ? err.message : 'Could not read this computer. Quit ElastOS and open it again.');
     return;
   }
   await maybeResumeInstall();

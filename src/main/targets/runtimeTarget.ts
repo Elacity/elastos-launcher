@@ -1,4 +1,5 @@
 import { execFileSync } from 'child_process';
+import { randomUUID } from 'crypto';
 import * as fs from 'fs';
 import * as os from 'os';
 import { RUNTIME_TARGET } from './descriptors';
@@ -12,7 +13,7 @@ import {
   probeGatewayHealth,
 } from './runtimeGateway';
 import * as runtimeInstall from './runtimeInstall';
-import { runtimeBinaryPath, runtimeComponentsPath, runtimeDataDir, runtimeUpdateCheckPath } from './runtimePaths';
+import { runtimeBinaryPath, runtimeComponentsPath, runtimeDataDir, runtimeUpdateCheckPath, runtimeJoin, signedInstallRecord } from './runtimePaths';
 import { findRuntimeBinary, parseRuntimeVersion, probeRuntimeInstallation, RUNTIME_VERSION_ARGS } from './runtimeProbe';
 import { runtimeInstallBlock } from './runtimeSupport';
 import { removeVerifiedTarget, uninstallRuntime } from './runtimeUninstall';
@@ -25,6 +26,7 @@ import {
   runRuntimeCommand,
   runtimeHeadStore,
   toUpdateCheck,
+  writeSignedUpdateCheck,
 } from './runtimeUpdate';
 import { loadActiveRuntimePin } from './runtimePin';
 import {
@@ -59,8 +61,10 @@ export function createRuntimeTarget(platform: NodeJS.Platform = process.platform
     isInstalled: () => runtimeIsInstalled(),
     getStatus: async () => {
       if (updating) return 'starting';
+      const observedSupervisor = supervisor;
+      const observedPhase = supervisor?.phase();
       if (supervisor) {
-        const phase = supervisor.phase();
+        const phase = observedPhase;
         if (phase === 'starting' || phase === 'stopping' || phase === 'error'
           || (phase === 'running' && platform !== 'darwin')) {
           return phase;
@@ -72,12 +76,20 @@ export function createRuntimeTarget(platform: NodeJS.Platform = process.platform
         return 'stopped';
       }
       if (runtimeInstallBlock(platform, process.arch)) return 'not-installed';
-      if (!(await runtimeIsInstalled())) return 'not-installed';
-      if (isHealthOk(await readHealth())) {
-        if (platform === 'darwin' && !(await confirmInstalledGateway())) throw new Error('Another program is answering on port 8090. Home was not adopted.');
-        return 'running';
+      const installed = await runtimeIsInstalled();
+      if (updating) return 'starting';
+      if (!installed) return 'not-installed';
+      const health = await readHealth();
+      if (platform === 'darwin') {
+        const foreign = isHealthOk(health) && !(await confirmInstalledGateway());
+        // A control action can finish while version, health and socket probes
+        // are in flight. Its new phase supersedes those earlier observations.
+        const latestPhase = supervisor?.phase();
+        if (updating) return 'starting';
+        if (supervisor !== observedSupervisor || latestPhase !== observedPhase) return latestPhase ?? 'stopped';
+        if (foreign) throw new Error('Another program is answering on port 8090. Home was not adopted.');
       }
-      return 'stopped';
+      return isHealthOk(health) ? 'running' : 'stopped';
     },
     start: async () => {
       if (platform === 'win32') {
@@ -149,6 +161,17 @@ function readHostUpdateStatus(): string {
   return fs.readFileSync(runtimeUpdateCheckPath(runtimeDataDir(process.platform, home, process.env)), 'utf8');
 }
 
+function writeHostUpdateStatus(raw: string): void {
+  const file = runtimeUpdateCheckPath(runtimeDataDir(process.platform, os.homedir(), process.env));
+  const temporary = `${file}.${randomUUID()}.tmp`;
+  fs.writeFileSync(temporary, raw, { flag: 'wx', mode: 0o600 });
+  try {
+    fs.renameSync(temporary, file);
+  } finally {
+    if (fs.existsSync(temporary)) fs.unlinkSync(temporary);
+  }
+}
+
 async function runtimeCheckForUpdate(): Promise<UpdateCheck> {
   let releaseUrl = '';
   try {
@@ -168,8 +191,12 @@ async function runtimeCheckForUpdate(): Promise<UpdateCheck> {
   }
   if (runtimeInstallBlock(process.platform, process.arch)) return notInstalled;
   if (!findRuntimeBinary(os.homedir(), process.env.PATH ?? '')) return notInstalled;
-  const parsed = await checkRuntimeUpdate(runRuntimeCommand, readHostUpdateStatus);
-  return toUpdateCheck(readRuntimeVersion(), parsed, releaseUrl);
+  const current = readRuntimeVersion();
+  const compatibilityRecord = runtimeInstall.installedVersionMatches(current, '2.0.0')
+    ? () => writeSignedUpdateCheck(current, loadActiveRuntimePin(), runtimeInstall.fetchRuntimeText, writeHostUpdateStatus)
+    : undefined;
+  const parsed = await checkRuntimeUpdate(runRuntimeCommand, readHostUpdateStatus, compatibilityRecord);
+  return toUpdateCheck(current, parsed, releaseUrl);
 }
 
 export async function rollbackRuntimeUpdate(
@@ -184,6 +211,12 @@ function headVerify(): HeadVerify {
     maintainerDid: pin.maintainerDid,
     publisherGateway: pin.publisherGateway,
     fetchText: runtimeInstall.fetchRuntimeText,
+    minimumVersion: pin.version ?? '2.0.0',
+    readInstalledHead: process.platform === 'win32' ? undefined : () => {
+      const data = runtimeDataDir(process.platform, os.homedir(), process.env);
+      if (!signedInstallRecord(data, pin.maintainerDid)) throw new Error('The signed install record is not valid.');
+      return fs.readFileSync(runtimeJoin(data, 'installation', 'release-head.json'), 'utf8');
+    },
   };
 }
 

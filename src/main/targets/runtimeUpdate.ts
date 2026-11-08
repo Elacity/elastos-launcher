@@ -5,6 +5,8 @@ import * as path from 'path';
 import { findRuntimeBinary } from './runtimeProbe';
 import { runtimeChildEnv, verifyReleaseHead } from './releaseHead';
 import { UpdateCheck } from './types';
+import { ActiveRuntimePin } from './runtimePin';
+import { channelGateway, pinMismatchField, PinMismatchError, versionAtLeast, installedVersionMatches } from './runtimeInstall';
 
 export const UPDATE_CANCELLED_LINE = 'Update cancelled.';
 export const UPDATE_STATUS_UNREADABLE = 'ElastOS update status is not readable.';
@@ -70,6 +72,8 @@ export interface HeadVerify {
   maintainerDid: string;
   publisherGateway: string;
   fetchText: (url: string) => Promise<string>;
+  readInstalledHead?: () => string | Promise<string>;
+  minimumVersion?: string;
 }
 
 export function isStoredHeadCid(value: string): boolean {
@@ -93,11 +97,13 @@ export async function verifiedHeadForRollback(candidate: string, verify: HeadVer
 export async function checkRuntimeUpdate(
   run: RuntimeCommand,
   readStatus: () => string,
+  afterCheck?: () => Promise<void>,
 ): Promise<ParsedUpdateCheck> {
   const result = await run(['update', '--check']);
   if (result.code !== 0) {
     throw new Error(result.stderr.trim() || result.stdout.trim() || 'Could not check for an ElastOS update.');
   }
+  await afterCheck?.();
   let raw: string;
   try {
     raw = readStatus();
@@ -105,6 +111,29 @@ export async function checkRuntimeUpdate(
     throw new Error(UPDATE_STATUS_UNREADABLE);
   }
   return parseUpdateCheckStatus(raw);
+}
+
+/** Runtime 2.0.0 predates #61's status file. Derive that record from signed data. */
+export async function writeSignedUpdateCheck(
+  current: string,
+  pin: ActiveRuntimePin,
+  fetchText: (url: string) => Promise<string>,
+  writeStatus: (raw: string) => void,
+): Promise<void> {
+  const head = verifyReleaseHead(await fetchText(`${channelGateway(pin)}/release-head.json`), pin.maintainerDid);
+  const field = pinMismatchField(pin, head);
+  if (field) throw new PinMismatchError(field);
+  const version = current.replace(/^ElastOS Runtime v/, '');
+  if (!versionAtLeast(version, pin.version)) throw new Error(UPDATE_STATUS_UNREADABLE);
+  const offered = !versionAtLeast(version, head.version);
+  const newer = !versionAtLeast(head.version, version);
+  writeStatus(JSON.stringify({
+    schema: UPDATE_CHECK_SCHEMA,
+    outcome: offered ? 'update_available' : newer ? 'installed_newer' : 'up_to_date',
+    current_version: version,
+    latest_version: head.version,
+    offered,
+  }));
 }
 
 export async function applyRuntimeUpdate(
@@ -118,7 +147,16 @@ export async function applyRuntimeUpdate(
   if (shown.code !== 0) {
     throw new Error(shown.stderr.trim() || 'Could not read the installed ElastOS release.');
   }
-  const candidate = parseHeadCid(shown.stdout);
+  let candidate = parseHeadCid(shown.stdout);
+  if ((!candidate || candidate === 'unknown') && verify.readInstalledHead) {
+    const installed = verifyReleaseHead(await verify.readInstalledHead(), verify.maintainerDid);
+    const binary = await run(['version']);
+    if (binary.code !== 0 || !installedVersionMatches(binary.stdout, installed.version)
+      || !versionAtLeast(installed.version, verify.minimumVersion ?? '2.0.0')) {
+      throw new Error('The signed install record does not match the installed ElastOS version.');
+    }
+    candidate = installed.headCid;
+  }
   if (!candidate) {
     throw new Error('Refusing to store a head CID this launcher did not verify.');
   }

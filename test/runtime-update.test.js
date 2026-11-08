@@ -197,3 +197,73 @@ test('Mac Update stops Home, runs the update and starts the current binary even 
   await assert.rejects(() => target.update(), /update failed/);
   assert.deepEqual(calls, ['stop', 'update', 'start-current-binary']);
 });
+
+test('Runtime 2.0.0 gets the #61 status record only after a successful check and signed head verification', async () => {
+  const fixture = require('./helpers/signed-release');
+  const { writeSignedUpdateCheck } = require('../dist/main/targets/runtimeUpdate');
+  const pin = { channel: 'stable', version: '2.0.0', headCid: null, publishable: true,
+    maintainerDid: fixture.FIXTURE_DID, publisherGateway: 'https://publisher.example' };
+  let raw;
+  const bridge = (head) => writeSignedUpdateCheck('ElastOS Runtime v2.0.0', pin,
+    async () => head, (value) => { raw = value; });
+  const result = await checkRuntimeUpdate(async () => ({ code: 0, stdout: 'update available 9.9.9', stderr: '' }),
+    () => raw, () => bridge(fixture.SIGNED_HEAD));
+  assert.equal(result.updateAvailable, false);
+  assert.equal(JSON.parse(raw).outcome, 'up_to_date');
+  await bridge(fixture.signedHead({ version: '2.0.1' }));
+  assert.equal(JSON.parse(raw).offered, true);
+  assert.equal(JSON.parse(raw).latest_version, '2.0.1');
+  raw = undefined;
+  await assert.rejects(() => bridge(fixture.SIGNED_HEAD.replace('2.0.0', '9.9.9')), /signature/);
+  assert.equal(raw, undefined);
+  await assert.rejects(() => bridge(fixture.signedHead({ version: '1.9.9' })), /version/);
+  await assert.rejects(() => bridge(fixture.signedHead({ channel: 'canary' })), /channel/);
+  await assert.rejects(() => checkRuntimeUpdate(async () => ({ code: 1, stdout: '', stderr: 'network failed' }),
+    () => raw, () => bridge(fixture.SIGNED_HEAD)), /network failed/);
+  assert.equal(raw, undefined);
+});
+
+test('a 2.0.0 source with unknown head uses the stored signed record and matching binary version', async () => {
+  const fixture = require('./helpers/signed-release');
+  const calls = [];
+  let version = 'ElastOS Runtime v2.0.0';
+  let record = fixture.SIGNED_HEAD;
+  const store = memoryStore();
+  const run = async (args) => {
+    calls.push([...args]);
+    return { code: 0, stdout: args[0] === 'source' ? 'Head CID:  unknown\n' : args[0] === 'version' ? version : '', stderr: '' };
+  };
+  const verify = { maintainerDid: fixture.FIXTURE_DID, publisherGateway: 'https://publisher.example',
+    readInstalledHead: () => record, fetchText: async () => fixture.SIGNED_HEAD };
+  await applyRuntimeUpdate(run, store, verify);
+  assert.equal(store.get(), fixture.FIXTURE_HEAD_CID);
+  assert.deepEqual(calls, [['source', 'show'], ['version'], ['update', '--yes']]);
+  calls.length = 0;
+  version = 'ElastOS Runtime v2.0.1';
+  await assert.rejects(() => applyRuntimeUpdate(run, store, verify), /does not match/);
+  assert.equal(calls.some((args) => args[0] === 'update'), false);
+  record = fixture.SIGNED_HEAD.replace('2.0.0', '9.9.9');
+  await assert.rejects(() => applyRuntimeUpdate(run, store, verify), /signature/);
+});
+
+test('a Mac status query overlapping Stop preserves the completed stop transition', async (t) => {
+  const fs = require('node:fs');
+  const gateway = require('../dist/main/targets/runtimeGateway');
+  const probe = require('../dist/main/targets/runtimeProbe');
+  const support = require('../dist/main/targets/runtimeSupport');
+  const { createRuntimeTarget } = require('../dist/main/targets/runtimeTarget');
+  let phase = 'stopped';
+  t.mock.method(support, 'runtimeInstallBlock', () => null);
+  t.mock.method(probe, 'findRuntimeBinary', () => '/installed/elastos');
+  t.mock.method(probe, 'probeRuntimeInstallation', async () => ({ kind: 'version', version: 'ElastOS Runtime v2.0.0' }));
+  const stat = fs.statSync;
+  t.mock.method(fs, 'statSync', (...args) => String(args[0]).endsWith('components.json') ? { isFile: () => true } : stat(...args));
+  t.mock.method(gateway, 'createDefaultGatewaySupervisor', () => ({
+    start: async () => { phase = 'running'; }, phase: () => phase,
+  }));
+  t.mock.method(gateway, 'probeGatewayHealth', async () => ({ status: 200, body: 'OK' }));
+  t.mock.method(gateway, 'confirmInstalledGateway', async () => { phase = 'stopped'; return false; });
+  const target = createRuntimeTarget('darwin');
+  await target.start();
+  assert.equal(await target.getStatus(), 'stopped');
+});

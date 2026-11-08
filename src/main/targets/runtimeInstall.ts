@@ -70,7 +70,11 @@ export class PinMismatchError extends Error {
 
 /** Compare numeric SemVer components and prerelease identifiers, never string prefixes. */
 export function versionAtLeast(version: string | null, floor: string | null): boolean {
-  const parse = (value: string | null) => /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+[0-9A-Za-z.-]+)?$/.exec(value ?? '');
+  const parse = (value: string | null) => {
+    const parsed = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/.exec(value ?? '');
+    if (parsed?.[4]?.split('.').some((part) => /^0\d+$/.test(part))) return null;
+    return parsed;
+  };
   const actual = parse(version?.replace(/^ElastOS Runtime v/, '') ?? null);
   const minimum = parse(floor);
   if (!actual || !minimum) return false;
@@ -134,7 +138,6 @@ export function planRuntimeInstall(input: {
   const blocked = runtimeInstallBlock(input.platform, input.arch);
   if (blocked) return { action: 'blocked', message: blocked };
   const versionOk = versionAtLeast(input.installedVersion, input.pin.version);
-  const headOk = Boolean(input.installedHeadCid);
   if (!input.publisher) {
     return input.pin.publishable
       ? { action: 'unchecked' }
@@ -142,7 +145,7 @@ export function planRuntimeInstall(input: {
   }
   const field = pinMismatchField(input.pin, input.publisher);
   if (field) return { action: 'refused', field };
-  const installed = versionOk && headOk && input.installRecordProved;
+  const installed = versionOk && input.installRecordProved;
   if (installed && input.componentsPresent) return { action: 'already-installed' };
   if (installed && !input.componentsPresent) return { action: 'resume-setup' };
   return { action: 'pinned' };
@@ -262,7 +265,7 @@ async function recordProved(deps: RuntimeInstallDeps, dataDir: string, version: 
   try {
     if (!(await deps.installRecordProved(dataDir))) return false;
     const head = verifyReleaseHead(deps.readFile(runtimeJoin(dataDir, 'installation', 'release-head.json')), deps.pin.maintainerDid);
-    return head.headCid === headCid && installedVersionMatches(version, head.version)
+    return (!headCid || head.headCid === headCid) && installedVersionMatches(version, head.version)
       && versionAtLeast(head.version, deps.pin.version);
   } catch {
     return false;

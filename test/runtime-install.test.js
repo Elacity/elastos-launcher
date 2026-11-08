@@ -620,7 +620,7 @@ test('a new signed publisher head above the floor installs without a launcher re
   assert.equal(calls.some((call) => call[0] === 'installer'), false);
   assert.equal(pinMismatchField(canaryPin({ headCid: null }), verifyReleaseHead(newer, FIXTURE_DID)), null);
   assert.equal(versionAtLeast('2.0.1', '2.0.0'), true);
-  for (const version of ['1.99.99', '2.0.0-rc.1', '2.0', '2.0.00', 'garbage']) {
+  for (const version of ['1.99.99', '2.0.0-rc.1', '2.0', '2.0.00', '2.0.1-rc.02', '2.0.1+build..1', 'garbage']) {
     assert.equal(versionAtLeast(version, '2.0.0'), false, version);
     assert.equal(pinMismatchField(canaryPin(), verifyReleaseHead(signedHead({ version }), FIXTURE_DID)), 'version');
   }
@@ -656,4 +656,15 @@ test('release metadata and installer downloads have enforced bounds', async (t) 
   await assert.rejects(() => fetchRuntimeText('http://publisher.example/install.sh'), /require HTTPS/);
   await assert.rejects(() => fetchRuntimeText('https://publisher.example/install.sh'), /exceeds the download limit/);
   assert.equal(cancelled, true);
+});
+
+test('a curl-installed 2.0.0 with an empty source head is adopted through its matching signed record', async () => {
+  const { deps, calls, files } = installedWithoutProof(SIGNED_HEAD);
+  files.set(SOURCES, JSON.stringify({ default_source: 'default', sources: [{ name: 'default', head_cid: '' }] }));
+  await installRuntime(deps);
+  assert.equal(calls.some((call) => call[0] === 'installer'), false);
+  // A nonempty conflicting source remains an integrity failure and needs repair.
+  files.set(SOURCES, JSON.stringify({ default_source: 'default', sources: [{ name: 'default', head_cid: 'QmWrong' }] }));
+  await installRuntime(deps);
+  assert.equal(calls.filter((call) => call[0] === 'installer').length, 1);
 });
