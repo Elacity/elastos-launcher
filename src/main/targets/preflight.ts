@@ -3,7 +3,7 @@ import * as fs from 'fs';
 import * as net from 'net';
 import * as os from 'os';
 import * as path from 'path';
-import { GATEWAY_ADDR, GATEWAY_PORT, LOOPBACK_ADDRESSES } from './gatewayAddress';
+import { GATEWAY_PORT, LOOPBACK_ADDRESSES } from './gatewayAddress';
 import { isHealthOk, localhostIsLoopback, probeGatewayHealth, resolveLocalhost } from './runtimeGateway';
 import { BIP39_ENGLISH } from './bip39English';
 import { launcherOwnedDirectories } from './runtimePaths';
@@ -44,7 +44,7 @@ export interface PreflightInput {
 }
 
 export const LOCALHOST_MESSAGE =
-  'On this computer, the name localhost does not point to this computer. ElastOS needs it to. Ask the person who looks after this computer to fix the hosts file, then try again.';
+  'ElastOS could not connect to Home on this computer.';
 
 export function evaluatePreflight(input: PreflightInput): PreflightReport {
   const checks: PreflightCheck[] = [];
@@ -55,23 +55,23 @@ export function evaluatePreflight(input: PreflightInput): PreflightReport {
       wslInstalled: input.wslInstalled ?? false,
       distroReady: input.distroReady ?? false,
     });
-    const message = `${prompt.title}. ${prompt.body}`;
+    const message = prompt.body;
     const ready = prompt.kind === 'ready';
     checks.push({
       id: 'windows',
       level: ready ? 'pass' : 'block',
-      message,
+      message: ready ? '' : message,
     });
     checks.push({
       id: 'platform',
       level: ready ? 'pass' : 'block',
-      message: ready ? 'This computer can run ElastOS.' : message,
+      message: ready ? '' : message,
     });
   } else {
     const platform = runtimeInstallBlock(input.platform, input.arch);
     checks.push(platform
       ? { id: 'platform', level: 'block', message: platform }
-      : { id: 'platform', level: 'pass', message: 'This computer can run ElastOS.' });
+      : { id: 'platform', level: 'pass', message: '' });
   }
 
   if (input.freeBytes == null) {
@@ -79,29 +79,29 @@ export function evaluatePreflight(input: PreflightInput): PreflightReport {
   } else if (input.freeBytes < DISK_FLOOR_BYTES) {
     checks.push({ id: 'disk', level: 'block', message: 'This computer needs about 2 GB free to install ElastOS.' });
   } else {
-    checks.push({ id: 'disk', level: 'pass', message: 'There is enough free disk space.' });
+    checks.push({ id: 'disk', level: 'pass', message: '' });
   }
 
   if (input.healthOk) {
-    checks.push({ id: 'port', level: 'pass', message: 'Your computer is already running.' });
+    checks.push({ id: 'port', level: 'pass', message: '' });
   } else if (input.portBusy) {
-    checks.push({ id: 'port', level: 'block', message: `Port ${GATEWAY_PORT} is being used by another program. Quit that program and try again.` });
+    checks.push({ id: 'port', level: 'block', message: 'Another app is preventing Home from starting.' });
   } else {
-    checks.push({ id: 'port', level: 'pass', message: `Port ${GATEWAY_PORT} is free.` });
+    checks.push({ id: 'port', level: 'pass', message: '' });
   }
 
   if (input.localhostAddresses !== undefined) {
     checks.push(input.localhostAddresses && localhostIsLoopback(input.localhostAddresses)
-      ? { id: 'localhost', level: 'pass', message: `${GATEWAY_ADDR} points to this computer.` }
+      ? { id: 'localhost', level: 'pass', message: '' }
       : { id: 'localhost', level: 'block', message: LOCALHOST_MESSAGE });
   }
 
   if (input.networkChecked === false) {
-    checks.push({ id: 'network', level: 'pass', message: 'The network is checked when Install starts.' });
+    checks.push({ id: 'network', level: 'pass', message: '' });
   } else {
     checks.push(input.offline
-      ? { id: 'network', level: 'block', message: 'You appear to be offline. Connect to the internet and try again.' }
-      : { id: 'network', level: 'pass', message: 'The network is reachable.' });
+      ? { id: 'network', level: 'block', message: 'ElastOS could not connect to the internet.' }
+      : { id: 'network', level: 'pass', message: '' });
   }
 
   if (input.platform === 'linux' && input.libc === 'musl') {

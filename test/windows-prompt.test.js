@@ -82,7 +82,7 @@ test('Windows asks once to enable Linux support and does not show a command', as
   });
   const screen = failureScreen(input);
   assert.equal(screen.kind, 'windows');
-  assert.equal(screen.fixLabel, 'Fix it');
+  assert.equal(screen.fixLabel, 'Try Again');
   assert.equal(/wsl\.exe|powershell|terminal|sudo /i.test(screen.message), false);
 
   const seen = [];
@@ -171,7 +171,7 @@ test('a missing ElastOS distro is one Set up action, and a ready host does not a
   const ready = hostPrompt({ platform: 'win32', arch: 'x64', wslInstalled: true, distroReady: true });
   assert.equal(ready.actionLabel, null);
   assertPromptHasNoCommands(ready);
-  assert.match(ready.body, /Click Install/);
+  assert.equal(ready.body, '');
   assert.equal(/cannot finish/.test(ready.body), false);
   assert.equal(/wsl\.exe|powershell|\bbash\b/.test(ready.body), false);
   const readyReport = evaluatePreflight({
@@ -267,7 +267,7 @@ test('the next open continues Install only after Linux support is on', async () 
       }),
       (err) => {
         assert.equal(err.message, WINDOWS_REBOOT_MESSAGE);
-        assert.match(err.message, /Install continues/);
+        assert.match(err.message, /restart before setup can continue/);
         return true;
       },
     );

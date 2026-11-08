@@ -580,9 +580,9 @@ test('an old custom XDG install with no installation folder says in plain words 
     assert.deepEqual(screen, {
       kind: 'no-record',
       title: 'Install ElastOS again, then reset',
-      message,
-      retryLabel: 'Try again',
-      fixLabel: 'Fix it',
+      message: 'ElastOS needs to be installed again before continuing.',
+      retryLabel: 'Try Again',
+      fixLabel: 'Try Again',
     });
     // Fix it changes nothing itself. The window then runs Install, which writes the signed record.
     const calls = [];

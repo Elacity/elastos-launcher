@@ -107,12 +107,13 @@ test('successful control operations clear stored errors and notify every window 
     controller.onActionSuccess(() => { successes++; });
     controller.target.start = async () => { throw new Error('prior start failed'); };
     await assert.rejects(controller.start(), /prior start failed/);
-    assert.match((await controller.describeFailure()).message, /prior start failed/);
+    controller.target.getStatus = async () => 'error';
+    assert.equal((await controller.getLaunchInfo()).error, 'prior start failed');
     assert.equal(successes, 0);
     controller.target.start = async () => {};
     controller.target[method] = () => Promise.resolve();
     await controller[method]();
-    assert.doesNotMatch((await controller.describeFailure()).message, /prior start failed/, method);
+    assert.equal((await controller.getLaunchInfo()).error, '', method);
     assert.equal(successes, 1, method);
   }
 });
@@ -190,7 +191,7 @@ test('Windows setup resumes the failed install once Linux support is available',
   const install=f.launch.install;
   let setup=false;
   f.launch.install=async progress=>{if(!setup)throw new Error('Windows needs Linux support.');await install(progress);};
-  f.launch.describeFailure=async()=>({kind:'windows',message:'Windows needs Linux support.',fixLabel:'Fix it'});
+  f.launch.describeFailure=async()=>({kind:'windows',message:'Windows needs Linux support.',fixLabel:'Try Again'});
   f.launch.fixFailure=async()=>{setup=true;return 'still-blocked';};
   f.launch.getPreflight=async()=>({checks:[]});
   await f.invoke('install',false);
@@ -198,4 +199,60 @@ test('Windows setup resumes the failed install once Linux support is available',
   f.answers.push({response:1,checkboxChecked:false});
   await f.invoke('retry');
   assert.equal((await f.invoke('getWindowState')).ready,true);
+});
+
+test('real controller late status failure cannot replace a newer Home action', async () => {
+  const { createLaunchController } = require('../dist/main/launchController');
+  const controller = createLaunchController({ env: {} });
+  let release;
+  controller.target.getStatus = () => new Promise((_resolve, reject) => {
+    release = () => reject(new Error('stale probe'));
+  });
+  let currentStatus = 'running';
+  let busy = false;
+  let actionGeneration = 1;
+  controller.onStatusChange(status => { currentStatus = status; });
+  const generation = actionGeneration;
+  const polling = (async () => {
+    try {
+      const status = await controller.getStatus();
+      if (!busy && generation === actionGeneration) currentStatus = status;
+    } catch { /* The production poll logs failed reads. */ }
+  })();
+  busy = true;
+  actionGeneration++;
+  currentStatus = 'stopped';
+  busy = false;
+  release();
+  await polling;
+  assert.equal(actionGeneration, 2);
+  assert.equal(currentStatus, 'stopped', `status became ${currentStatus}`);
+});
+
+test('real controller reads return or throw without publishing status or replacing action errors', async (t) => {
+  const { createLaunchController } = require('../dist/main/launchController');
+  t.mock.method(require('../dist/main/targets/preflight'), 'collectPreflight', async () => ({ ok: true, checks: [] }));
+  const controller = createLaunchController({ env: {} });
+  const statuses = [];
+  controller.onStatusChange(status => statuses.push(status));
+  controller.target.start = async () => { throw new Error('prior start failed'); };
+  await assert.rejects(controller.start(), /prior start failed/);
+  statuses.length = 0;
+  for (const method of ['getStatus', 'checkForUpdate', 'isInstalled', 'getVersion']) {
+    controller.target[method] = () => { throw new Error(`failed ${method}`); };
+    await assert.rejects(async () => controller[method](), new RegExp(`failed ${method}`));
+    assert.deepEqual(statuses, [], method);
+  }
+  assert.match(await controller.getLogs(), /prior start failed/);
+  assert.doesNotMatch(await controller.getLogs(), /failed getStatus|failed checkForUpdate/);
+});
+
+test('error window hides raw diagnostics even when failure collection fails', async () => {
+  const f = await mainFixture();
+  f.launch.stop = async () => { throw new Error('Release head is not valid JSON. /private/key'); };
+  f.launch.describeFailure = async () => { throw new Error('collection failed'); };
+  await f.click('Stop Home');
+  assert.deepEqual(await f.invoke('getWindowState'), {
+    kind: 'error', message: 'ElastOS could not finish.', actionLabel: 'Try Again',
+  });
 });

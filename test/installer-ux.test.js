@@ -25,10 +25,10 @@ test('preflight blocks disk, offline, a busy port, and Intel Mac', () => {
   assert.match(disk.checks.find((check) => check.id === 'disk').message, /2 GB/);
 
   const offline = evaluatePreflight({ ...base, offline: true });
-  assert.match(offline.checks.find((check) => check.id === 'network').message, /offline/);
+  assert.match(offline.checks.find((check) => check.id === 'network').message, /internet/);
 
   const port = evaluatePreflight({ ...base, portBusy: true, healthOk: false });
-  assert.match(port.checks.find((check) => check.id === 'port').message, /8090/);
+  assert.match(port.checks.find((check) => check.id === 'port').message, /Another app/);
 
   const already = evaluatePreflight({ ...base, portBusy: true, healthOk: true });
   assert.equal(already.checks.find((check) => check.id === 'port').level, 'pass');
@@ -138,4 +138,21 @@ test('preflight blocks when localhost does not point to this computer', () => {
     assert.equal(report.checks.find((check) => check.id === 'localhost').message, LOCALHOST_MESSAGE);
   }
   assert.equal(evaluatePreflight(base).checks.some((check) => check.id === 'localhost'), false);
+});
+
+test('passing preflight checks say nothing and failures use one plain sentence', () => {
+  for (const input of [base, { ...base, healthOk: true }, { ...base, networkChecked: false },
+    { ...base, platform: 'darwin', arch: 'arm64' },
+    { ...base, platform: 'win32', wslInstalled: true, distroReady: true }]) {
+    for (const check of evaluatePreflight(input).checks) {
+      if (check.level === 'pass') assert.equal(check.message, '', check.id);
+    }
+  }
+  for (const input of [{ ...base, portBusy: true }, { ...base, offline: true }, { ...base, freeBytes: 0 },
+    { ...base, platform: 'win32' }, { ...base, localhostAddresses: [] }]) {
+    for (const check of evaluatePreflight(input).checks.filter(check => check.level === 'block')) {
+      assert.match(check.message, /^[^.?!\n]+[.!?]$/, check.id);
+      assert.doesNotMatch(check.message, /\bport\b|\block\b|JSON|commands|click|hosts file/i);
+    }
+  }
 });

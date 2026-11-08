@@ -156,7 +156,16 @@ async function main() {
       if (kind === 'error') {
         const message = await page.locator('#message').innerText();
         if (process.platform === 'win32' && !fixedWindows) {
-          fixedWindows = true; await page.click('#primary'); return false;
+          fixedWindows = true;
+          await electronApp.evaluate(({ dialog }) => {
+            dialog.showMessageBox = async (...args) => ({
+              response: args.at(-1).buttons?.includes('Set Up') ? 1 : 0,
+              checkboxChecked: false,
+            });
+          });
+          await page.click('#primary');
+          await page.waitForFunction(() => !document.querySelector('#primary').disabled, null, { timeout: 45 * 60 * 1000 });
+          return false;
         }
         throw new Error(message);
       }

@@ -93,6 +93,6 @@ async function mainFixture({ login = false, enabled = true, lock = true, platfor
     item.click({ checked: !item.checked }); await tick(); await tick();
   }
   const invoke = (name, ...args) => handlers.get(`elastos:${name}`)({ sender: windows.at(-1)?.webContents }, ...args);
-  return { calls, windows, app, handlers, tray, click, invoke, dialogs, answers, launch, timers };
+  return { calls, windows, app, handlers, tray, click, invoke, dialogs, answers, launch, timers, dialog: electron.dialog };
 }
 module.exports = { mainFixture, tick };

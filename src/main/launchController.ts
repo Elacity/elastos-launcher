@@ -213,7 +213,7 @@ export function createLaunchController(options: LaunchControllerOptions = {}): L
   }
 
   async function currentStatus(): Promise<TargetStatus> {
-    return runRuntime(() => active.getStatus());
+    return active.getStatus();
   }
 
   async function diagnosticsText(): Promise<string> {
@@ -289,8 +289,8 @@ export function createLaunchController(options: LaunchControllerOptions = {}): L
       ? describeDistroBackupOnThisComputer()
       : describeRuntimeBackupOnThisComputer()),
     rollback: (onProgress) => runRuntime(() => active.rollback(onProgress), true),
-    getVersion: () => runRuntimeSync(() => active.getVersion()),
-    checkForUpdate: () => runRuntime(() => active.checkForUpdate()),
+    getVersion: () => active.getVersion(),
+    checkForUpdate: () => active.checkForUpdate(),
     openInBrowser: () => {
       runRuntimeSync(() => active.openInBrowser(), true);
     },
@@ -298,13 +298,15 @@ export function createLaunchController(options: LaunchControllerOptions = {}): L
       const count = lines ?? runtimeLogs.length;
       return Promise.resolve(runtimeLogs.slice(-count).join('\n'));
     },
-    isInstalled: () => runRuntime(() => active.isInstalled()),
+    isInstalled: () => active.isInstalled(),
     async getLaunchInfo() {
       let status: TargetStatus = 'stopped';
+      let error = lastError;
       try {
         status = await currentStatus();
-      } catch {
+      } catch (err) {
         status = 'error';
+        error = messageOf(err);
       }
       const preflight = await collectPreflight();
       const platform = preflight.checks.find((check) => check.id === 'platform' && check.level === 'block');
@@ -313,7 +315,7 @@ export function createLaunchController(options: LaunchControllerOptions = {}): L
         displayName: active.descriptor.displayName,
         openUrl: active.descriptor.openUrl,
         status,
-        error: status === 'error' ? lastError : null,
+        error: status === 'error' ? error : null,
         platformNote: platform?.message ?? null,
         browserNote: browserNote(process.platform),
         runtimeOpensBrowser: homeLaunchForPlatform(process.platform).args[0] === 'home',

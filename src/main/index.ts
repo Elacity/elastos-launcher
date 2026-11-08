@@ -70,8 +70,8 @@ async function showError(error: unknown, again: (() => Promise<void>) | null = n
   log.error(error instanceof Error ? error.message : String(error));
   retry = again;
   const failure = await launch.describeFailure().catch(() => null);
-  const message = failure?.message || (error instanceof Error ? error.message : String(error));
-  showWindow({ kind: 'error', message: message.split(/(?<=[.!?])\s/)[0],
+  const message = failure?.message || 'ElastOS could not finish.';
+  showWindow({ kind: 'error', message,
     actionLabel: failure?.fixLabel ? 'Try Again' : (again ? 'Try Again' : 'Show Logs') });
 }
 async function perform(action: () => Promise<void>): Promise<void> {

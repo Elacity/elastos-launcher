@@ -9,6 +9,27 @@ const states = {
   'error-logs': { kind: 'error', message: 'Home could not start.', actionLabel: 'Show Logs' },
   update: { kind: 'update', message: 'Update ElastOS to 2.0.1?', releaseNotes: true },
 };
+// Render production recovery copy for every error state, including raw parser failures.
+const { failureScreen } = require('../dist/main/targets/runtimeRecovery');
+const failures = {
+  offline: { checks: [{ id: 'network', level: 'block' }] },
+  port: { checks: [{ id: 'port', level: 'block' }] },
+  interrupted: { binaryPresent: true },
+  'stale-lock': { lockText: JSON.stringify({ pid: 4242 }) },
+  windows: { checks: [{ id: 'windows', level: 'block' }] },
+  'no-record': { error: 'This folder has no signed ElastOS install record.' },
+  other: { error: 'Release head is not valid JSON.' },
+  disk: { checks: [{ id: 'disk', level: 'block' }] },
+  platform: { checks: [{ id: 'platform', level: 'block', message: 'Intel Mac is not supported yet.' }] },
+  localhost: { checks: [{ id: 'localhost', level: 'block' }] },
+  restart: { error: 'Restart Windows.' },
+  'other-home': { error: 'Your computer is already running.' },
+};
+for (const [kind, overrides] of Object.entries(failures)) {
+  const screen = failureScreen({ error: '', checks: [], binaryPresent: false, componentsPresent: false,
+    lockText: null, lockPath: null, pidAlive: () => false, ...overrides });
+  states[`error-${kind}`] = { kind: 'error', message: screen.message, actionLabel: screen.fixLabel ? 'Try Again' : 'Show Logs' };
+}
 async function launchRendererBrowser() {
   return chromium.launch({ executablePath: process.env.ELASTOS_TEST_CHROMIUM || undefined, headless: true });
 }
