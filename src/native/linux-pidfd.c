@@ -16,9 +16,6 @@
 #define __NR_pidfd_send_signal 424
 #endif
 
-/* The launcher waits up to 15s between SIGTERM and SIGKILL. */
-#define PIDFD_IDLE_SEC 60
-
 static int write_text(int fd, const char *text) {
   size_t len = strlen(text);
   size_t off = 0;
@@ -104,10 +101,8 @@ int main(int argc, char **argv) {
     close(reply);
     return 1;
   }
-  alarm(PIDFD_IDLE_SEC);
   while (read_line(cmd, line, sizeof line) == 0) {
     int sig = 0;
-    alarm(PIDFD_IDLE_SEC);
     if (strcmp(line, "close\n") == 0) {
       close(fd);
       close(cmd);

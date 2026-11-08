@@ -1206,9 +1206,24 @@ export function emitRuntimeLog(line: string): void {
   logSink(line);
 }
 
+function withDeadline<T>(work: Promise<T>, timeoutMs: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => {
+      reject(Object.assign(new Error('localhost lookup timed out'), { code: 'ETIMEDOUT' }));
+    }, timeoutMs);
+  });
+  return Promise.race([work, timeout]).finally(() => {
+    if (timer !== undefined) clearTimeout(timer);
+  });
+}
+
 /** The addresses `localhost` resolves to on this computer, in resolver order. */
-export async function resolveLocalhost(): Promise<string[]> {
-  const found = await dns.promises.lookup(GATEWAY_HOST, { all: true, verbatim: true });
+export async function resolveLocalhost(timeoutMs = 2000): Promise<string[]> {
+  const found = await withDeadline(
+    dns.promises.lookup(GATEWAY_HOST, { all: true, verbatim: true }),
+    timeoutMs,
+  );
   return [...new Set(found.map((entry) => entry.address))];
 }
 
@@ -1285,7 +1300,9 @@ export async function probeGatewayHealth(options: {
   const timeoutMs = options.timeoutMs ?? 2000;
   let addresses: string[];
   try {
-    addresses = await (options.lookup ?? resolveLocalhost)();
+    addresses = options.lookup
+      ? await withDeadline(options.lookup(), timeoutMs)
+      : await resolveLocalhost(timeoutMs);
   } catch {
     return null;
   }
