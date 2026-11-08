@@ -1,6 +1,4 @@
 const assert = require('node:assert/strict');
-const fs = require('node:fs');
-const path = require('node:path');
 const { isHealthOk, probeGatewayHealth } = require('../dist/main/targets/runtimeGateway');
 
 async function health(wanted) {
@@ -28,7 +26,7 @@ async function status(page, wanted) {
     10000, `Window status did not become ${wanted}`);
 }
 
-module.exports = async function (app, page, home) {
+module.exports = async function (app, page) {
   await app.evaluate(({ shell }) => {
     global.__openedHome = [];
     shell.openExternal = async (url) => { global.__openedHome.push(url); };
@@ -57,8 +55,5 @@ module.exports = async function (app, page, home) {
 
   const checked = await page.evaluate(() => window.elastos.checkForUpdate());
   assert.equal(checked.updateAvailable, false);
-  const data = path.join(home, '.local', 'share', 'elastos');
-  const update = JSON.parse(fs.readFileSync(path.join(data, 'update-check.json'), 'utf8'));
-  assert.equal(update.outcome, 'up_to_date');
-  console.log('PASS elastos update --check writes up_to_date');
+  console.log('PASS elastos update --check reports up to date');
 };

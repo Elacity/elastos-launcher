@@ -95,6 +95,35 @@ test('update --check is read from the status file, not from stdout or the exit c
   assert.equal(readOnFailure, false);
 });
 
+test('update --check reads the runtime text when the status file is absent', async () => {
+  const current = await checkRuntimeUpdate(async () => ({
+    code: 0,
+    stdout: '  Latest available:  2.0.0\n  Installed release: 2.0.0\n\n  Installed release is up to date.\n',
+    stderr: '',
+  }), () => {
+    throw new Error('ENOENT');
+  });
+  assert.equal(current.updateAvailable, false);
+  assert.equal(current.latest, '2.0.0');
+
+  const newer = await checkRuntimeUpdate(async () => ({
+    code: 0,
+    stdout: '  Latest available:  2.1.0\n  Installed release: 2.0.0\n\n  Run `elastos update` to install.\n',
+    stderr: '',
+  }), () => {
+    throw new Error('ENOENT');
+  });
+  assert.equal(newer.updateAvailable, true);
+  assert.equal(newer.latest, '2.1.0');
+
+  await assert.rejects(
+    () => checkRuntimeUpdate(async () => ({ code: 0, stdout: 'no report\n', stderr: '' }), () => {
+      throw new Error('ENOENT');
+    }),
+    /not readable/,
+  );
+});
+
 test('update stores only a head CID the launcher verified', async () => {
   const calls = [];
   const fetched = [];
