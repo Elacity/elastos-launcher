@@ -2,28 +2,9 @@ const assert = require('node:assert/strict');
 const { spawnSync } = require('node:child_process');
 const fs = require('node:fs');
 const path = require('node:path');
-const { clickMenu, trayState, noWindow } = require('./tray-e2e');
+const { waitFor: poll, clickMenu, trayState, noWindow } = require('./tray-e2e');
 const { isHealthOk, probeGatewayHealth } = require('../dist/main/targets/runtimeGateway');
 const { runtimeDataDir, runtimeUpdateCheckPath } = require('../dist/main/targets/runtimePaths');
-
-async function health(wanted) {
-  const deadline = Date.now() + 180000;
-  while (Date.now() < deadline) {
-    if (isHealthOk(await probeGatewayHealth()) === wanted) return;
-    await new Promise((resolve) => setTimeout(resolve, 500));
-  }
-  throw new Error(`Home health did not become ${wanted}`);
-}
-
-async function waitFor(check, timeoutMs, message) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (await check()) return;
-    await new Promise((resolve) => setTimeout(resolve, 500));
-  }
-  throw new Error(message);
-}
-
 
 function proveLiveController() {
   const script = [
@@ -142,11 +123,14 @@ function launcherUpdateCheck(home) {
 }
 
 module.exports = async function (app, page, home) {
+  const waitFor = (check, timeout, message) => poll(check, timeout, message, app);
+  const health = wanted => waitFor(async () => isHealthOk(await probeGatewayHealth()) === wanted, 180000, `Home health did not become ${wanted}`);
   await app.evaluate(({ shell }) => {
     global.__openedHome = [];
     shell.openExternal = async (url) => { global.__openedHome.push(url); };
   });
   await clickMenu(app, 'Open Home');
+  await waitFor(() => app.evaluate(() => global.__openedHome.includes('http://localhost:8090/home/')), 10000, 'Open Home did not open localhost');
   assert.deepEqual(await app.evaluate(() => global.__openedHome), ['http://localhost:8090/home/']);
   const response = await fetch('http://localhost:8090/home/');
   assert.equal(response.status, 200);

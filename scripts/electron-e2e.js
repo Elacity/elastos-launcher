@@ -136,6 +136,8 @@ async function main() {
   }
 
   try {
+    const { waitFor: poll, focusWindow } = require('./tray-e2e');
+    const waitFor = (check, timeout, message) => poll(check, timeout, message, electronApp);
     await electronApp.evaluate(({ shell }) => {
       global.__openedHome = [];
       shell.openExternal = async url => { global.__openedHome.push(url); };
@@ -145,10 +147,10 @@ async function main() {
     if ((await page.locator('#primary').innerText()) !== 'Install') throw new Error('Expected Install');
     if (process.platform === 'darwin') {
       const native = require('./mac-native').nativeControls(electronApp, page);
+      await focusWindow(electronApp);
       await native.drag();
       await native.click('#primary');
     } else await page.click('#primary');
-    const { waitFor } = require('./tray-e2e');
     let fixedWindows = false;
     await waitFor(async () => {
       const kind = await page.getAttribute('body', 'data-state');
@@ -178,7 +180,13 @@ async function main() {
     for (const line of REQUIRED_LOGS) if (!text.includes(line)) throw new Error(`Missing install evidence: ${line}`);
     if (HOME_URL !== EXPECTED_HOME || !isHealthOk(await probeGatewayHealth())) throw new Error('Home is not healthy');
     console.log('PASS install through window reaches Home is ready with signed-install evidence');
-    if (process.platform === 'darwin') await require('./mac-native').nativeControls(electronApp,page).click('#primary');
+    if (process.platform === 'darwin') {
+      if ((await electronApp.evaluate(() => global.__openedHome)).length !== 0) {
+        throw new Error('Mac Install opened a duplicate browser tab after home --browser');
+      }
+      await focusWindow(electronApp);
+      await require('./mac-native').nativeControls(electronApp,page).click('#primary');
+    }
     else await page.click('#primary');
     await waitFor(()=>electronApp.evaluate(()=>global.__openedHome.includes('http://localhost:8090/home/')),10000,'Open Home did not open localhost');
     await require('./tray-e2e').noWindow(electronApp);

@@ -1,5 +1,6 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
+const vm = require('node:vm');
 const { noWindow } = require('../scripts/tray-e2e');
 
 function clock(t) {
@@ -9,7 +10,7 @@ function clock(t) {
   return () => now;
 }
 function fakeApp(windows) {
-  return { evaluate: fn => fn({ BrowserWindow: { getAllWindows: windows } }) };
+  return { evaluate: (fn, arg) => vm.runInNewContext(`(${fn})`, { process: {} })({ BrowserWindow: { getAllWindows: windows } }, arg) };
 }
 function window(id, title, visible) { return { id, getTitle: () => title, isVisible: visible }; }
 

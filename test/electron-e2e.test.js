@@ -108,3 +108,84 @@ test('Windows install e2e answers native Set Up and waits through setup to Home 
   assert.equal(setup, true);
   assert.equal((await f.dialog.showMessageBox({ buttons: ['Cancel', 'Reset'] })).response, 0);
 });
+
+for (const mode of ['delayed focus', 'never focused', 'duplicate tab']) {
+  test(`Mac install e2e handles ${mode} before the native Open Home click`, async t => {
+    let now = 0;
+    t.mock.method(Date, 'now', () => now);
+    t.mock.method(global, 'setTimeout', (fn, ms) => { now += ms; queueMicrotask(fn); });
+    const waits = require('../scripts/tray-e2e');
+    let ready = false, closed = false, focusAt, nativeClicks = 0;
+    const focusCalls = [];
+    const logs = [];
+    const shell = {};
+    const sandbox = {};
+    const win = {
+      id: 1, getTitle: () => 'ElastOS', isVisible: () => !closed,
+      isFocused: () => !ready || (mode !== 'never focused' && focusAt !== undefined && now - focusAt >= 750),
+      focus: () => { focusAt = now; focusCalls.push('window.focus'); },
+      webContents: { executeJavaScript: async () => ({ kind: 'install', message: 'Home is ready.' }) },
+    };
+    const page = {
+      locator: selector => ({ waitFor: async () => {}, innerText: async () => selector === '#message' ? 'Home is ready.' : ready ? 'Open Home' : 'Install' }),
+      getAttribute: async () => 'install', evaluate: async () => {},
+    };
+    const app = {
+      firstWindow: async () => page,
+      evaluate: async (fn, arg) => vm.runInNewContext(`(${fn})`, {
+        global: sandbox, process: { mainModule: { require: name => {
+          assert.equal(name, 'electron-log');
+          return { transports: { file: { getFile: () => ({ path: '/fixture/no-logs/main.log' }) } } };
+        } } },
+      })({
+        app: { focus: options => focusCalls.push({ ...options }), exit() {}, getPath: () => '/fixture/no-logs' },
+        BrowserWindow: { getAllWindows: () => [win], getFocusedWindow: () => win.isFocused() ? win : null },
+        shell, clipboard: { readText: () => ['Release head signature matches the pinned maintainer', 'install.sh SHA-256 matches the pin', 'Installed head CID matches the pin'].join('\n') },
+      }, arg),
+      process: () => ({ kill() {} }),
+    };
+    let finish;
+    const done = new Promise(resolve => { finish = resolve; });
+    const script = path.resolve(__dirname, '../scripts/electron-e2e.js');
+    Object.assign(sandbox, {
+      __dirname: path.dirname(script), Date, global: sandbox,
+      console: { log: line => logs.push(String(line)), error: line => logs.push(String(line)) },
+      process: { platform: 'darwin', env: { GITHUB_ACTIONS: 'true' }, exit: finish },
+      setTimeout: () => 0,
+      require: name => {
+        if (name === 'electron') return '/fixture/electron';
+        if (name === 'playwright') return { _electron: { launch: async () => app } };
+        if (name === 'node:os') return { homedir: () => '/fixture' };
+        if (name === 'node:fs') return { mkdirSync() {}, chmodSync() {}, mkdtempSync: () => '/fixture/home' };
+        if (name === '../dist/main/targets/runtimeGateway') return { HOME_URL: 'http://localhost:8090/home/', isHealthOk: () => true, probeGatewayHealth: async () => ({}) };
+        if (name === './tray-e2e') return waits;
+        if (name === './mac-native') return { nativeControls: () => ({ drag: async () => {}, click: async () => {
+          nativeClicks++;
+          if (!ready) {
+            ready = true;
+            focusAt = undefined; // home --browser brings another app to the front.
+            if (mode === 'duplicate tab') await shell.openExternal('http://localhost:8090/home/');
+          } else {
+            assert.equal(win.isFocused(), true, 'native Open Home click reached an inactive window');
+            await shell.openExternal('http://localhost:8090/home/');
+            closed = true;
+          }
+        } }) };
+        if (name === './mac-lifecycle-e2e') return async () => app;
+        return require(name);
+      },
+    });
+    // The real helper prints failure evidence; keep it in the fixture's output.
+    t.mock.method(console, 'error', line => logs.push(String(line)));
+    vm.runInNewContext(fs.readFileSync(script, 'utf8'), sandbox, { filename: script });
+    assert.equal(await done, mode === 'delayed focus' ? 0 : 1, logs.join('\n'));
+    assert.equal(nativeClicks, mode === 'delayed focus' ? 2 : 1);
+    if (mode === 'delayed focus') {
+      assert.equal(now, 750);
+      assert.deepEqual(focusCalls, [{ steal: true }, 'window.focus', { steal: true }, 'window.focus']);
+    } else if (mode === 'never focused') {
+      assert.match(logs.join('\n'), /Launcher window did not gain focus/);
+      assert.match(logs.join('\n'), /current window state:.*Home is ready/);
+    } else assert.match(logs.join('\n'), /Mac Install opened a duplicate browser tab/);
+  });
+}
