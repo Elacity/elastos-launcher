@@ -32,7 +32,8 @@ async function status(page, wanted) {
       last = await page.evaluate(() => window.elastos.getStatus());
       return last === wanted;
     }, 180000, `Launcher status did not become ${wanted}`);
-    await waitFor(async () => (await page.locator('#status-text').innerText()).toLowerCase() === wanted,
+    const label = wanted === 'error' ? 'needs attention' : wanted;
+    await waitFor(async () => (await page.locator('#status-text').innerText()).toLowerCase() === label,
       10000, `Window status did not become ${wanted}`);
   } catch (error) {
     console.log(`Status failure wanted=${wanted} last=${last} window=${await page.locator('#status-text').innerText()} error=${await page.locator('#error-text').innerText()}`);
