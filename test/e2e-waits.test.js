@@ -25,17 +25,15 @@ function fixture(t, focused, nullFocusedWindow = false) {
     webContents: { executeJavaScript: async () => ({ kind: 'install', message: 'Home is ready.', primary: 'Open Home' }) },
   };
   const app = { evaluate: async (fn, arg) => vm.runInNewContext(`(${fn})`, {
-    global, process: { mainModule: { require: name => {
-      assert.equal(name, 'electron-log');
-      return { transports: { file: { getFile: () => ({ path: path.join(logs, 'main.log') }) } } };
-    } } },
+    global, process: {},
   })({
     app: { focus: options => calls.push({ ...options }), getPath: () => path.join(logs, 'different-electron-log-folder') },
     BrowserWindow: { getAllWindows: () => [win], getFocusedWindow: () => !nullFocusedWindow && win.isFocused() ? win : null },
   }, arg) };
   t.mock.method(console, 'error', () => {});
+  global.__elastosLogPath = path.join(logs, 'main.log');
   global.__openedHome = ['http://localhost:8090/home/'];
-  t.after(() => { delete global.__openedHome; });
+  t.after(() => { delete global.__openedHome; delete global.__elastosLogPath; });
   return { app, calls, now };
 }
 
@@ -128,6 +126,19 @@ test('waitFor still prints the launcher log when Electron has exited', async t =
     assert.match(error.message, /focused window:.*Electron connection closed/);
     assert.match(error.message, /current window state:.*Electron connection closed/);
     assert.match(error.message, /__openedHome:.*Electron connection closed/);
+    assert.match(error.message, /launcher log \(last 60 lines\):\nlauncher line 6/);
+    assert.match(error.message, /launcher line 65$/);
+    return true;
+  });
+});
+
+test('waitFor retries the log path lookup after the launcher finishes initializing', async t => {
+  const { app } = fixture(t, () => true);
+  const logPath = global.__elastosLogPath;
+  delete global.__elastosLogPath;
+  await waits.waitFor(() => true, 1000, 'early observation', app);
+  global.__elastosLogPath = logPath;
+  await assert.rejects(waits.waitFor(() => false, 1000, 'later timeout', app), error => {
     assert.match(error.message, /launcher log \(last 60 lines\):\nlauncher line 6/);
     assert.match(error.message, /launcher line 65$/);
     return true;

@@ -37,7 +37,10 @@ async function diagnostics(app) {
 async function waitFor(check, timeoutMs, message, app) {
   // Health can time out after Quit, when Electron can no longer report its log path.
   if (app && !logPaths.has(app)) {
-    try { logPaths.set(app, await app.evaluate(() => process.mainModule.require('electron-log').transports.file.getFile().path)); }
+    try {
+      const file = await app.evaluate(() => global.__elastosLogPath);
+      if (file) logPaths.set(app, file);
+    }
     catch { /* Diagnostics will name the unavailable connection if the app has exited. */ }
   }
   try {

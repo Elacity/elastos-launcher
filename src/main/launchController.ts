@@ -63,8 +63,8 @@ export interface LaunchController {
   getPreflight(): Promise<PreflightReport>;
   getDiagnostics(): Promise<string>;
   saveSupportBundle(): Promise<string>;
-  describeFailure(): Promise<FailureScreen>;
-  fixFailure(): Promise<'ready' | 'still-blocked'>;
+  describeFailure(error?: unknown): Promise<FailureScreen>;
+  fixFailure(error?: unknown): Promise<'ready' | 'still-blocked'>;
   resumeInstallPlan(): Promise<ResumeInstallPlan>;
   finishResumeInstall(ok: boolean): void;
   setOpenAtLogin(enabled: boolean): void;
@@ -333,13 +333,13 @@ export function createLaunchController(options: LaunchControllerOptions = {}): L
       };
     },
     getPreflight: () => collectPreflight(),
-    async describeFailure() {
+    async describeFailure(error?: unknown) {
       const preflight = await collectPreflight();
-      return failureScreen(collectFailureFacts(lastError, preflight.checks));
+      return failureScreen(collectFailureFacts(error === undefined ? lastError : messageOf(error), preflight.checks));
     },
-    async fixFailure() {
+    async fixFailure(error?: unknown) {
       const preflight = await collectPreflight();
-      const facts = collectFailureFacts(lastError, preflight.checks);
+      const facts = collectFailureFacts(error === undefined ? lastError : messageOf(error), preflight.checks);
       if (failureScreen(facts).kind === 'windows') {
         return windowsFixResult(
           () => fixWindowsOnThisComputer(),

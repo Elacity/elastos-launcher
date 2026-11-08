@@ -39,6 +39,7 @@ type WindowState = {
 let windowState: WindowState = { kind: 'install' };
 type HomeAction = (generation: number) => Promise<void>;
 let retry: HomeAction | null = null;
+let failureError: unknown;
 
 // Reads own only the observation. An older request cannot replace a newer action/read.
 async function readStatus(): Promise<void> {
@@ -76,10 +77,11 @@ function showWindow(state: WindowState): void {
 function closeWindow(): void { mainWindow?.close(); }
 async function showError(error: unknown, again: HomeAction | null = null, generation = actionGeneration): Promise<string | null> {
   log.error(error instanceof Error ? error.message : String(error));
-  const failure = await launch.describeFailure().catch(() => null);
+  const failure = await launch.describeFailure(error).catch(() => null);
   const message = failure?.message || 'ElastOS could not finish.';
   if (homeState.quitting || generation !== actionGeneration) return null;
   retry = again;
+  failureError = error;
   showWindow({ kind: 'error', message,
     actionLabel: failure?.fixLabel ? 'Try Again' : (again ? 'Try Again' : 'Show Logs') });
   return message;
@@ -247,7 +249,8 @@ handle('getWindowState', () => windowState);
 handle('install', login => windowState.kind === 'install' && !windowState.ready ? install(login === true) : undefined);
 handle('update', () => windowState.kind === 'update' ? update() : undefined);
 handle('retry', () => perform('maintenance', async generation => {
-  const failure = await launch.describeFailure();
+  const error = failureError;
+  const failure = await launch.describeFailure(error);
   if (failure.fixLabel) {
     if (platform === 'win32' && failure.kind === 'windows') {
       const answer = await confirm({ type: 'question', title: 'Set Up ElastOS', message: 'Set up ElastOS on this computer?',
@@ -255,7 +258,7 @@ handle('retry', () => perform('maintenance', async generation => {
         buttons: ['Cancel', 'Set Up'], defaultId: 0, cancelId: 0, noLink: true });
       if (answer.response !== 1) return;
     }
-    const result = await launch.fixFailure();
+    const result = await launch.fixFailure(error);
     const windowsReady = failure.kind === 'windows' && !(await launch.getPreflight()).checks
       .some(check => check.id === 'windows' && check.level === 'block');
     if (windowsReady && retry) await retry(generation);
@@ -263,7 +266,7 @@ handle('retry', () => perform('maintenance', async generation => {
       if (await launch.isInstalled()) { await openHome(); closeWindow(); }
       else showWindow({ kind: 'install' });
     }
-    else throw new Error((await launch.describeFailure()).message);
+    else throw error;
   } else if (retry) await retry(generation);
   else await showLogs();
 }));
@@ -285,6 +288,7 @@ app.whenReady().then(async () => {
   if (platform !== 'darwin') Menu.setApplicationMenu(null);
   tray = new Tray(nativeImage.createFromPath(path.join(__dirname, '../../resources/tray/stoppedTemplate.png')));
   (global as typeof globalThis & { __elastosTray?: true }).__elastosTray = true;
+  (global as typeof globalThis & { __elastosLogPath?: string }).__elastosLogPath = log.transports.file.getFile().path;
   updateMenu();
   // macOS and Linux show their attached context menu on primary activation.
   if (platform === 'win32') tray.on('click', () => tray?.popUpContextMenu());
