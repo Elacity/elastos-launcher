@@ -59,11 +59,19 @@ async function main() {
         });
       }
       const window = BrowserWindow.getAllWindows()[0];
+      // The production status poll also runs outside IPC. Keep its fixture
+      // consistent with getLaunchInfo instead of racing a not-installed poll.
+      const send = window.webContents.send.bind(window.webContents);
+      window.webContents.send = (channel, ...args) => send(channel,
+        ...(channel === 'elastos:status' ? ['stopped'] : args));
       window.setPosition(100, 100);
       window.show(); window.focus(); app.focus({ steal: true });
     });
     await page.reload();
     await page.locator('#remove-pc2-btn').waitFor({ state: 'visible' });
+    await page.waitForTimeout(2100);
+    assert.equal(await page.locator('#status-text').innerText(), 'Stopped', 'fixture survives the production status poll');
+    assert.equal(await page.locator('#uninstall-btn').isEnabled(), true);
 
     async function check(label, selector) {
       const controls = page.locator(selector);
@@ -166,8 +174,6 @@ async function main() {
     await page.click('#logs-btn');
     await page.click('#close-logs');
     // The real support-bundle error handler exposes the error controls.
-    await page.evaluate(() => window.elastos.onLog(() => {}));
-    await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].webContents.send('elastos:status', 'error'));
     // Invoke the existing handler after revealing the error section; it calls showError.
     await page.locator('#error-box').evaluate((el) => el.classList.remove('hidden'));
     await page.click('#support-btn');
