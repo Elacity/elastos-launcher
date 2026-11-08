@@ -168,7 +168,7 @@ function writeHostUpdateStatus(raw: string): void {
   try {
     fs.renameSync(temporary, file);
   } finally {
-    if (fs.existsSync(temporary)) fs.unlinkSync(temporary);
+    if (fs.existsSync(temporary)) removeVerifiedTarget(temporary);
   }
 }
 
