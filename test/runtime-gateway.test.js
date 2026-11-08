@@ -1037,7 +1037,7 @@ test('logs omit attach secrets', async () => {
   assert.deepEqual(homeLaunchForPlatform('darwin').args, ['home', '--browser']);
   assert.equal(homeLaunchForPlatform('darwin').quitWhenLastWindowCloses, false);
   assert.equal(homeLaunchForPlatform('darwin').updateRestartsHome, true);
-  assert.equal(homeLaunchForPlatform('darwin').rollbackRestartsHome, false);
+  assert.equal(homeLaunchForPlatform('darwin').rollbackRestartsHome, true);
   assert.equal(homeLaunchForPlatform('darwin').hideTerminalKeepLine, false);
   assert.equal(homeLaunchForPlatform('darwin').openBrowserAfterInstall, true);
   assert.equal(homeLaunchForPlatform('darwin').offerKeepHomeOnQuit, false);

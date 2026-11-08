@@ -1,8 +1,18 @@
 import { app, BrowserWindow, dialog, ipcMain, Tray, Menu, nativeImage, shell } from 'electron';
+import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
 import log from 'electron-log';
 import { createDefaultLaunchController, finishQuitAfterGatewayStop, homeLaunchForPlatform, TargetStatus } from './launchController';
 import { describeLegacyPc2OnThisComputer, removeLegacyPc2OnThisComputer, withSupportBundle } from './legacyPc2Removal';
+
+// Chromium must never share the Runtime Home, including on case-insensitive Macs.
+// Set all profile paths before ready, logging, or constructing the controller.
+const electronData = path.join(os.homedir(), '.elastos-launcher', 'electron');
+fs.mkdirSync(electronData, { recursive: true, mode: 0o700 });
+app.setPath('userData', electronData);
+app.setPath('sessionData', electronData);
+app.setAppLogsPath(path.join(electronData, 'logs'));
 
 const launch = createDefaultLaunchController(process.env);
 

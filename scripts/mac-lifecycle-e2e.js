@@ -75,9 +75,20 @@ module.exports = async function (app, page, home, options) {
   await health(true);
   console.log('PASS Start Home becomes healthy');
 
+  const data = path.join(home, 'Library', 'Application Support', 'elastos');
+  const controllerStatus = path.join(data, 'update-controller', 'status.json');
+  // This controller was started by this test's launcher on the disposable runner.
+  const startedController = JSON.parse(fs.readFileSync(controllerStatus, 'utf8')).controller_pid;
+  process.kill(startedController, 'SIGTERM');
+  await health(false);
+  await status(page, 'stopped');
+  await page.click('#open-btn');
+  await status(page, 'running');
+  await health(true);
+  console.log('PASS spawned controller exit reports Stopped and explicit Start starts Home again');
+
   const checked = await page.evaluate(() => window.elastos.checkForUpdate());
   assert.equal(checked.updateAvailable, false);
-  const data = path.join(home, 'Library', 'Application Support', 'elastos');
   const nativeUpdate = path.join(data, 'update-check.json');
   const update = JSON.parse(fs.readFileSync(fs.existsSync(nativeUpdate) ? nativeUpdate
     : path.join(home, '.elastos-launcher', 'update-check.json'), 'utf8'));
@@ -117,6 +128,15 @@ module.exports = async function (app, page, home, options) {
     await status(window, 'running');
     assert.equal(await window.locator('#open-label').innerText(), 'Open my computer');
     console.log('PASS a fresh launcher adopts an already running Home without reinstalling');
+    await window.evaluate(() => window.elastos.start());
+    const adoptedController = JSON.parse(fs.readFileSync(controllerStatus, 'utf8')).controller_pid;
+    process.kill(adoptedController, 'SIGTERM');
+    await health(false);
+    await status(window, 'stopped');
+    await window.click('#open-btn');
+    await status(window, 'running');
+    await health(true);
+    console.log('PASS adopted controller exit reports Stopped and explicit Start starts Home again');
     await window.evaluate(() => window.elastos.install());
     assert.equal((await window.locator('#logs-content').innerText()).includes('Downloading ElastOS'), false);
     console.log('PASS Install adopts a proved 2.0.0 installation with an empty source head CID');

@@ -261,7 +261,7 @@ export function createLaunchController(options: LaunchControllerOptions = {}): L
     describeResetBackup: () => (process.platform === 'win32'
       ? describeDistroBackupOnThisComputer()
       : describeRuntimeBackupOnThisComputer()),
-    rollback: (onProgress) => runRuntime(() => active.rollback(onProgress ?? (() => {}))),
+    rollback: (onProgress) => runRuntime(() => active.rollback(onProgress)),
     getVersion: () => runRuntimeSync(() => active.getVersion()),
     checkForUpdate: () => runRuntime(() => active.checkForUpdate()),
     openInBrowser: () => {

@@ -3,6 +3,7 @@ import * as dns from 'dns';
 import * as fs from 'fs';
 import * as http from 'http';
 import * as os from 'os';
+import * as path from 'path';
 import {
   GATEWAY_ADDR,
   GATEWAY_HOST,
@@ -39,7 +40,7 @@ export function homeLaunchForPlatform(platform: string): HomeLaunch {
     args: browserHome ? ['home', '--browser'] : GATEWAY_ARGS,
     quitWhenLastWindowCloses: platform !== 'darwin' && platform !== 'linux',
     updateRestartsHome: browserHome,
-    rollbackRestartsHome: platform === 'linux',
+    rollbackRestartsHome: browserHome,
     hideTerminalKeepLine: platform === 'linux',
     openBrowserAfterInstall: platform !== 'linux',
     offerKeepHomeOnQuit: platform === 'linux',
@@ -121,6 +122,8 @@ export function lockAddressWants(kind: InstalledGatewayKind): readonly string[] 
 export function installedGatewayKind(input: {
   lockText: string | null;
   command: string | null;
+  /** macOS caller already matched the kernel executable to an installed path. */
+  verifiedExecutable?: string;
   pidAlive: (pid: number) => boolean;
   ownsSocket: (pid: number, wants: readonly string[]) => boolean;
 }): InstalledGatewayKind | null {
@@ -140,6 +143,11 @@ export function installedGatewayKind(input: {
   if (!input.ownsSocket(parsed.pid, lockAddressWants(kind))) return null;
   if (!input.command) return null;
   const command = input.command.trim();
+  if (input.verifiedExecutable) {
+    if (!command.startsWith(`${input.verifiedExecutable} `)) return null;
+    const args = command.slice(input.verifiedExecutable.length).trim();
+    return /^(gateway(?:\s|$)|home\s+--browser(?:\s|$))/.test(args) ? kind : null;
+  }
   if (!/(^|[\\/\s])elastos(\.exe)?(\s|$)/i.test(command)
     || !(/\bgateway\b/.test(command) || /\bhome\s+--browser(?:\s|$)/.test(command))) return null;
   return kind;
@@ -590,6 +598,7 @@ export function createGatewaySupervisor(deps: GatewaySupervisorDeps): GatewaySup
   let intentionalStop = false;
   let restarts = 0;
   let current: 'running' | 'stopped' | 'starting' | 'stopping' | 'error' = 'stopped';
+  const homeController = deps.args?.[0] === 'home';
 
   const note = (line: string) => {
     const clean = launcherLogText(line, deps.hideTerminalKeepLine === true).replace(/\s+$/g, '');
@@ -597,6 +606,20 @@ export function createGatewaySupervisor(deps: GatewaySupervisorDeps): GatewaySup
     logs.push(clean);
     deps.log(clean);
   };
+
+  function recordExit(proc: GatewayProcess, code: number | null): void {
+    if (owned !== proc) return;
+    owned = null;
+    foreign = false;
+    if (intentionalStop || current !== 'running') return;
+    current = code === 0 || code === null ? 'stopped' : 'error';
+    note(code === 0 || code === null ? 'ElastOS stopped.' : `ElastOS stopped (exit ${code}). Click Start to try again.`);
+  }
+
+  function ownAdopted(proc: GatewayProcess | null): void {
+    owned = proc;
+    proc?.onExit((code) => recordExit(proc, code));
+  }
 
   async function launchOnce(): Promise<'ready' | 'replaced' | 'already'> {
     intentionalStop = false;
@@ -613,6 +636,11 @@ export function createGatewaySupervisor(deps: GatewaySupervisorDeps): GatewaySup
     proc.onExit((code) => {
       exited = true;
       exitCode = code;
+      if (owned !== proc) return;
+      if (homeController) {
+        recordExit(proc, code);
+        return;
+      }
       if (current !== 'running' || intentionalStop) return;
       if (binaryReplacement(output, code)) {
         owned = null;
@@ -633,7 +661,9 @@ export function createGatewaySupervisor(deps: GatewaySupervisorDeps): GatewaySup
         owned = null;
         current = 'error';
         note('ElastOS stopped (exit 75) without a replaced binary. It was not started again.');
+        return;
       }
+      recordExit(proc, code);
     });
 
     const deadline = deps.now() + healthTimeoutMs;
@@ -661,7 +691,7 @@ export function createGatewaySupervisor(deps: GatewaySupervisorDeps): GatewaySup
 
   function classifyExit(code: number | null, output: string): 'replaced' | 'already' {
     owned = null;
-    if (binaryReplacement(output, code)) {
+    if (!homeController && binaryReplacement(output, code)) {
       restarts += 1;
       if (restarts > maxRestarts) {
         throw new Error('ElastOS kept restarting after an update. Click Start to try again.');
@@ -670,12 +700,14 @@ export function createGatewaySupervisor(deps: GatewaySupervisorDeps): GatewaySup
       return 'replaced';
     }
     if (code === EXIT_BINARY_REPLACED) {
+      current = 'error';
       throw new Error('ElastOS stopped (exit 75) without a replaced binary. It was not started again.');
     }
     if (output.includes(ALREADY_OWNS_TEXT)) {
       return 'already';
     }
     const tail = launcherLogText(output, deps.hideTerminalKeepLine === true).trim().split('\n').slice(-3).join(' ');
+    current = 'error';
     throw new Error(
       tail
         ? `ElastOS stopped before it was ready. ${tail}`
@@ -723,7 +755,10 @@ export function createGatewaySupervisor(deps: GatewaySupervisorDeps): GatewaySup
 
   const supervisor: GatewaySupervisor = {
     async start() {
-      if (owned && current === 'running') return 'started';
+      if (owned && current === 'running') {
+        if (!(await owned.hasExited())) return 'started';
+        owned = null;
+      }
       current = 'starting';
       let legacyStopped = false;
       for (;;) {
@@ -744,7 +779,7 @@ export function createGatewaySupervisor(deps: GatewaySupervisorDeps): GatewaySup
               current = 'error';
               throw new Error(LEGACY_STILL_RUNNING_MESSAGE);
             }
-            owned = adopted;
+            ownAdopted(adopted);
             try {
               await stopProcess(adopted);
             } catch {
@@ -765,7 +800,8 @@ export function createGatewaySupervisor(deps: GatewaySupervisorDeps): GatewaySup
             throw new Error('Something is answering on port 8090, but it is not the ElastOS gateway. Home was not opened.');
           }
           foreign = true;
-          owned = deps.adoptForControls ? await (deps.adoptInstalled?.() ?? null) : null;
+          intentionalStop = false;
+          ownAdopted(deps.adoptForControls ? await (deps.adoptInstalled?.() ?? null) : null);
           current = 'running';
           deps.openUrl(HOME_URL);
           return 'already-running';
@@ -781,7 +817,7 @@ export function createGatewaySupervisor(deps: GatewaySupervisorDeps): GatewaySup
       if (!keepSpawned && deps.adoptForControls && isHealthOk(await deps.fetchHealth())) {
         const installed = await (deps.adoptInstalled?.() ?? null);
         if (!installed) throw new ForeignGatewayError();
-        owned = installed;
+        ownAdopted(installed);
       }
       if (!owned) {
         const health = await deps.fetchHealth();
@@ -790,14 +826,21 @@ export function createGatewaySupervisor(deps: GatewaySupervisorDeps): GatewaySup
             ? await (deps.adoptInstalled?.() ?? null)
             : null;
           if (!adopted) throw new ForeignGatewayError();
-          owned = adopted;
+          ownAdopted(adopted);
         } else {
           foreign = false;
           current = 'stopped';
           return;
         }
       }
-      await stopProcess(owned);
+      if (owned) {
+        try {
+          await stopProcess(owned);
+        } catch (err) {
+          current = 'error';
+          throw err;
+        }
+      }
     },
     forceKill() {
       if (!owned) return;
@@ -1150,14 +1193,26 @@ export function createDefaultGatewaySupervisor(binary: string, platform: string 
   });
 }
 
-function readHostLock(): { text: string | null; pid: number } {
-  const lockPath = runtimeHostLockPath(runtimeDataDir(process.platform, os.homedir(), process.env));
-  let text: string | null = null;
+/** Read a regular control file through one fd; size changes cannot exceed the cap. */
+function readControlFile(file: string, maximum = 16 * 1024): string | null {
+  let fd: number | undefined;
   try {
-    text = fs.readFileSync(lockPath, 'utf8');
+    fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK | fs.constants.O_NOFOLLOW);
+    const stat = fs.fstatSync(fd);
+    if (!stat.isFile() || stat.size > maximum) return null;
+    const bytes = Buffer.alloc(maximum + 1);
+    const count = fs.readSync(fd, bytes, 0, bytes.length, 0);
+    return count > maximum ? null : bytes.toString('utf8', 0, count);
   } catch {
-    text = null;
+    return null;
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd);
   }
+}
+
+function readHostLock(platform: string, homeDir: string): { text: string | null; pid: number } {
+  const lockPath = runtimeHostLockPath(runtimeDataDir(platform, homeDir, process.env));
+  const text = readControlFile(lockPath);
   let pid = 0;
   try {
     const parsed = JSON.parse(text ?? '') as { pid?: unknown };
@@ -1168,11 +1223,62 @@ function readHostLock(): { text: string | null; pid: number } {
   return { text, pid };
 }
 
-async function hostLockGatewayKind(text: string | null, pid: number): Promise<InstalledGatewayKind | null> {
-  const listeners = await localListeners(pid);
-  return installedGatewayKind({
+type MacProcessIdentity = { executable: string; start: string };
+
+function psField(pid: number, field: string): string {
+  return execFileSync('ps', ['-p', String(pid), '-ww', '-o', `${field}=`], {
+    encoding: 'utf8', timeout: 1000, maxBuffer: 16 * 1024, env: { ...process.env, LC_ALL: 'C' },
+  }).trim();
+}
+
+function macProcessIdentity(pid: number): MacProcessIdentity | null {
+  if (!Number.isInteger(pid) || pid <= 0) return null;
+  try {
+    // vmmap reports the kernel's executable path and precise launch time.
+    // ps comm is argv[0] on macOS and can be forged.
+    const report = execFileSync('/usr/bin/vmmap', ['-w', '-summary', String(pid)], {
+      encoding: 'utf8', timeout: 2000, maxBuffer: 64 * 1024, env: { ...process.env, LC_ALL: 'C' },
+    });
+    const executable = report.match(/^Path:[ \t]+(.+)$/m)?.[1]?.trim() ?? '';
+    const start = report.match(/^Launch Time:[ \t]+(.+)$/m)?.[1]?.trim() ?? '';
+    if (!start || !path.isAbsolute(executable)) return null;
+    return { executable, start };
+  } catch {
+    return null;
+  }
+}
+
+function sameMacProcess(expected: MacProcessIdentity, actual: MacProcessIdentity | null): boolean {
+  return actual !== null && actual.start === expected.start && actual.executable === expected.executable;
+}
+
+function installedMacExecutable(homeDir: string, executable: string): boolean {
+  const candidates = [runtimeBinaryPath(homeDir)];
+  try {
+    const data = runtimeDataDir('darwin', homeDir, process.env);
+    const sources = JSON.parse(readControlFile(path.join(data, 'sources.json'), 256 * 1024) ?? '{}');
+    const selected = sources.sources?.find((source: { name?: unknown }) => source.name === sources.default_source);
+    if (typeof selected?.install_path === 'string' && path.isAbsolute(selected.install_path)) {
+      candidates.push(selected.install_path);
+    }
+  } catch {
+    // The default installed binary remains usable without a sources record.
+  }
+  return candidates.some((candidate) => {
+    try { return fs.realpathSync(candidate) === executable; } catch { return false; }
+  });
+}
+
+async function hostLockGatewayKind(
+  text: string | null, pid: number, platform: string, homeDir: string,
+): Promise<InstalledGatewayKind | null> {
+  const identity = platform === 'darwin' ? macProcessIdentity(pid) : null;
+  if (platform === 'darwin' && (!identity || !installedMacExecutable(homeDir, identity.executable))) return null;
+  const listeners = await localListeners(pid, platform);
+  const kind = installedGatewayKind({
     lockText: text,
-    command: processCommand(pid),
+    command: processCommand(pid, platform),
+    verifiedExecutable: identity?.executable,
     pidAlive: (id) => {
       try {
         process.kill(id, 0);
@@ -1183,13 +1289,17 @@ async function hostLockGatewayKind(text: string | null, pid: number): Promise<In
     },
     ownsSocket: (_id, wants) => Boolean(listeners && listenerOwnership(listeners, wants) === 'owned'),
   });
+  if (identity && !sameMacProcess(identity, macProcessIdentity(pid))) return null;
+  return kind;
 }
 
 /** The installed gateway's kind on Linux and macOS, from the host lock. Null when it is not proved. */
-export async function installedGatewayOnThisComputer(): Promise<InstalledGatewayKind | null> {
-  if (process.platform === 'win32') return null;
-  const { text, pid } = readHostLock();
-  return hostLockGatewayKind(text, pid);
+export async function installedGatewayOnThisComputer(
+  platform: string = process.platform, homeDir: string = os.homedir(),
+): Promise<InstalledGatewayKind | null> {
+  if (platform === 'win32') return null;
+  const { text, pid } = readHostLock(platform, homeDir);
+  return hostLockGatewayKind(text, pid, platform, homeDir);
 }
 
 export function confirmInstalledGateway(): Promise<boolean> {
@@ -1297,48 +1407,86 @@ async function adoptLinuxGatewayProcess(): Promise<GatewayProcess | null> {
   return controllerGateway(observeRecordedController);
 }
 
-export async function adoptInstalledGatewayProcess(): Promise<GatewayProcess | null> {
-  if (process.platform === 'win32') return null;
-  if (process.platform === 'linux') return adoptLinuxGatewayProcess();
-  const { text, pid } = readHostLock();
-  if (pid <= 0 || !(await hostLockGatewayKind(text, pid))) return null;
+export async function adoptInstalledGatewayProcess(
+  platform: string = process.platform, homeDir: string = os.homedir(),
+): Promise<GatewayProcess | null> {
+  if (platform === 'win32') return null;
+  if (platform === 'linux') return adoptLinuxGatewayProcess();
+  const { text, pid } = readHostLock(platform, homeDir);
+  const hostIdentity = platform === 'darwin' ? macProcessIdentity(pid) : null;
+  if (pid <= 0 || !(await hostLockGatewayKind(text, pid, platform, homeDir))) return null;
+  if (platform === 'darwin' && (!hostIdentity || !sameMacProcess(hostIdentity, macProcessIdentity(pid)))) return null;
   let stopPid = pid;
-  if (process.platform === 'darwin') {
-    const data = runtimeDataDir(process.platform, os.homedir(), process.env);
+  let stopIdentity = hostIdentity;
+  if (platform === 'darwin') {
+    const data = runtimeDataDir(platform, homeDir, process.env);
+    const statusText = readControlFile(path.join(data, 'update-controller', 'status.json'));
     try {
-      const statusPath = `${data}/update-controller/status.json`;
-      if (fs.statSync(statusPath).size > 16 * 1024) return null;
-      const status = JSON.parse(fs.readFileSync(statusPath, 'utf8'));
-      const lock = JSON.parse(text ?? '{}');
-      const controller = status.controller_pid;
-      if (status.host_pid === pid && status.generation === lock.generation
-        && Number.isInteger(controller) && controller > 0
-        && processCommand(controller)?.includes(`${data}/update-controller/runtime __update-controller`)
-        && Number(execFileSync('ps', ['-p', String(pid), '-o', 'ppid='], { encoding: 'utf8', timeout: 1000 }).trim()) === controller) {
+      // A directly started gateway has no controller status file.
+      if (statusText !== null) {
+        const status = JSON.parse(statusText);
+        const lock = JSON.parse(text ?? '{}');
+        const controller = status.controller_pid;
+        const identity = macProcessIdentity(controller);
+        if (status.host_pid !== pid || typeof lock.generation !== 'string' || status.generation !== lock.generation
+          || !identity || identity.executable !== path.join(data, 'update-controller', 'runtime')
+          || !processCommand(controller, platform)?.startsWith(`${identity.executable} __update-controller `)
+          || Number(psField(pid, 'ppid')) !== controller) return null;
         stopPid = controller;
+        stopIdentity = identity;
+      } else if (fs.existsSync(path.join(data, 'update-controller', 'status.json'))) {
+        return null;
       }
     } catch {
-      // A directly started gateway has no controller. Its proved host pid is sufficient.
+      return null;
     }
+  }
+  let timer: ReturnType<typeof setInterval> | undefined;
+  let notified = false;
+  const exitListeners: Array<(code: number | null) => void> = [];
+  function gone(target: number, identity: MacProcessIdentity | null): boolean {
+    if (localPidHasExited(target)) return true;
+    const actual = identity ? macProcessIdentity(target) : null;
+    return Boolean(identity && actual && !sameMacProcess(identity, actual));
+  }
+  function observeExit(): void {
+    if (gone(stopPid, stopIdentity) && !notified) {
+      notified = true;
+      if (timer) clearInterval(timer);
+      for (const listener of exitListeners) listener(null);
+    }
+  }
+  function hasExited(): boolean {
+    observeExit();
+    return gone(pid, hostIdentity) && (stopPid === pid || gone(stopPid, stopIdentity));
   }
   return {
     pid,
     onOutput() {},
-    onExit() {},
-    hasExited() {
-      return localPidHasExited(pid) && localPidHasExited(stopPid);
+    onExit(listener) {
+      exitListeners.push(listener);
+      if (!timer && !notified) {
+        timer = setInterval(observeExit, 1000);
+        timer.unref();
+      }
     },
+    hasExited,
     signal(signal) {
-      // A terminal-launched Home need not be a group leader. Signal only its
-      // verified controller or host pid. The controller drains its own children.
-      if (process.platform === 'darwin') process.kill(stopPid, signal);
+      // The controller drains its own children. Recheck the signal recipient,
+      // including its birth time, immediately before TERM or escalation to KILL.
+      if (platform === 'darwin') {
+        if (!stopIdentity || !sameMacProcess(stopIdentity, macProcessIdentity(stopPid))) {
+          throw new Error('ElastOS process identity changed. Refusing to signal a reused PID.');
+        }
+        process.kill(stopPid, signal);
+      }
     },
   };
 }
 
-function processCommand(pid: number): string | null {
+function processCommand(pid: number, platform: string = process.platform): string | null {
   if (!Number.isInteger(pid) || pid <= 0) return null;
-  if (process.platform === 'linux') {
+  if (platform === 'linux') {
     try {
       return fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8').replace(/\0/g, ' ').trim();
     } catch {
@@ -1348,7 +1496,7 @@ function processCommand(pid: number): string | null {
   try {
     return execFileSync('ps', ['-p', String(pid), '-o', 'command='], {
       encoding: 'utf8',
-      timeout: 1000,
+      timeout: 1000, maxBuffer: 16 * 1024,
     }).trim();
   } catch {
     return null;
