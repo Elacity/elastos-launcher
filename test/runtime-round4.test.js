@@ -167,6 +167,10 @@ function adoption(t) {
     done(null, 'p701\nn127.0.0.1:8090\nn[::1]:8090\n');
   });
   t.mock.method(child, 'execFileSync', (file, args) => {
+    if (file === '/usr/bin/vmmap') {
+      const pid = Number(args[args.length - 1]);
+      return `Path: ${pid === 701 ? executable : `${data}/update-controller/runtime`}\nLaunch Time: ${pid === 701 ? birth : controllerBirth}\n`;
+    }
     assert.equal(file, 'ps');
     const field = args[args.length - 1];
     const pid = Number(args[1]);
@@ -361,5 +365,33 @@ test('a Home controller exiting before readiness reports error without an automa
     fail = false;
     await sup.start();
     assert.equal(spawned, 2);
+  }
+});
+
+test('Mac adoption uses the real executable even when argv0 names the installed binary', async (t) => {
+  if (process.platform !== 'darwin') return t.skip('native macOS executable identity');
+  const home = fs.mkdtempSync(path.join(fs.realpathSync(os.homedir()), 'round4-argv0-'));
+  t.mock.method(os, 'homedir', () => home);
+  const data = path.join(home, 'Library', 'Application Support', 'elastos');
+  const binary = path.join(home, '.local', 'bin', 'elastos');
+  fs.mkdirSync(data, { recursive: true });
+  fs.mkdirSync(path.dirname(binary), { recursive: true });
+  fs.writeFileSync(binary, 'installed binary fixture');
+  // Hold only this harmless shell, with forged argv0 and an argv containing
+  // gateway. It never opens a socket or invokes Runtime.
+  const proc = child.spawn('/bin/sh', ['-c', 'read gateway'], { argv0: binary, stdio: ['pipe', 'ignore', 'ignore'] });
+  await new Promise((resolve, reject) => { proc.once('spawn', resolve); proc.once('error', reject); });
+  const exited = new Promise((resolve) => proc.once('exit', resolve));
+  try {
+    assert.equal(child.execFileSync('ps', ['-p', String(proc.pid), '-o', 'comm='], { encoding: 'utf8' }).trim(), binary);
+    fs.writeFileSync(path.join(data, 'host-process.lock'), JSON.stringify({ pid: proc.pid, addr: 'localhost:8090' }));
+    // Supply only socket observation; executable and birth reads are native.
+    t.mock.method(child, 'execFile', (_file, _args, _options, done) => {
+      done(null, `p${proc.pid}\nn127.0.0.1:8090\n`);
+    });
+    assert.equal(await gateway.adoptInstalledGatewayProcess('darwin', home), null);
+  } finally {
+    proc.kill('SIGTERM');
+    await exited;
   }
 });

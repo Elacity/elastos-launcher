@@ -844,9 +844,14 @@ function psField(pid: number, field: string): string {
 function macProcessIdentity(pid: number): MacProcessIdentity | null {
   if (!Number.isInteger(pid) || pid <= 0) return null;
   try {
-    const start = psField(pid, 'lstart');
-    const executable = psField(pid, 'comm');
-    if (!start || !path.isAbsolute(executable) || psField(pid, 'lstart') !== start) return null;
+    // vmmap reports the kernel's executable path and precise launch time.
+    // ps comm is argv[0] on macOS and can be forged.
+    const report = execFileSync('/usr/bin/vmmap', ['-w', '-summary', String(pid)], {
+      encoding: 'utf8', timeout: 2000, maxBuffer: 64 * 1024, env: { ...process.env, LC_ALL: 'C' },
+    });
+    const executable = report.match(/^Path:\s+(.+)$/m)?.[1]?.trim() ?? '';
+    const start = report.match(/^Launch Time:\s+(.+)$/m)?.[1]?.trim() ?? '';
+    if (!start || !path.isAbsolute(executable)) return null;
     return { executable, start };
   } catch {
     return null;

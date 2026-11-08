@@ -188,7 +188,7 @@ test('Mac Update stops Home, runs the update and starts the current binary even 
     calls.push('update');
     if (fail) throw new Error('update failed');
   });
-  const target = createRuntimeTarget('darwin');
+  const target = createRuntimeTarget('darwin', 'arm64');
   await target.update();
   assert.deepEqual(calls, ['stop', 'update', 'start-current-binary']);
   calls.length = 0;
@@ -262,7 +262,7 @@ test('a Mac status query overlapping Stop preserves the completed stop transitio
   }));
   t.mock.method(gateway, 'probeGatewayHealth', async () => ({ status: 200, body: 'OK' }));
   t.mock.method(gateway, 'confirmInstalledGateway', async () => { phase = 'stopped'; return false; });
-  const target = createRuntimeTarget('darwin');
+  const target = createRuntimeTarget('darwin', 'arm64');
   await target.start();
   assert.equal(await target.getStatus(), 'stopped');
 });
