@@ -1066,7 +1066,6 @@ function pidfdResources(pidFile) {
       process.kill(pid, 0);
       helpers += 1;
     } catch {
-      // The helper has exited.
     }
     const fifoDir = path.dirname(cmd);
     if (fs.existsSync(fifoDir)) dirs += 1;
@@ -1075,7 +1074,6 @@ function pidfdResources(pidFile) {
         const st = fs.statSync(path.join(fifoDir, leaf));
         inodes.add(`${st.dev}:${st.ino}`);
       } catch {
-        // close() removes the FIFO directory.
       }
     }
   }
@@ -1101,7 +1099,7 @@ function releasePidfdLeak(pidFile, scriptDir) {
     const [pidText, cmd] = line.split(' ');
     const pid = Number(pidText);
     if (pid) {
-      try { process.kill(pid, 'SIGKILL'); } catch { /* already gone */ }
+      try { process.kill(pid, 'SIGKILL'); } catch {}
     }
     if (!cmd) continue;
     fs.rmSync(path.dirname(cmd), { recursive: true, force: true });
