@@ -296,9 +296,8 @@ test('an adopted distro gateway uses the lock pid and does not report a live pid
   assert.equal(readDistroLockPid(() => ({ code: 0, stdout: '0\n' })), null);
   assert.equal(readDistroLockPid(() => ({ code: 0, stdout: '1\n' })), null);
   assert.equal(readDistroLockPid(() => ({ code: 1, stdout: '' })), null);
-  assert.equal(distroStopArgs('TERM', 77).at(-1), '77');
-  assert.equal(distroStopArgs('TERM', 77).includes('host-process.lock'), false);
-  assert.throws(() => distroStopArgs('TERM', 1), /Refusing to signal/);
+  assert.equal(distroStopArgs()[0], 'python3');
+  assert.equal(distroStopArgs().some((arg) => String(arg).includes('os.kill')), false);
   assert.equal(await distroPidAlive(77, async () => { throw new Error('timeout'); }), true);
   assert.equal(await distroPidAlive(77, async () => ({ code: 1 })), false);
   assert.equal(await distroPidAlive(77, async () => ({ code: 2 })), true);
@@ -308,52 +307,45 @@ test('an adopted distro gateway uses the lock pid and does not report a live pid
   const adopted = adoptDistroGatewayProcess({
     readPid: () => 77,
     alive: () => true,
-    signal: (pid, signal) => { signals.push([pid, signal]); },
+    stop: (name) => { signals.push(name); },
   });
   assert.equal(adopted.pid, 77);
   assert.equal(adopted.hasExited(), false);
   adopted.signal('SIGTERM');
-  assert.deepEqual(signals, [[77, 'SIGTERM']]);
+  assert.deepEqual(signals, ['TERM']);
   assert.equal(adoptDistroGatewayProcess({
     readPid: () => null,
     alive: () => true,
-    signal: () => { throw new Error('signaled'); },
   }), null);
   assert.equal(adoptDistroGatewayProcess({
     readPid: () => 0,
     alive: () => true,
-    signal: () => { throw new Error('signaled'); },
   }), null);
   const dead = adoptDistroGatewayProcess({
     readPid: () => 77,
     alive: () => false,
-    signal: () => {},
   });
   assert.equal(dead.hasExited(), true);
   const blown = adoptDistroGatewayProcess({
     readPid: () => 77,
     alive: () => { throw new Error('timeout'); },
-    signal: () => { throw new Error('signaled'); },
   });
   assert.equal(blown.hasExited(), false);
   const pending = adoptDistroGatewayProcess({
     readPid: () => 77,
     alive: () => Promise.reject(new Error('timeout')),
-    signal: () => {},
   });
   assert.equal(await pending.hasExited(), false);
 
-  const argv = [];
+  const calls = [];
   const signaled = adoptDistroGatewayProcess({
     readPid: () => 77,
     alive: () => true,
-    runStop: (args) => { argv.push(args); },
+    stop: (name) => { calls.push(name); },
   });
   signaled.signal('SIGTERM');
-  assert.equal(argv.length, 1);
-  assert.equal(argv[0].at(-1), '77');
-  assert.equal(argv[0][3], 'TERM');
-  assert.equal(String(argv[0][2]).includes('host-process.lock'), false);
+  signaled.signal('SIGKILL');
+  assert.deepEqual(calls, ['TERM', 'KILL']);
   const adoptedCalls = [];
   const adoptAny = (label) => (pid) => {
     adoptedCalls.push(`${label}:${pid}`);
@@ -405,8 +397,8 @@ test('an adopted distro gateway uses the lock pid and does not report a live pid
     adoptInstalled: () => adoptDistroGatewayProcess({
       readPid: () => 77,
       alive: () => true,
-      signal: (pid, signal) => {
-        signals.push([pid, signal]);
+      stop: (name) => {
+        signals.push(name);
         health = null;
       },
     }),
@@ -430,48 +422,33 @@ test('an adopted distro gateway uses the lock pid and does not report a live pid
     adoptInstalled: () => adoptDistroGatewayProcess({
       readPid: () => 77,
       alive: () => { throw new Error('timeout'); },
-      signal: (pid, signal) => {
-        probeSignals.push([pid, signal]);
+      stop: (name) => {
+        probeSignals.push(name);
         probeHealth = null;
       },
     }),
   });
   await assert.rejects(() => probed.stop({ adopt: true }), /still running/);
   assert.equal(probed.phase(), 'error');
-  assert.deepEqual(probeSignals, [[77, 'SIGTERM'], [77, 'SIGKILL']]);
-  assert.equal(signals.some(([pid]) => pid === 0), false);
-  assert.equal(signals.every(([pid]) => pid === 77), true);
+  assert.deepEqual(probeSignals, ['TERM', 'KILL']);
+  assert.equal(signals.includes(0), false);
+  assert.equal(signals.every((name) => name === 'TERM' || name === 'KILL'), true);
 
   const source = fs.readFileSync(path.join(__dirname, '../src/main/targets/windowsRuntime.ts'), 'utf8');
   assert.equal(source.includes('signalDistroGateway(0'), false);
   assert.equal(source.includes('hasExited() { return true; }'), false);
-  const helper = source.match(/const STOP_HELPER = `\n([\s\S]*?)`\.trim\(\)/);
-  assert.ok(helper);
-  assert.equal(helper[1].includes('host-process.lock'), false);
-  const { spawn, spawnSync } = require('node:child_process');
+  assert.equal(source.includes('os.kill(-'), false);
+  const { STOP_HELPER } = require('../dist/main/targets/windowsRuntime');
+  const { spawnSync } = require('node:child_process');
   const probe = spawnSync('python3', ['-V'], { encoding: 'utf8' });
   if (probe.error || probe.status !== 0) {
     assert.fail(`python3 is required to test the distro stop helper (${probe.error ? probe.error.message : probe.stderr || probe.stdout})`);
   }
   for (const raw of ['1', '0', 'True', 'true', '-1']) {
-    const result = spawnSync('python3', ['-c', helper[1], 'TERM', raw], { encoding: 'utf8' });
+    const result = spawnSync('python3', ['-c', STOP_HELPER, 'TERM', raw], { encoding: 'utf8' });
     assert.equal(result.error, undefined, raw);
     assert.equal(result.status, 1, `${raw} status ${result.status} ${result.stderr}`);
     assert.equal(/Traceback/.test(result.stderr || ''), false, result.stderr);
-  }
-  const sleeper = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {
-    detached: true,
-    stdio: 'ignore',
-  });
-  sleeper.unref();
-  try {
-    const killed = spawnSync('python3', ['-c', helper[1], 'TERM', String(sleeper.pid)], { encoding: 'utf8' });
-    assert.equal(killed.error, undefined);
-    assert.equal(killed.status, 0, killed.stderr);
-    await new Promise((resolve) => { setTimeout(resolve, 200); });
-    assert.throws(() => process.kill(sleeper.pid, 0));
-  } finally {
-    try { process.kill(-sleeper.pid, 'SIGKILL'); } catch { /* already gone */ }
   }
 });
 
@@ -568,7 +545,7 @@ test('a distro Home started with home --browser is the current listener', () => 
   assert.equal(factsAreElastos(JSON.stringify(facts)), true);
 });
 
-test('Stop signals the proved update controller and otherwise the host pid', () => {
+test('Stop names the proved update controller and never the host pid', () => {
   assert.equal(
     DISTRO_CONTROLLER_COMMAND,
     '/root/.local/share/elastos/update-controller/runtime __update-controller',
@@ -589,38 +566,37 @@ test('Stop signals the proved update controller and otherwise the host pid', () 
       4: { ppid: 1, command: '/root/.local/bin/elastos gateway --addr localhost:8090' },
       7: { ppid: 4, command: '/root/.local/bin/elastos home --browser' },
     },
-  })), 7);
+  })), null);
   assert.equal(distroStopPid(report({
     statusText: JSON.stringify({ host_pid: 7, controller_pid: 4, generation: 'other' }),
-  })), 7);
-  assert.equal(distroStopPid(report({ statusText: null })), 7);
+  })), null);
+  assert.equal(distroStopPid(report({ statusText: null })), null);
   assert.equal(distroStopPid(report({
     procs: {
       4: { ppid: 1, command },
       7: { ppid: 9, command: '/root/.local/bin/elastos home --browser' },
     },
-  })), 7);
+  })), null);
   assert.equal(distroStopPid({ lockText: '{', statusText: null, procs: {} }), null);
 
   const signals = [];
   const adopted = adoptDistroGatewayProcess({
     readPid: () => 7,
     alive: () => true,
-    signal: (pid, signal) => { signals.push([pid, signal]); },
-    report: () => report(),
+    stop: (name) => { signals.push(name); },
   });
   assert.equal(adopted && adopted.pid, 7);
   adopted.signal('SIGTERM');
   adopted.signal('SIGKILL');
-  assert.deepEqual(signals, [[4, 'SIGTERM'], [4, 'SIGKILL'], [7, 'SIGKILL']]);
+  assert.deepEqual(signals, ['TERM', 'KILL']);
+  const hostSignals = [];
   const hostOnly = adoptDistroGatewayProcess({
     readPid: () => 7,
     alive: () => false,
-    signal: (pid, signal) => { signals.push([pid, signal]); },
-    report: () => report({ lockText: JSON.stringify({ pid: 8, generation: 'abc' }) }),
+    stop: (name) => { hostSignals.push(name); },
   });
   hostOnly.signal('SIGTERM');
-  assert.deepEqual(signals, [[4, 'SIGTERM'], [4, 'SIGKILL'], [7, 'SIGKILL'], [7, 'SIGTERM']]);
+  assert.deepEqual(hostSignals, ['TERM']);
   assert.equal(hostOnly.hasExited(), true);
 
   const spawnOptions = distroHomeSpawnOptions(wslSpawnEnv({

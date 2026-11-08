@@ -1,4 +1,4 @@
-import { spawn, spawnSync } from 'child_process';
+import { ChildProcess, spawn, spawnSync } from 'child_process';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
@@ -37,6 +37,7 @@ export const DISTRO_INSTALL_DIR = 'C:\\ElastOS\\distro';
 export const DISTRO_IMPORT_FAILED = 'ElastOS could not add its Linux environment. Click Install to try again.';
 export const DISTRO_SETUP_FAILED = 'ElastOS could not finish setting up its Linux environment. Click Install to try again.';
 export const DISTRO_INSTALL_FAILED = 'ElastOS could not be installed. Click Install to try again.';
+export const HOME_UNCONFIRMED_MESSAGE = 'Home could not be confirmed';
 
 const FILE_HELPER = `
 import base64, os, stat, sys, pathlib
@@ -74,16 +75,295 @@ else:
     raise SystemExit(2)
 `.trim();
 
-const STOP_HELPER = `
-import os, signal, sys
-name = sys.argv[1]
-raw = sys.argv[2]
-if type(raw) is not str or not raw.isdigit():
+export const STOP_HELPER = `
+import errno, json, os, signal, stat, sys, time
+MESSAGE = 'Home could not be confirmed'
+RECORD_MAX = 16384
+STAT_MAX = 4096
+LINK_MAX = 4096
+BOOT_MAX = 128
+CMD_MAX = 64
+DATA = '/root/.local/share/elastos'
+LOCK = DATA + '/host-process.lock'
+STATUS = DATA + '/update-controller/status.json'
+RUNTIME = DATA + '/update-controller/runtime'
+BINARY = '/root/.local/bin/elastos'
+
+def located(root, suffix):
+    if root == '/':
+        return suffix
+    return root.rstrip('/') + suffix
+
+def publish(channel, seq, text):
+    final = os.path.join(channel, 'reply-%d' % seq)
+    tmp = final + '.tmp'
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+    try:
+        os.write(fd, (text + '\\n').encode('utf-8'))
+    finally:
+        os.close(fd)
+    os.replace(tmp, final)
+
+def refuse(channel):
+    try:
+        publish(channel, 0, MESSAGE)
+    except Exception:
+        pass
     raise SystemExit(1)
-pid = int(raw)
-if type(pid) is not int or pid <= 1:
-    raise SystemExit(1)
-os.kill(-pid, signal.SIGKILL if name == 'KILL' else signal.SIGTERM)
+
+def walk(path):
+    current = ''
+    parts = path.strip('/').split('/')
+    if not parts or parts == ['']:
+        return None
+    for index, part in enumerate(parts):
+        current = current + '/' + part
+        try:
+            info = os.lstat(current)
+        except OSError:
+            return None
+        if stat.S_ISLNK(info.st_mode):
+            return False
+        if index == len(parts) - 1:
+            return info
+    return None
+
+def read_file(path, limit):
+    info = walk(path)
+    if info is None or info is False:
+        return info
+    if not stat.S_ISREG(info.st_mode) or info.st_size > limit:
+        return False
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError:
+        return False
+    try:
+        data = os.read(fd, limit + 1)
+    finally:
+        os.close(fd)
+    if len(data) > limit:
+        return False
+    return data
+
+def load_json(data):
+    if data is None or data is False:
+        return data
+    try:
+        parsed = json.loads(data.decode('utf-8'))
+    except Exception:
+        return False
+    if type(parsed) is not dict:
+        return False
+    return parsed
+
+def positive(value):
+    if type(value) is not int or value <= 1:
+        return None
+    return value
+
+def token(value, limit):
+    if type(value) is not str or value == '' or len(value) > limit:
+        return None
+    if '\\r' in value or '\\n' in value:
+        return None
+    return value
+
+def prove(root):
+    lock = load_json(read_file(located(root, LOCK), RECORD_MAX))
+    status = load_json(read_file(located(root, STATUS), RECORD_MAX))
+    if lock is None or lock is False or status is None or status is False:
+        return None
+    if lock.get('role') != 'gateway' or lock.get('addr') != 'localhost:8090':
+        return None
+    generation = token(lock.get('generation'), 128)
+    if generation is None or generation != token(status.get('generation'), 128):
+        return None
+    start = token(status.get('controller_start'), 200)
+    host = positive(lock.get('pid'))
+    if start is None or host is None or positive(status.get('host_pid')) != host:
+        return None
+    controller = positive(status.get('controller_pid'))
+    if controller is None or controller == host:
+        return None
+    return controller, start
+
+def start_ticks(text, pid):
+    space = text.find(' ')
+    if space <= 0 or text[:space] != str(pid):
+        return None
+    end = text.rfind(')')
+    if end < 0:
+        return None
+    parts = text[end + 1:].split()
+    if len(parts) <= 19 or not parts[19].isdigit():
+        return None
+    return parts[19]
+
+def load_boot(root):
+    data = read_file(located(root, '/proc/sys/kernel/random/boot_id'), BOOT_MAX)
+    if data is None:
+        return True, None
+    if data is False:
+        return False, None
+    boot = data.decode('utf-8', 'replace').strip()
+    if boot == '' or any(ch.isspace() for ch in boot):
+        return False, None
+    return True, boot
+
+def process_identity(text, boot, pid):
+    ticks = start_ticks(text, pid)
+    if ticks is None:
+        return None
+    if boot is None:
+        return 'linux:' + ticks
+    return 'linux:' + boot + ':' + ticks
+
+def allowed_exes(root):
+    found = []
+    for suffix in (RUNTIME, BINARY):
+        path = located(root, suffix)
+        info = walk(path)
+        if info is None or info is False or not stat.S_ISREG(info.st_mode):
+            continue
+        real = os.path.realpath(path)
+        if real not in found:
+            found.append(real)
+    return found
+
+def controller_exe(root, pid):
+    path = located(root, '/proc/%d/exe' % pid)
+    parent = path.rsplit('/', 1)[0]
+    info = walk(parent)
+    if info is None or info is False or not stat.S_ISDIR(info.st_mode):
+        return None
+    try:
+        leaf = os.lstat(path)
+    except OSError:
+        return None
+    if not stat.S_ISLNK(leaf.st_mode):
+        return None
+    try:
+        link = os.readlink(path)
+    except OSError:
+        return None
+    if len(link) > LINK_MAX or not link.startswith('/') or link.endswith(' (deleted)'):
+        return None
+    if '\\n' in link or '\\r' in link or '\\x00' in link:
+        return None
+    return os.path.realpath(link)
+
+def identity_matches(root, pid, start):
+    data = read_file(located(root, '/proc/%d/stat' % pid), STAT_MAX)
+    if data is None or data is False:
+        return False
+    ok, boot = load_boot(root)
+    if not ok:
+        return False
+    if process_identity(data.decode('utf-8', 'replace'), boot, pid) != start:
+        return False
+    exe = controller_exe(root, pid)
+    if exe is None:
+        return False
+    return exe in allowed_exes(root)
+
+def read_cmd(channel, seq):
+    path = os.path.join(channel, 'cmd-%d' % seq)
+    deadline = time.time() + 60
+    while time.time() < deadline:
+        try:
+            info = os.lstat(path)
+        except OSError:
+            time.sleep(0.02)
+            continue
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode) or info.st_size > CMD_MAX:
+            return None
+        try:
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        except OSError:
+            return None
+        try:
+            data = os.read(fd, CMD_MAX + 1)
+        finally:
+            os.close(fd)
+        if len(data) > CMD_MAX:
+            return None
+        if not data.endswith(b'\\n'):
+            time.sleep(0.02)
+            continue
+        return data.decode('utf-8', 'replace').strip()
+    return None
+
+def serve(root, channel):
+    proved = prove(root)
+    if proved is None:
+        refuse(channel)
+    pid, start = proved
+    opener = getattr(os, 'pidfd_open', None)
+    sender = getattr(signal, 'pidfd_send_signal', None)
+    if opener is None or sender is None:
+        refuse(channel)
+    try:
+        pidfd = opener(pid, 0)
+    except OSError:
+        refuse(channel)
+    try:
+        if not identity_matches(root, pid, start):
+            refuse(channel)
+        publish(channel, 0, 'ready')
+        seq = 1
+        while True:
+            command = read_cmd(channel, seq)
+            if command is None:
+                return
+            if command == 'close':
+                publish(channel, seq, 'closed')
+                return
+            if command == 'TERM':
+                sig = signal.SIGTERM
+            elif command == 'KILL':
+                sig = signal.SIGKILL
+            else:
+                publish(channel, seq, MESSAGE)
+                seq += 1
+                continue
+            try:
+                sender(pidfd, sig, None, 0)
+            except OSError as err:
+                code = errno.errorcode.get(err.errno, '')
+                if code == 'ESRCH':
+                    publish(channel, seq, 'errno ESRCH')
+                else:
+                    publish(channel, seq, MESSAGE)
+                seq += 1
+                continue
+            publish(channel, seq, 'sent')
+            seq += 1
+    finally:
+        try:
+            os.close(pidfd)
+        except OSError:
+            pass
+
+def main():
+    root = sys.argv[1] if len(sys.argv) > 1 else '/'
+    channel = sys.argv[2] if len(sys.argv) > 2 else ''
+    if not root.startswith('/') or not channel.startswith('/'):
+        raise SystemExit(1)
+    try:
+        info = os.lstat(channel)
+    except OSError:
+        raise SystemExit(1)
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+        raise SystemExit(1)
+    try:
+        serve(root, channel)
+    except SystemExit:
+        raise
+    except Exception:
+        refuse(channel)
+
+main()
 `.trim();
 
 const LOCK_PID_HELPER = `
@@ -111,43 +391,95 @@ except OSError:
     raise SystemExit(0)
 `.trim();
 
-const FACTS_HELPER = `
-import json, os
-lock_path = '/root/.local/share/elastos/host-process.lock'
+export const FACTS_HELPER = `
+import json, os, stat, sys
+RECORD_MAX = 16384
+PROC_MAX = 8 * 1024 * 1024
+FD_MAX = 1024
+LINK_MAX = 4096
+root = sys.argv[1] if len(sys.argv) > 1 else ''
+if root and not root.startswith('/'):
+    raise SystemExit(1)
+
+def under(suffix):
+    if root == '' or root == '/':
+        return suffix
+    return root.rstrip('/') + suffix
+
+def walk(path):
+    current = ''
+    parts = path.strip('/').split('/')
+    if not parts or parts == ['']:
+        return None
+    for index, part in enumerate(parts):
+        current = current + '/' + part
+        try:
+            info = os.lstat(current)
+        except OSError:
+            return None
+        if stat.S_ISLNK(info.st_mode):
+            return False
+        if index == len(parts) - 1:
+            return info
+    return None
+
+def read_capped(path, limit):
+    info = walk(path)
+    if info is None or info is False:
+        return None
+    if not stat.S_ISREG(info.st_mode) or info.st_size > limit:
+        return None
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError:
+        return None
+    try:
+        data = os.read(fd, limit + 1)
+    finally:
+        os.close(fd)
+    if len(data) > limit:
+        return None
+    return data
+
+lock_path = under('/root/.local/share/elastos/host-process.lock')
 out = {'lock': None, 'command': None, 'tcp': '', 'tcp6': '', 'links': [], 'alive': False}
-try:
-    out['lock'] = open(lock_path).read()
-except Exception:
-    pass
+lock_data = read_capped(lock_path, RECORD_MAX)
+if lock_data is not None:
+    out['lock'] = lock_data.decode('utf-8', 'replace')
 pid = 0
 try:
     pid = json.loads(out['lock'] or '{}').get('pid') or 0
 except Exception:
     pid = 0
 if type(pid) is int and pid > 1:
-    out['alive'] = os.path.exists(f'/proc/{pid}')
+    proc = under('/proc/%d' % pid)
     try:
-        out['command'] = open(f'/proc/{pid}/cmdline', 'rb').read().replace(bytes([0]), b' ').decode()
-    except Exception:
-        out['command'] = None
-    try:
-        out['tcp'] = open('/proc/net/tcp').read()
-    except Exception:
-        out['tcp'] = ''
-    try:
-        out['tcp6'] = open('/proc/net/tcp6').read()
-    except Exception:
-        out['tcp6'] = ''
+        info = os.lstat(proc)
+        out['alive'] = (not stat.S_ISLNK(info.st_mode)) and stat.S_ISDIR(info.st_mode)
+    except OSError:
+        out['alive'] = False
+    command = read_capped(proc + '/cmdline', RECORD_MAX)
+    if command is not None:
+        out['command'] = command.replace(bytes([0]), b' ').decode('utf-8', 'replace')
+    tcp = read_capped(under('/proc/net/tcp'), PROC_MAX)
+    out['tcp'] = '' if tcp is None else tcp.decode('utf-8', 'replace')
+    tcp6 = read_capped(under('/proc/net/tcp6'), PROC_MAX)
+    out['tcp6'] = '' if tcp6 is None else tcp6.decode('utf-8', 'replace')
     links = []
-    fd = f'/proc/{pid}/fd'
+    fd_dir = proc + '/fd'
     try:
-        for name in os.listdir(fd):
+        info = os.lstat(fd_dir)
+        names = [] if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode) else os.listdir(fd_dir)
+    except OSError:
+        names = []
+    if len(names) <= FD_MAX:
+        for name in names:
             try:
-                links.append(os.readlink(f'{fd}/{name}'))
-            except Exception:
-                pass
-    except Exception:
-        links = []
+                link = os.readlink(fd_dir + '/' + name)
+            except OSError:
+                continue
+            if len(link) <= LINK_MAX:
+                links.append(link)
     out['links'] = links
 print(json.dumps(out))
 `.trim();
@@ -232,18 +564,14 @@ export interface DistroProcFact {
   command: string | null;
 }
 
-/** Raw files from the distro. The stop decision does not trust this until `distroStopPid`. */
+/** Stop does not signal a pid from this report. */
 export interface DistroStopReport {
   lockText: string;
   statusText: string | null;
   procs: Readonly<Record<string, DistroProcFact>>;
 }
 
-/**
- * Pid to signal. A proved controller is the host's parent, shares the lock
- * generation, and is the update-controller binary. Otherwise the host pid.
- * Null when the lock names no usable pid.
- */
+/** Stop does not signal this value. */
 export function distroStopPid(report: DistroStopReport): number | null {
   let lock: { pid?: unknown; generation?: unknown };
   try {
@@ -253,12 +581,12 @@ export function distroStopPid(report: DistroStopReport): number | null {
   }
   const host = lock.pid;
   if (typeof host !== 'number' || !Number.isInteger(host) || host <= 1) return null;
-  if (!report.statusText) return host;
+  if (!report.statusText) return null;
   let status: { host_pid?: unknown; generation?: unknown; controller_pid?: unknown };
   try {
     status = JSON.parse(report.statusText) as { host_pid?: unknown; generation?: unknown; controller_pid?: unknown };
   } catch {
-    return host;
+    return null;
   }
   const controller = status.controller_pid;
   const proved = status.host_pid === host
@@ -269,12 +597,12 @@ export function distroStopPid(report: DistroStopReport): number | null {
     && Number.isInteger(controller)
     && controller > 1
     && controller !== host;
-  if (!proved) return host;
+  if (!proved) return null;
   const controllerFact = report.procs[String(controller)];
   const hostFact = report.procs[String(host)];
-  if (!controllerFact || !hostFact) return host;
-  if (hostFact.ppid !== controller) return host;
-  if (!controllerFact.command || !controllerFact.command.includes(DISTRO_CONTROLLER_COMMAND)) return host;
+  if (!controllerFact || !hostFact) return null;
+  if (hostFact.ppid !== controller) return null;
+  if (!controllerFact.command || !controllerFact.command.includes(DISTRO_CONTROLLER_COMMAND)) return null;
   return controller;
 }
 
@@ -415,17 +743,6 @@ export function readDistroStopReport(
   }
 }
 
-function resolvedDistroStopPid(report: DistroStopReport | null, hostPid: number): number {
-  if (!report) return hostPid;
-  let lockPid: unknown;
-  try {
-    lockPid = (JSON.parse(report.lockText) as { pid?: unknown }).pid;
-  } catch {
-    return hostPid;
-  }
-  if (lockPid !== hostPid) return hostPid;
-  return distroStopPid(report) ?? hostPid;
-}
 
 export function distroToolCheckArgs(): readonly string[] {
   return ['bash', '-lc', 'command -v python3 >/dev/null && command -v curl >/dev/null'];
@@ -453,12 +770,240 @@ export function distroPackageArgs(): readonly string[] {
   return ['bash', '-lc', 'printf "nameserver 8.8.8.8\\n" > /etc/resolv.conf; apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y python3 curl ca-certificates'];
 }
 
-/** Signal this pid's group. The helper does not read the lock again. Pid 1 is refused. */
-export function distroStopArgs(signal: 'TERM' | 'KILL', pid: number): string[] {
-  if (!Number.isInteger(pid) || pid <= 1) {
-    throw new Error('Refusing to signal that process.');
+export function distroStopArgs(root = '/', channel?: string): string[] {
+  const args = ['python3', '-c', STOP_HELPER, root];
+  if (channel) args.push(channel);
+  return args;
+}
+
+export const WSL_OUTPUT_MAX = 20 * 1024 * 1024;
+
+export function appendCappedOutput(
+  chunks: Buffer[],
+  total: number,
+  chunk: Buffer,
+  max = WSL_OUTPUT_MAX,
+): number {
+  if (total >= max || chunk.length === 0) return total;
+  const room = max - total;
+  const slice = chunk.length > room ? chunk.subarray(0, room) : chunk;
+  chunks.push(Buffer.from(slice));
+  return total + slice.length;
+}
+
+const STOP_REPLY_MS = 8000;
+
+export interface DistroStopSession {
+  signal(name: 'TERM' | 'KILL'): void;
+  close(): void;
+}
+
+function helperGone(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+  } catch (err) {
+    const code = err && typeof err === 'object' && 'code' in err
+      ? String((err as { code?: string }).code)
+      : '';
+    return code === 'ESRCH';
   }
-  return ['python3', '-c', STOP_HELPER, signal, String(pid)];
+  if (process.platform === 'win32') return false;
+  const result = spawnSync('ps', ['-o', 'stat=', '-p', String(pid)], { encoding: 'utf8', timeout: 1000 });
+  const state = (result.stdout || '').trim();
+  return state === '' || state.startsWith('Z');
+}
+
+function distroVisiblePath(file: string): string {
+  const normalized = file.replace(/\\/g, '/');
+  const drive = /^([A-Za-z]):\/(.*)$/.exec(normalized);
+  if (!drive) return normalized;
+  return `/mnt/${drive[1].toLowerCase()}/${drive[2]}`;
+}
+
+interface CreatedDir {
+  path: string;
+  dev: number;
+  ino: number;
+}
+
+function stopChannelRoot(): string {
+  return path.resolve(os.tmpdir());
+}
+
+function createStopChannel(): CreatedDir {
+  const dir = fs.mkdtempSync(path.join(stopChannelRoot(), 'elastos-stop-'));
+  fs.chmodSync(dir, 0o700);
+  const info = fs.lstatSync(dir);
+  if (info.isSymbolicLink() || !info.isDirectory()) throw new Error(HOME_UNCONFIRMED_MESSAGE);
+  return { path: dir, dev: info.dev, ino: info.ino };
+}
+
+function parentsStayReal(dir: string, root: string): boolean {
+  let current = path.resolve(dir);
+  const stop = path.resolve(root);
+  if (current !== stop && !current.startsWith(`${stop}${path.sep}`)) return false;
+  while (current !== stop) {
+    let info: fs.Stats;
+    try {
+      info = fs.lstatSync(current);
+    } catch {
+      return false;
+    }
+    if (info.isSymbolicLink() || !info.isDirectory()) return false;
+    const parent = path.dirname(current);
+    if (parent === current) return false;
+    current = parent;
+  }
+  try {
+    const rootInfo = fs.lstatSync(stop);
+    return !rootInfo.isSymbolicLink() && rootInfo.isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+function removeStopChannel(dir: CreatedDir): void {
+  let info: fs.Stats;
+  try {
+    info = fs.lstatSync(dir.path);
+  } catch {
+    return;
+  }
+  if (info.isSymbolicLink() || !info.isDirectory()) return;
+  if (info.dev !== dir.dev || info.ino !== dir.ino) return;
+  if (!parentsStayReal(dir.path, stopChannelRoot())) return;
+  fs.rmSync(dir.path, { recursive: true, force: true });
+}
+
+function assertStopChannel(dir: CreatedDir): void {
+  const info = fs.lstatSync(dir.path);
+  if (info.isSymbolicLink() || !info.isDirectory() || info.dev !== dir.dev || info.ino !== dir.ino) {
+    throw new Error(HOME_UNCONFIRMED_MESSAGE);
+  }
+}
+
+function readStopReply(dir: CreatedDir, seq: number, childPid: number, timeoutMs: number): string {
+  assertStopChannel(dir);
+  const file = path.join(dir.path, `reply-${seq}`);
+  const deadline = Date.now() + timeoutMs;
+  const pause = new Int32Array(new SharedArrayBuffer(4));
+  while (Date.now() < deadline) {
+    try {
+      const text = fs.readFileSync(file, 'utf8');
+      if (text.includes('\n') || text.includes('\r')) return text.split(/\r?\n/, 1)[0].trim();
+    } catch (err) {
+      const code = err && typeof err === 'object' && 'code' in err
+        ? String((err as { code?: string }).code)
+        : '';
+      if (code !== 'ENOENT') throw err;
+    }
+    if (helperGone(childPid)) throw new Error(HOME_UNCONFIRMED_MESSAGE);
+    Atomics.wait(pause, 0, 0, 20);
+  }
+  throw new Error(HOME_UNCONFIRMED_MESSAGE);
+}
+
+function writeStopCommand(dir: CreatedDir, seq: number, command: string): void {
+  assertStopChannel(dir);
+  const finalPath = path.join(dir.path, `cmd-${seq}`);
+  const tmp = `${finalPath}.tmp`;
+  fs.writeFileSync(tmp, `${command}\n`, { mode: 0o600 });
+  fs.renameSync(tmp, finalPath);
+}
+
+function defaultStopSpawn(args: readonly string[]): ChildProcess {
+  return spawn('wsl.exe', [...wslCommandPrefix(), ...args], {
+    windowsHide: true,
+    env: wslSpawnEnv(),
+    stdio: 'ignore',
+  });
+}
+
+export function createDistroStopSession(deps: {
+  root?: string;
+  spawn?: (args: readonly string[]) => ChildProcess;
+} = {}): DistroStopSession {
+  const root = deps.root ?? '/';
+  const launch = deps.spawn ?? defaultStopSpawn;
+  let dir: CreatedDir | null = null;
+  let child: ChildProcess | null = null;
+  let ready = false;
+  let seq = 0;
+  let closed = false;
+  let holding = false;
+
+  function stopChild(): void {
+    if (!child?.pid || helperGone(child.pid)) return;
+    try {
+      child.kill('SIGKILL');
+    } catch (err) {
+      const code = err && typeof err === 'object' && 'code' in err
+        ? String((err as { code?: string }).code)
+        : '';
+      if (code !== 'ESRCH') throw err;
+    }
+  }
+
+  function finish(): void {
+    if (closed) return;
+    holding = true;
+    closed = true;
+    let closeError: unknown = null;
+    if (ready && dir && child?.pid && !helperGone(child.pid)) {
+      try {
+        seq += 1;
+        writeStopCommand(dir, seq, 'close');
+        readStopReply(dir, seq, child.pid, STOP_REPLY_MS);
+      } catch (err) {
+        closeError = err;
+      }
+    }
+    const helperExited = child?.pid != null && helperGone(child.pid);
+    stopChild();
+    if (dir) removeStopChannel(dir);
+    holding = false;
+    if (closeError && !helperExited) throw closeError;
+  }
+
+  return {
+    signal(name) {
+      if (closed || (name !== 'TERM' && name !== 'KILL')) throw new Error(HOME_UNCONFIRMED_MESSAGE);
+      holding = true;
+      try {
+        if (!ready) {
+          dir = createStopChannel();
+          const channel = dir.path;
+          child = launch(distroStopArgs(root, distroVisiblePath(channel)));
+          child.on('error', () => {});
+          child.on('exit', () => {
+            if (holding) return;
+            closed = true;
+            if (dir) removeStopChannel(dir);
+          });
+          child.unref();
+          if (!child.pid) {
+            finish();
+            throw new Error(HOME_UNCONFIRMED_MESSAGE);
+          }
+          const opened = readStopReply(dir, 0, child.pid, STOP_REPLY_MS);
+          if (opened !== 'ready') {
+            finish();
+            throw new Error(HOME_UNCONFIRMED_MESSAGE);
+          }
+          ready = true;
+        }
+        if (!dir || !child?.pid) throw new Error(HOME_UNCONFIRMED_MESSAGE);
+        seq += 1;
+        writeStopCommand(dir, seq, name);
+        const reply = readStopReply(dir, seq, child.pid, STOP_REPLY_MS);
+        if (reply === 'sent' || reply === 'errno ESRCH') return;
+        throw new Error(HOME_UNCONFIRMED_MESSAGE);
+      } finally {
+        if (!closed) holding = false;
+      }
+    },
+    close() { finish(); },
+  };
 }
 
 function plainSpawnError(err: unknown, fallback: string): Error {
@@ -494,6 +1039,8 @@ function runWsl(args: readonly string[], timeoutMs: number, input?: Buffer): Pro
     });
     const stdout: Buffer[] = [];
     const stderr: Buffer[] = [];
+    let stdoutTotal = 0;
+    let stderrTotal = 0;
     const timer = setTimeout(() => {
       child.kill();
       reject(new Error(DISTRO_SETUP_FAILED));
@@ -502,8 +1049,12 @@ function runWsl(args: readonly string[], timeoutMs: number, input?: Buffer): Pro
       clearTimeout(timer);
       reject(plainSpawnError(err, DISTRO_SETUP_FAILED));
     });
-    child.stdout.on('data', (chunk: Buffer) => stdout.push(chunk));
-    child.stderr.on('data', (chunk: Buffer) => stderr.push(chunk));
+    child.stdout.on('data', (chunk: Buffer) => {
+      stdoutTotal = appendCappedOutput(stdout, stdoutTotal, chunk);
+    });
+    child.stderr.on('data', (chunk: Buffer) => {
+      stderrTotal = appendCappedOutput(stderr, stderrTotal, chunk);
+    });
     child.on('exit', (code) => {
       clearTimeout(timer);
       resolve({
@@ -719,63 +1270,47 @@ function runHost(args: readonly string[], timeoutMs: number): Promise<number> {
   });
 }
 
-function signalResolvedDistroPid(name: 'TERM' | 'KILL'): void {
-  const report = readDistroStopReport();
-  const host = (() => {
-    try {
-      return (JSON.parse(report?.lockText ?? '') as { pid?: unknown }).pid;
-    } catch {
-      return null;
-    }
-  })();
-  if (typeof host !== 'number' || !Number.isInteger(host) || host <= 1) return;
-  const pid = resolvedDistroStopPid(report, host);
-  if (!Number.isInteger(pid) || pid <= 1) return;
-  runWslSync(distroStopArgs(name, pid), undefined, 5000);
-  // SIGKILL cannot ask the controller to drain its child. Stop the host group too.
-  if (name === 'KILL' && pid !== host) {
-    runWslSync(distroStopArgs(name, host), undefined, 5000);
-  }
-}
-
-/** Signal the proved controller, or the host lock pid when no controller is proved. Never uses pid 0 or 1. */
 export function signalDistroLock(
   signal: NodeJS.Signals,
-  stopInside: (name: 'TERM' | 'KILL') => void = signalResolvedDistroPid,
+  stopInside: (name: 'TERM' | 'KILL') => void,
 ): void {
-  const name = signal === 'SIGKILL' ? 'KILL' : 'TERM';
-  stopInside(name);
+  stopInside(signal === 'SIGKILL' ? 'KILL' : 'TERM');
 }
 
 export function signalDistroGateway(
   wslPid: number,
   signal: NodeJS.Signals,
   kill: (pid: number, signal: NodeJS.Signals) => void = process.kill,
-  stopInside: (name: 'TERM' | 'KILL') => void = signalResolvedDistroPid,
+  stopInside: (name: 'TERM' | 'KILL') => void = () => { throw new Error(HOME_UNCONFIRMED_MESSAGE); },
 ): void {
+  let stopError: unknown = null;
   try {
     signalDistroLock(signal, stopInside);
-  } catch {
-    // The lock may already be gone.
-  }
-  // SIGTERM lets the controller drain Home. wsl.exe exits when that command exits.
-  // SIGKILL also ends wsl.exe if the distro command is still there.
-  if (signal !== 'SIGKILL') return;
-  if (!Number.isInteger(wslPid) || wslPid <= 0) return;
-  try {
-    kill(wslPid, signal);
   } catch (err) {
-    const code = err && typeof err === 'object' && 'code' in err
-      ? String((err as { code?: string }).code)
-      : '';
-    if (code === 'ESRCH') return;
-    const message = err instanceof Error ? err.message : String(err);
-    throw new Error(`Could not signal ElastOS (${signal}): ${message}`);
+    stopError = err;
+  }
+  if (signal === 'SIGKILL' && Number.isInteger(wslPid) && wslPid > 0) {
+    try {
+      kill(wslPid, signal);
+    } catch (err) {
+      const code = err && typeof err === 'object' && 'code' in err
+        ? String((err as { code?: string }).code)
+        : '';
+      if (code !== 'ESRCH' && !stopError) {
+        const message = err instanceof Error ? err.message : String(err);
+        throw new Error(`Could not signal ElastOS (${signal}): ${message}`);
+      }
+    }
+  }
+  if (stopError) {
+    if (stopError instanceof Error) throw stopError;
+    throw new Error(HOME_UNCONFIRMED_MESSAGE);
   }
 }
 
 export function spawnDistroGatewayProcess(): GatewayProcess {
   const child = spawn('wsl.exe', distroGatewayArgs(), distroHomeSpawnOptions());
+  const session = createDistroStopSession();
   const outputListeners: Array<(chunk: string) => void> = [];
   const exitListeners: Array<(code: number | null) => void> = [];
   let exited = false;
@@ -794,7 +1329,13 @@ export function spawnDistroGatewayProcess(): GatewayProcess {
     onOutput(listener) { outputListeners.push(listener); },
     onExit(listener) { exitListeners.push(listener); },
     hasExited() { return exited; },
-    signal(signal) { signalDistroGateway(child.pid ?? -1, signal); },
+    signal(signal) {
+      try {
+        signalDistroGateway(child.pid ?? -1, signal, process.kill, (name) => session.signal(name));
+      } finally {
+        if (signal === 'SIGKILL') session.close();
+      }
+    },
   };
 }
 
@@ -907,43 +1448,27 @@ export async function distroListenerKind(
 }
 
 /**
- * Adopt the installed distro Home. The host pid is the one the caller proved.
- * A controller is signaled only when this same lock says it is that host's
- * parent. hasExited asks the distro whether those pids are still there and
- * treats an error as still running. A missing pid is not adopted, and pid 0
- * is never signaled.
+ * Adopt the installed distro Home. Stop signals only the confirmed controller.
+ * hasExited asks whether the lock pid is still there and treats an error as
+ * still running. A missing pid is not adopted.
  */
 export function adoptDistroGatewayProcess(deps: {
   readPid?: () => number | null;
   alive?: (pid: number) => boolean | Promise<boolean>;
-  signal?: (pid: number, signal: NodeJS.Signals) => void;
-  runStop?: (args: readonly string[]) => void;
-  report?: () => DistroStopReport | null;
+  stop?: (name: 'TERM' | 'KILL') => void;
 } = {}): GatewayProcess | null {
   const readPid = deps.readPid ?? (() => readDistroLockPid());
   const alive = deps.alive ?? ((pid: number) => distroPidAlive(pid));
-  const signalInside = deps.signal ?? ((pid: number, signal: NodeJS.Signals) => {
-    if (!Number.isInteger(pid) || pid <= 1) return;
-    const name = signal === 'SIGKILL' ? 'KILL' : 'TERM';
-    const run = deps.runStop ?? ((args: readonly string[]) => {
-      runWslSync(args, undefined, 5000);
-    });
-    run(distroStopArgs(name, pid));
+  let session: DistroStopSession | null = null;
+  const stop = deps.stop ?? ((name: 'TERM' | 'KILL') => {
+    if (!session) session = createDistroStopSession();
+    session.signal(name);
   });
   const pid = readPid();
   if (pid == null || pid <= 1) return null;
-  let stopPid = pid;
-  if (deps.report) {
+  const gone = (): boolean | Promise<boolean> => {
     try {
-      stopPid = resolvedDistroStopPid(deps.report(), pid);
-    } catch {
-      stopPid = pid;
-    }
-  }
-  if (!Number.isInteger(stopPid) || stopPid <= 1) stopPid = pid;
-  const gone = (target: number): boolean | Promise<boolean> => {
-    try {
-      const result = alive(target);
+      const result = alive(pid);
       if (result && typeof (result as Promise<boolean>).then === 'function') {
         return (result as Promise<boolean>).then((still) => still === false).catch(() => false);
       }
@@ -957,16 +1482,15 @@ export function adoptDistroGatewayProcess(deps: {
     onOutput() {},
     onExit() {},
     hasExited() {
-      const hostGone = gone(pid);
-      const controllerGone = stopPid === pid ? true : gone(stopPid);
-      if (hostGone instanceof Promise || controllerGone instanceof Promise) {
-        return Promise.all([hostGone, controllerGone]).then((both) => both.every(Boolean));
-      }
-      return hostGone && controllerGone;
+      return gone();
     },
     signal(signal) {
-      signalInside(stopPid, signal);
-      if (signal === 'SIGKILL' && stopPid !== pid) signalInside(pid, signal);
+      const name = signal === 'SIGKILL' ? 'KILL' : 'TERM';
+      try {
+        stop(name);
+      } finally {
+        if (name === 'KILL') session?.close();
+      }
     },
   };
 }
@@ -986,7 +1510,6 @@ export async function adoptInstalledDistroGateway(deps: {
   const identify = deps.identify ?? (() => distroListenerIdentity());
   const adopt = deps.adopt ?? ((pid: number) => adoptDistroGatewayProcess({
     readPid: () => pid,
-    report: () => readDistroStopReport(),
   }));
   let seen: DistroListenerIdentity;
   try {
