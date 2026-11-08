@@ -461,9 +461,9 @@ if type(pid) is int and pid > 1:
     command = read_capped(proc + '/cmdline', RECORD_MAX)
     if command is not None:
         out['command'] = command.replace(bytes([0]), b' ').decode('utf-8', 'replace')
-    tcp = read_capped(under('/proc/net/tcp'), PROC_MAX)
+    tcp = read_capped(proc + '/net/tcp', PROC_MAX)
     out['tcp'] = '' if tcp is None else tcp.decode('utf-8', 'replace')
-    tcp6 = read_capped(under('/proc/net/tcp6'), PROC_MAX)
+    tcp6 = read_capped(proc + '/net/tcp6', PROC_MAX)
     out['tcp6'] = '' if tcp6 is None else tcp6.decode('utf-8', 'replace')
     links = []
     fd_dir = proc + '/fd'
