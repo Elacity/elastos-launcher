@@ -58,7 +58,7 @@ export interface LaunchTarget {
   isInstalled(): Promise<boolean>;
   getStatus(): Promise<TargetStatus>;
   start(): Promise<void>;
-  /** Stop a gateway this window started. Does not adopt one it did not start. */
+  /** Stop this window's gateway; on macOS, also adopt a proved installed Home. */
   stop(): Promise<void>;
   /** Reset and Uninstall, after the confirm dialog, may adopt the installed gateway. */
   stopForRemoval(): Promise<void>;
@@ -66,8 +66,7 @@ export interface LaunchTarget {
   restart(): Promise<void>;
   install(onProgress: (message: string) => void): Promise<void>;
   update(onProgress: (message: string) => void): Promise<void>;
-  /** Stop Home, restore the previous release, and start it again on Windows. */
-  rollback(onProgress: (message: string) => void): Promise<void>;
+  rollback(onProgress?: (message: string) => void): Promise<void>;
   uninstall(): Promise<void>;
   getVersion(): string;
   checkForUpdate(): Promise<UpdateCheck>;

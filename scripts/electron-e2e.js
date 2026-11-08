@@ -149,6 +149,14 @@ async function main() {
       const label = (await page.locator('#open-label').innerText({ timeout: 5000 })).trim();
       const disabled = await page.locator('#open-btn').isDisabled();
       if (label === 'Install' && !disabled) {
+        // firstWindow can precede startup navigation. Instrument only after
+        // the real Install screen is ready, before its first control action.
+        if (process.platform === 'darwin') {
+          await electronApp.evaluate(({ shell }) => {
+            global.__installBrowserCalls = [];
+            shell.openExternal = async (url) => { global.__installBrowserCalls.push(url); };
+          });
+        }
         await page.click('#open-btn');
         clicked = label;
         break;
@@ -215,6 +223,10 @@ async function main() {
         }
         console.log('Install reached Open my computer');
         if (process.platform === 'darwin') {
+          if ((await electronApp.evaluate(() => global.__installBrowserCalls)).length !== 0) {
+            throw new Error('Mac Install opened a duplicate browser tab after home --browser');
+          }
+          console.log('PASS Mac Install leaves the browser open to home --browser without a duplicate launcher call');
           electronApp = await require('./mac-lifecycle-e2e')(electronApp, page, home, {
             executablePath: electronPath, cwd: root, args, env, timeout: 120000,
           });

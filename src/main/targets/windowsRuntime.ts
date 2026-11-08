@@ -429,10 +429,6 @@ export function readDistroUpdateStatus(): string {
   return readDistroFile(runtimeUpdateCheckPath(runtimeDataDir('linux', DISTRO_HOME, {})));
 }
 
-export function writeDistroUpdateStatus(raw: string): void {
-  writeDistroFile(runtimeUpdateCheckPath(runtimeDataDir('linux', DISTRO_HOME, {})), raw);
-}
-
 export function distroPackageArgs(): readonly string[] {
   return ['bash', '-lc', 'printf "nameserver 8.8.8.8\\n" > /etc/resolv.conf; apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y python3 curl ca-certificates'];
 }
@@ -783,6 +779,7 @@ export function spawnDistroGatewayProcess(): GatewayProcess {
 export function createDistroGatewaySupervisor() {
   return createGatewaySupervisor({
     binary: '/root/.local/bin/elastos',
+    args: ['home', '--browser'],
     spawn: () => spawnDistroGatewayProcess(),
     // Windows forwards localhost to the distro. Probe each address Windows
     // resolves localhost to, the same way the Windows browser can connect.

@@ -39,6 +39,26 @@ test('reset removes the runtime program, data, and unfinished install', async ()
   assert.deepEqual(removed, calls.slice(1));
 });
 
+test('Mac Reset backs up and removes Runtime Home while preserving the Electron profile and PC2', async () => {
+  const home = path.join(fs.realpathSync(os.tmpdir()), 'launcher-mac-reset-fixture');
+  const data = path.join(home, 'Library', 'Application Support', 'elastos');
+  const stage = path.join(home, '.elastos-launcher', 'install-stage.json');
+  const binary = path.join(home, '.local', 'bin', 'elastos');
+  const calls = [];
+  await resetRuntime({
+    homeDir: home, platform: 'darwin', env: {}, binary, dataDir: data, stageFile: stage,
+    backup: true,
+    stop: async () => { calls.push(['stop']); },
+    saveBackup: async (target) => { calls.push(['backup', target]); return '/scratch/backup.zip'; },
+    remove: (target) => { calls.push(['remove', target]); },
+  });
+  assert.deepEqual(calls, [
+    ['stop'], ['backup', data], ['remove', binary], ['remove', data], ['remove', stage],
+    ['remove', path.join(home, '.elastos-launcher', 'resume-install.json')],
+    ['remove', path.join(home, '.elastos-launcher', 'resume-install.json.lock')],
+  ]);
+});
+
 test('a dotted account name is still a launcher path', async () => {
   assert.equal(launcherOwnedDirectories('/Users/jane.doe/.local/bin/elastos', '/Users/jane.doe', 'darwin', {}), true);
   assert.equal(launcherOwnedDirectories('/home/jane.doe/.local/share/elastos', '/home/jane.doe', 'linux', {}), true);

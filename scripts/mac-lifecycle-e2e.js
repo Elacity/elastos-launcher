@@ -26,15 +26,27 @@ async function waitFor(check, timeoutMs, message) {
 }
 
 async function status(page, wanted) {
-  // Poll from Node. Playwright's waitForFunction compiles a predicate inside
-  // the page, where the launcher's strict CSP correctly refuses unsafe-eval.
-  await waitFor(async () => await page.evaluate(() => window.elastos.getStatus()) === wanted,
-    180000, `Launcher status did not become ${wanted}`);
-  await waitFor(async () => (await page.locator('#status-text').innerText()).toLowerCase() === wanted,
-    10000, `Window status did not become ${wanted}`);
+  let last = '';
+  try {
+    await waitFor(async () => {
+      last = await page.evaluate(() => window.elastos.getStatus());
+      return last === wanted;
+    }, 180000, `Launcher status did not become ${wanted}`);
+    const label = wanted === 'error' ? 'needs attention' : wanted;
+    await waitFor(async () => (await page.locator('#status-text').innerText()).toLowerCase() === label,
+      10000, `Window status did not become ${wanted}`);
+  } catch (error) {
+    console.log(`Status failure wanted=${wanted} last=${last} window=${await page.locator('#status-text').innerText()} error=${await page.locator('#error-text').innerText()}`);
+    const logs = await page.locator('#logs-content').innerText();
+    for (const match of logs.matchAll(/Home ownership check: (host-lock|native-host|host-proof|host-changed|controller-status|controller-metadata)\b/g)) {
+      console.log(match[0]);
+    }
+    throw error;
+  }
 }
 
 module.exports = async function (app, page, home, options) {
+  assert.equal((await page.locator('#logs-content').innerText()).includes('Keep this terminal open'), false);
   await app.evaluate(({ shell }) => {
     global.__openedHome = [];
     shell.openExternal = async (url) => { global.__openedHome.push(url); };
@@ -50,7 +62,14 @@ module.exports = async function (app, page, home, options) {
   assert.equal(await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].isVisible()), false);
   await health(true);
   console.log('PASS closing the window keeps Home running');
-  await app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].show());
+  await app.evaluate(({ app, BrowserWindow }) => {
+    app.focus({ steal: true });
+    const window = BrowserWindow.getAllWindows()[0];
+    window.show();
+    window.focus();
+  });
+  await waitFor(() => app.evaluate(({ BrowserWindow }) => BrowserWindow.getAllWindows()[0].isFocused()),
+    10000, 'The launcher window did not regain focus');
 
   await page.click('#power-btn');
   await status(page, 'stopped');
@@ -61,12 +80,28 @@ module.exports = async function (app, page, home, options) {
   await health(true);
   console.log('PASS Start Home becomes healthy');
 
+  const data = path.join(home, 'Library', 'Application Support', 'elastos');
+  const controllerStatus = path.join(data, 'update-controller', 'status.json');
+  // This controller was started by this test's launcher on the disposable runner.
+  const startedController = JSON.parse(fs.readFileSync(controllerStatus, 'utf8')).controller_pid;
+  process.kill(startedController, 'SIGKILL');
+  await status(page, 'error');
+  console.log(`Home retained after controller crash: ${isHealthOk(await probeGatewayHealth())}`);
+  await page.evaluate(() => window.elastos.stop());
+  await health(false);
+  await status(page, 'stopped');
+  await page.click('#open-btn');
+  await status(page, 'running');
+  await health(true);
+  console.log('PASS controller crash reports Error; Stop and explicit Start recover a healthy Home');
+
   const checked = await page.evaluate(() => window.elastos.checkForUpdate());
   assert.equal(checked.updateAvailable, false);
-  const data = path.join(home, 'Library', 'Application Support', 'elastos');
-  const update = JSON.parse(fs.readFileSync(path.join(data, 'update-check.json'), 'utf8'));
+  const nativeUpdate = path.join(data, 'update-check.json');
+  const update = JSON.parse(fs.readFileSync(fs.existsSync(nativeUpdate) ? nativeUpdate
+    : path.join(home, '.elastos-launcher', 'update-check.json'), 'utf8'));
   assert.equal(update.outcome, 'up_to_date');
-  console.log('PASS elastos update --check writes up_to_date');
+  console.log('PASS update check reads the Runtime record or launcher-owned signed fallback');
   // Stable has no newer signed release. Expose the existing button to exercise
   // its real handler and terminal command against the current signed release.
   await page.evaluate(() => document.querySelector('#update-btn').classList.remove('hidden'));
@@ -83,6 +118,12 @@ module.exports = async function (app, page, home, options) {
   await status(page, 'stopped');
   await health(false);
   await app.close();
+  // curl-installed 2.0.0 can have an empty source head CID. Its signed install
+  // record still proves the installation and supplies the rollback identity.
+  const sourcePath = path.join(data, 'sources.json');
+  const sources = JSON.parse(fs.readFileSync(sourcePath, 'utf8'));
+  sources.sources.find((source) => source.name === sources.default_source).head_cid = '';
+  fs.writeFileSync(sourcePath, JSON.stringify(sources));
   const binary = path.join(home, '.local', 'bin', 'elastos');
   const external = spawn(binary, ['home', '--browser'], { detached: true, stdio: 'ignore', env: runtimeChildEnv(options.env) });
   console.log(`Started independent Home pid ${external.pid}`);
@@ -95,6 +136,22 @@ module.exports = async function (app, page, home, options) {
     await status(window, 'running');
     assert.equal(await window.locator('#open-label').innerText(), 'Open my computer');
     console.log('PASS a fresh launcher adopts an already running Home without reinstalling');
+    await window.evaluate(() => window.elastos.start());
+    const adoptedController = JSON.parse(fs.readFileSync(controllerStatus, 'utf8')).controller_pid;
+    process.kill(adoptedController, 'SIGTERM');
+    await health(false);
+    await status(window, 'stopped');
+    await window.click('#open-btn');
+    await status(window, 'running');
+    await health(true);
+    console.log('PASS adopted controller exit reports Stopped and explicit Start starts Home again');
+    await window.evaluate(() => window.elastos.install());
+    assert.equal((await window.locator('#logs-content').innerText()).includes('Downloading ElastOS'), false);
+    console.log('PASS Install adopts a proved 2.0.0 installation with an empty source head CID');
+    await window.evaluate(() => window.elastos.update());
+    await status(window, 'running');
+    await health(true);
+    console.log('PASS Update uses the signed installed record when source head CID is unknown and restarts Home');
     await window.click('#power-btn');
     await status(window, 'stopped');
     await health(false);
@@ -109,8 +166,9 @@ module.exports = async function (app, page, home, options) {
     await new Promise((resolve, reject) => { foreign.once('error', reject); foreign.listen(8090, '127.0.0.1', resolve); });
     adopted = await electron.launch(options);
     const conflict = await adopted.firstWindow();
-    await waitFor(async () => (await conflict.locator('#error-text').innerText()).includes('port 8090'),
-      30000, 'A foreign listener did not get a clear port 8090 message');
+    await waitFor(async () => /port 8090/i.test(await conflict.locator('#error-title').innerText())
+      && /another program/i.test(await conflict.locator('#error-text').innerText()),
+    30000, 'A foreign listener did not get a clear port 8090 message');
     assert.equal(foreign.listening, true);
     console.log('PASS a foreign OK listener gets a clear port 8090 message and is left running');
     await adopted.close();

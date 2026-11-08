@@ -121,6 +121,7 @@ export interface LaunchInfo {
   openUrl: string;
   status: TargetStatus;
   platformNote: string | null;
+  error: string | null;
   /** Shown in the info panel. Windows only: its Browser is not available yet. */
   browserNote: string | null;
   /** Windows: Uninstall saves the whole Linux environment as one file, then removes it. */
@@ -259,7 +260,7 @@ export function createLaunchController(options: LaunchControllerOptions = {}): L
     describeResetBackup: () => (process.platform === 'win32'
       ? describeDistroBackupOnThisComputer()
       : describeRuntimeBackupOnThisComputer()),
-    rollback: (onProgress) => runRuntime(() => active.rollback(onProgress ?? (() => {}))),
+    rollback: (onProgress) => runRuntime(() => active.rollback(onProgress)),
     getVersion: () => runRuntimeSync(() => active.getVersion()),
     checkForUpdate: () => runRuntime(() => active.checkForUpdate()),
     openInBrowser: () => {
@@ -284,6 +285,7 @@ export function createLaunchController(options: LaunchControllerOptions = {}): L
         displayName: active.descriptor.displayName,
         openUrl: active.descriptor.openUrl,
         status,
+        error: status === 'error' ? lastError : null,
         platformNote: platform?.message ?? null,
         browserNote: browserNote(process.platform),
         runtimeOpensBrowser: process.platform === 'darwin' || process.platform === 'win32',

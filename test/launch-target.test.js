@@ -180,8 +180,6 @@ test('quit waits for the gateway this launcher started and leaves one it did not
   const targetSrc = fs.readFileSync(path.join(__dirname, '../src/main/targets/runtimeTarget.ts'), 'utf8');
   assert.match(controllerSrc, /resetRuntimeOnThisComputer\(\(\) => active\.stopForRemoval\(\), choice \?\? \{\}\)/);
   assert.match(controllerSrc, /await active\.stop\(\)/);
-  assert.match(targetSrc, /stop: \(\) => stopGateway\(false\)/);
-  assert.match(targetSrc, /stopForRemoval: \(\) => stopGateway\(true\)/);
   assert.match(targetSrc, /await stopGateway\(false\)/);
   assert.match(targetSrc, /runtimeUninstall\(\(\) => stopGateway\(true\)\)/);
   assert.equal(main.includes('./targets'), false);
@@ -234,4 +232,15 @@ test('install logs a missing runtime and does not spawn another product', async 
   assert.equal(main.includes('elastos:start'), true);
   assert.equal(preload.includes("exposeInMainWorld('elastos'"), true);
   assert.equal(preload.includes('elastos:install'), true);
+});
+
+test('launch info preserves a specific foreign-port error for the window', async (t) => {
+  const preflight = require('../dist/main/targets/preflight');
+  t.mock.method(preflight, 'collectPreflight', async () => ({ ok: true, checks: [] }));
+  const { createLaunchController } = require('../dist/main/launchController');
+  const controller = createLaunchController({ env: {} });
+  controller.target.getStatus = async () => { throw new Error('Another program is answering on port 8090. Home was not adopted.'); };
+  const info = await controller.getLaunchInfo();
+  assert.equal(info.status, 'error');
+  assert.match(info.error, /Another program.*port 8090/);
 });

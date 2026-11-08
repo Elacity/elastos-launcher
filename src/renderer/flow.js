@@ -155,6 +155,11 @@ function urlLabel(openUrl) {
   return String(openUrl || '').replace(/^https?:\/\//, '').replace(/\/$/, '');
 }
 
+function launcherLog(message) {
+  return String(message || '').split(/\r?\n/)
+    .filter((line) => !line.includes('Keep this terminal open')).join('\n');
+}
+
 const api = {
   INSTALL_STEPS,
   stepIndexForMessage,
@@ -169,6 +174,7 @@ const api = {
   browserNoteText,
   shouldOpenBrowserAfterStart,
   urlLabel,
+  launcherLog,
 };
 
 if (typeof module !== 'undefined' && module.exports) {
