@@ -166,7 +166,7 @@ export function foreignListenerIsElastos(input: Parameters<typeof installedGatew
 export interface GatewaySupervisorDeps {
   binary: string;
   args?: readonly string[];
-  /** Mac Home adopts only the installed process proved by its host lock and sockets. */
+  /** Mac and Linux adopt the installed Home proved by its host lock and controller status. */
   adoptForControls?: boolean;
   spawn: (binary: string, args: readonly string[]) => GatewayProcess;
   fetchHealth: () => Promise<HealthResult | null>;
@@ -295,31 +295,9 @@ export function procStatParent(stat: string): { pid: number; ppid: number } | nu
   return { pid, ppid };
 }
 
-/** `root` and every process that descends from it. A cycle is visited once. */
-export function descendantPids(root: number, rows: readonly { pid: number; ppid: number }[]): number[] {
-  const children = new Map<number, number[]>();
-  for (const row of rows) {
-    const list = children.get(row.ppid);
-    if (list) list.push(row.pid);
-    else children.set(row.ppid, [row.pid]);
-  }
-  const out: number[] = [];
-  const seen = new Set<number>();
-  const stack = [root];
-  while (stack.length > 0) {
-    const pid = stack.pop() as number;
-    if (seen.has(pid)) continue;
-    seen.add(pid);
-    out.push(pid);
-    const kids = children.get(pid);
-    if (kids) for (const kid of kids) stack.push(kid);
-  }
-  return out;
-}
-
 /**
- * The Home controller does not hold the listen socket. Its child does.
- * A socket of a process outside that tree stays foreign.
+ * Sockets on `port` held by `root` itself.
+ * Home names the gateway pid in the controller status. A descendant is not that pid.
  */
 export function listenersFromProcSnapshot(
   tcp: string,
@@ -328,13 +306,147 @@ export function listenersFromProcSnapshot(
   rows: readonly ProcProcess[],
   port = GATEWAY_PORT,
 ): PortListener[] {
-  const tree = new Set(descendantPids(root, rows));
-  const links: string[] = [];
-  for (const row of rows) {
-    if (!tree.has(row.pid)) continue;
-    for (const link of row.fdLinks) links.push(link);
+  const own = rows.find((row) => row.pid === root);
+  return procListenersFor(tcp, tcp6, own ? own.fdLinks : [], port);
+}
+
+/** Field 22 of `/proc/<pid>/stat`, the starttime tick. `comm` may contain spaces. */
+export function linuxStatStartTicks(stat: string): string | null {
+  const end = stat.lastIndexOf(')');
+  if (end < 0) return null;
+  const ticks = stat.slice(end + 1).trim().split(/\s+/)[19];
+  if (!ticks || !/^[0-9]+$/.test(ticks)) return null;
+  return ticks;
+}
+
+/**
+ * The same birth string Runtime 2.0.0 stores in `controller_start`
+ * (`update_controller/child.rs` `process_identity`).
+ */
+export function linuxProcessIdentity(stat: string | null, bootId: string | null): string | null {
+  if (!stat) return null;
+  const ticks = linuxStatStartTicks(stat);
+  if (!ticks) return null;
+  const boot = (bootId ?? '').trim();
+  if (!boot) return `linux:${ticks}`;
+  if (/[\r\n]/.test(boot)) return null;
+  return `linux:${boot}:${ticks}`;
+}
+
+export interface LinuxHomeStatus {
+  controllerPid: number;
+  controllerStart: string;
+  hostPid: number;
+  generation: string;
+}
+
+export interface HostLockRecord {
+  pid: number;
+  role: string;
+  addr: string;
+  generation: string;
+}
+
+function positivePid(value: unknown): number | null {
+  return typeof value === 'number' && Number.isInteger(value) && value > 0 ? value : null;
+}
+
+/** `update-controller/status.json` from Runtime 2.0.0. A missing field is not a Home. */
+export function parseLinuxHomeStatus(text: string | null): LinuxHomeStatus | null {
+  if (!text || text.length > 16 * 1024) return null;
+  let parsed: {
+    controller_pid?: unknown;
+    controller_start?: unknown;
+    host_pid?: unknown;
+    generation?: unknown;
+  };
+  try {
+    parsed = JSON.parse(text) as typeof parsed;
+  } catch {
+    return null;
   }
-  return procListenersFor(tcp, tcp6, links, port);
+  const controllerPid = positivePid(parsed.controller_pid);
+  const hostPid = positivePid(parsed.host_pid);
+  const controllerStart = typeof parsed.controller_start === 'string' ? parsed.controller_start : '';
+  const generation = typeof parsed.generation === 'string' ? parsed.generation : '';
+  if (!controllerPid || !hostPid || !controllerStart || !generation) return null;
+  if (controllerStart.length > 200 || generation.length > 128) return null;
+  if (/[\r\n]/.test(controllerStart) || /[\r\n]/.test(generation)) return null;
+  return { controllerPid, controllerStart, hostPid, generation };
+}
+
+/** `host-process.lock`. `generation` may be empty for a gateway this controller did not start. */
+export function parseHostLockRecord(text: string | null): HostLockRecord | null {
+  if (!text || text.length > 16 * 1024) return null;
+  let parsed: { pid?: unknown; role?: unknown; addr?: unknown; generation?: unknown };
+  try {
+    parsed = JSON.parse(text) as typeof parsed;
+  } catch {
+    return null;
+  }
+  const pid = positivePid(parsed.pid);
+  if (!pid || typeof parsed.role !== 'string' || typeof parsed.addr !== 'string') return null;
+  const generation = typeof parsed.generation === 'string' ? parsed.generation : '';
+  if (generation.length > 128 || /[\r\n]/.test(generation)) return null;
+  return { pid, role: parsed.role, addr: parsed.addr, generation };
+}
+
+/** The controller Runtime 2.0.0 recorded, proved against the host lock and `/proc`. */
+export interface ProvedLinuxHome {
+  controllerPid: number;
+  controllerStart: string;
+  hostPid: number;
+  hostStart: string;
+  generation: string;
+}
+
+/**
+ * Fail closed. The host lock must name this gateway on `localhost:8090`.
+ * The status file must name that same pid, generation, and controller birth.
+ * The host birth must be the same value on both sides of the descriptor read.
+ */
+export function proveLinuxHome(input: {
+  statusText: string | null;
+  lockText: string | null;
+  bootId: string | null;
+  controllerStat: string | null;
+  hostStatBefore: string | null;
+  hostFdLinks: readonly string[] | null;
+  hostStatAfter: string | null;
+  tcp: string;
+  tcp6: string;
+  answered?: readonly string[];
+}): ProvedLinuxHome | null {
+  const status = parseLinuxHomeStatus(input.statusText);
+  const lock = parseHostLockRecord(input.lockText);
+  if (!status || !lock) return null;
+  if (lock.role !== 'gateway' || lock.addr !== GATEWAY_ADDR) return null;
+  if (lock.pid !== status.hostPid || lock.generation !== status.generation) return null;
+  const controllerNow = linuxProcessIdentity(input.controllerStat, input.bootId);
+  const controllerParsed = input.controllerStat ? procStatParent(input.controllerStat) : null;
+  if (controllerNow !== status.controllerStart || !controllerParsed || controllerParsed.pid !== status.controllerPid) {
+    return null;
+  }
+  const before = linuxProcessIdentity(input.hostStatBefore, input.bootId);
+  const after = linuxProcessIdentity(input.hostStatAfter, input.bootId);
+  const hostParsed = input.hostStatBefore ? procStatParent(input.hostStatBefore) : null;
+  if (!before || before !== after || !hostParsed || hostParsed.pid !== status.hostPid) return null;
+  if (!input.hostFdLinks) return null;
+  const listeners = procListenersFor(input.tcp, input.tcp6, input.hostFdLinks);
+  if (listenerOwnership(listeners, LOOPBACK_ADDRESSES, input.answered ?? []) !== 'owned') return null;
+  return {
+    controllerPid: status.controllerPid,
+    controllerStart: status.controllerStart,
+    hostPid: status.hostPid,
+    hostStart: before,
+    generation: status.generation,
+  };
+}
+
+/** The pid to signal, or null when its birth no longer matches the proof. */
+export function linuxControllerSignalPid(proved: ProvedLinuxHome, identityNow: string | null): number | null {
+  if (!identityNow || identityNow !== proved.controllerStart) return null;
+  return proved.controllerPid;
 }
 
 /**
@@ -783,7 +895,8 @@ export async function probeGatewayHealth(options: {
 }
 
 const PROC_STAT_MAX = 4096;
-const PROC_TREE_MAX = 64;
+const PROC_TEXT_MAX = 8 * 1024 * 1024;
+const HOME_RECORD_MAX = 16 * 1024;
 
 function fdLinks(pid: number): string[] | null {
   const links: string[] = [];
@@ -803,58 +916,106 @@ function fdLinks(pid: number): string[] | null {
   return links;
 }
 
-/** Listeners held by `pid` or its descendants. Null when the tree cannot be read. */
-function linuxProcessListeners(pid: number): PortListener[] | null {
-  let tcp: string;
+/** `undefined` when the path is absent. `null` when the bytes are not a bounded file. */
+function readProcOptional(file: string, max: number): string | null | undefined {
+  let fd: number | null = null;
   try {
-    tcp = fs.readFileSync('/proc/net/tcp', 'utf8');
-  } catch {
+    fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+    const chunks: Buffer[] = [];
+    let total = 0;
+    const buf = Buffer.alloc(64 * 1024);
+    for (;;) {
+      const n = fs.readSync(fd, buf, 0, buf.length, null);
+      if (n <= 0) break;
+      total += n;
+      if (total > max) return null;
+      chunks.push(Buffer.from(buf.subarray(0, n)));
+    }
+    return Buffer.concat(chunks).toString('utf8');
+  } catch (err) {
+    const code = err && typeof err === 'object' && 'code' in err ? String((err as { code?: string }).code) : '';
+    if (code === 'ENOENT') return undefined;
     return null;
-  }
-  let tcp6 = '';
-  try {
-    tcp6 = fs.readFileSync('/proc/net/tcp6', 'utf8');
-  } catch {
-    // No IPv6 on this kernel. Nothing can listen on ::1.
-    tcp6 = '';
-  }
-  let names: string[];
-  try {
-    names = fs.readdirSync('/proc');
-  } catch {
-    return null;
-  }
-  const parents: { pid: number; ppid: number }[] = [];
-  for (const name of names) {
-    if (!/^[1-9][0-9]*$/.test(name)) continue;
-    try {
-      const buf = fs.readFileSync(`/proc/${name}/stat`);
-      if (buf.length > PROC_STAT_MAX) continue;
-      const parsed = procStatParent(buf.toString('utf8'));
-      if (parsed && parsed.pid === Number(name)) parents.push(parsed);
-    } catch {
-      // The process can exit between readdir and the stat read.
+  } finally {
+    if (fd !== null) {
+      try { fs.closeSync(fd); } catch { /* already closed */ }
     }
   }
-  if (!parents.some((row) => row.pid === pid)) return null;
-  let tree = descendantPids(pid, parents);
-  if (tree.length > PROC_TREE_MAX) {
-    tree = [pid, ...parents.filter((row) => row.ppid === pid).map((row) => row.pid)];
-  }
-  if (tree.length > PROC_TREE_MAX) return null;
-  const rootLinks = fdLinks(pid);
-  if (!rootLinks) return null;
-  const rows: ProcProcess[] = [{ pid, ppid: parents.find((row) => row.pid === pid)?.ppid ?? 0, fdLinks: rootLinks }];
-  for (const id of tree) {
-    if (id === pid) continue;
-    const links = fdLinks(id);
-    if (!links) return null;
-    rows.push({ pid: id, ppid: parents.find((row) => row.pid === id)?.ppid ?? 0, fdLinks: links });
-  }
-  return listenersFromProcSnapshot(tcp, tcp6, pid, rows);
 }
 
-/** LISTEN sockets on the gateway port, marked by whether `pid` or a descendant holds each. Null when they cannot be read. */
+function readRegularText(file: string, max: number): string | null {
+  let fd: number | null = null;
+  try {
+    fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+    const info = fs.fstatSync(fd);
+    if (!info.isFile() || info.size > max) return null;
+    const buf = Buffer.alloc(info.size);
+    let offset = 0;
+    while (offset < info.size) {
+      const n = fs.readSync(fd, buf, offset, info.size - offset, offset);
+      if (n <= 0) return null;
+      offset += n;
+    }
+    return buf.toString('utf8');
+  } catch {
+    return null;
+  } finally {
+    if (fd !== null) {
+      try { fs.closeSync(fd); } catch { /* already closed */ }
+    }
+  }
+}
+
+/** Listeners held by `pid` itself. Null when `/proc` cannot prove that. */
+function linuxProcessListeners(pid: number): PortListener[] | null {
+  const tcp = readProcOptional('/proc/net/tcp', PROC_TEXT_MAX);
+  if (!tcp) return null;
+  const tcp6 = readProcOptional('/proc/net/tcp6', PROC_TEXT_MAX);
+  if (tcp6 === null) return null;
+  const links = fdLinks(pid);
+  if (!links) return null;
+  return procListenersFor(tcp, tcp6 ?? '', links);
+}
+
+function readProvedLinuxHome(answered: readonly string[] = []): ProvedLinuxHome | null {
+  const data = runtimeDataDir('linux', os.homedir(), process.env);
+  const statusText = readRegularText(`${data}/update-controller/status.json`, HOME_RECORD_MAX);
+  const lockText = readRegularText(runtimeHostLockPath(data), HOME_RECORD_MAX);
+  const bootId = readProcOptional('/proc/sys/kernel/random/boot_id', 128);
+  if (bootId === null) return null;
+  const status = parseLinuxHomeStatus(statusText);
+  if (!status) return null;
+  const hostStatBefore = readProcOptional(`/proc/${status.hostPid}/stat`, PROC_STAT_MAX);
+  const hostFdLinks = fdLinks(status.hostPid);
+  const hostStatAfter = readProcOptional(`/proc/${status.hostPid}/stat`, PROC_STAT_MAX);
+  const controllerStat = readProcOptional(`/proc/${status.controllerPid}/stat`, PROC_STAT_MAX);
+  const tcp = readProcOptional('/proc/net/tcp', PROC_TEXT_MAX);
+  const tcp6 = readProcOptional('/proc/net/tcp6', PROC_TEXT_MAX);
+  if (!controllerStat || !hostStatBefore || !hostStatAfter || !tcp || tcp6 === null) return null;
+  return proveLinuxHome({
+    statusText,
+    lockText,
+    bootId: bootId ?? null,
+    controllerStat,
+    hostStatBefore,
+    hostFdLinks,
+    hostStatAfter,
+    tcp,
+    tcp6: tcp6 ?? '',
+    answered,
+  });
+}
+
+function linuxControllerOwnsListeners(controllerPid: number, health: HealthResult): boolean {
+  const proved = readProvedLinuxHome(health.addresses ?? []);
+  if (!proved || proved.controllerPid !== controllerPid) return false;
+  const bootId = readProcOptional('/proc/sys/kernel/random/boot_id', 128);
+  const stat = readProcOptional(`/proc/${proved.controllerPid}/stat`, PROC_STAT_MAX);
+  if (bootId === null || !stat) return false;
+  return linuxControllerSignalPid(proved, linuxProcessIdentity(stat, bootId ?? null)) === proved.controllerPid;
+}
+
+/** LISTEN sockets on the gateway port, marked by whether `pid` itself holds each. Null when they cannot be read. */
 export async function localListeners(pid: number, platform: string = process.platform): Promise<PortListener[] | null> {
   if (!Number.isInteger(pid) || pid <= 0) return null;
   if (platform === 'linux') return linuxProcessListeners(pid);
@@ -889,13 +1050,18 @@ export async function pidOwnsGatewayPort(
   return listenerOwnership(listeners, wants, answered) === 'owned';
 }
 
+/** Linux and Mac Stop and Quit take the installed Home. Windows does not. */
+export function platformAdoptsInstalledHome(platform: string): boolean {
+  return platform === 'darwin' || platform === 'linux';
+}
+
 export function createDefaultGatewaySupervisor(binary: string, platform: string = process.platform): GatewaySupervisor {
   const launch = homeLaunchForPlatform(platform);
   return createGatewaySupervisor({
     binary,
     args: launch.args,
     hideTerminalKeepLine: launch.hideTerminalKeepLine,
-    adoptForControls: platform === 'darwin',
+    adoptForControls: platformAdoptsInstalledHome(platform),
     healthTimeoutMs: platform === 'darwin' ? 150000 : 60000,
     spawn: spawnGatewayProcess,
     fetchHealth: () => probeGatewayHealth(),
@@ -907,7 +1073,9 @@ export function createDefaultGatewaySupervisor(binary: string, platform: string 
     foreignIsLegacy: async () => (await installedGatewayOnThisComputer()) === 'legacy',
     listenerOwned: (pid, health) => platform === 'darwin'
       ? confirmInstalledGateway()
-      : pidOwnsGatewayPort(pid, LOOPBACK_ADDRESSES, health.addresses ?? []),
+      : platform === 'linux'
+        ? linuxControllerOwnsListeners(pid, health)
+        : pidOwnsGatewayPort(pid, LOOPBACK_ADDRESSES, health.addresses ?? []),
     adoptInstalled: adoptInstalledGatewayProcess,
   });
 }
@@ -987,8 +1155,57 @@ export function localPidHasExited(
  * window did not spawn. A `127.0.0.1:8090` gateway from an earlier launcher is
  * adopted too, so Start, Reset, and Uninstall can stop it.
  */
+function signalErrorCode(err: unknown): string {
+  return err && typeof err === 'object' && 'code' in err ? String((err as { code?: string }).code) : '';
+}
+
+/** Linux Home. Signal the proved controller, or the legacy gateway's own pid. */
+async function adoptLinuxGatewayProcess(): Promise<GatewayProcess | null> {
+  const data = runtimeDataDir('linux', os.homedir(), process.env);
+  const lockText = readRegularText(runtimeHostLockPath(data), HOME_RECORD_MAX);
+  const lock = parseHostLockRecord(lockText);
+  if (!lock) return null;
+  if (lock.addr === LEGACY_GATEWAY_ADDR) {
+    if (!(await hostLockGatewayKind(lockText, lock.pid))) return null;
+    const pid = lock.pid;
+    return {
+      pid,
+      onOutput() {},
+      onExit() {},
+      hasExited() { return localPidHasExited(pid); },
+      signal(signal) { signalProcessGroup(pid, signal); },
+    };
+  }
+  if (lock.addr !== GATEWAY_ADDR || lock.role !== 'gateway') return null;
+  const proved = readProvedLinuxHome();
+  if (!proved) return null;
+  return {
+    pid: proved.hostPid,
+    onOutput() {},
+    onExit() {},
+    hasExited() {
+      return localPidHasExited(proved.hostPid) && localPidHasExited(proved.controllerPid);
+    },
+    signal(signal) {
+      const bootId = readProcOptional('/proc/sys/kernel/random/boot_id', 128);
+      const stat = readProcOptional(`/proc/${proved.controllerPid}/stat`, PROC_STAT_MAX);
+      if (bootId === null || !stat) return;
+      const target = linuxControllerSignalPid(proved, linuxProcessIdentity(stat, bootId ?? null));
+      if (!target) return;
+      try {
+        process.kill(target, signal);
+      } catch (err) {
+        if (signalErrorCode(err) === 'ESRCH') return;
+        const message = err instanceof Error ? err.message : String(err);
+        throw new Error(`Could not signal ElastOS (${signal}): ${message}`);
+      }
+    },
+  };
+}
+
 export async function adoptInstalledGatewayProcess(): Promise<GatewayProcess | null> {
   if (process.platform === 'win32') return null;
+  if (process.platform === 'linux') return adoptLinuxGatewayProcess();
   const { text, pid } = readHostLock();
   if (pid <= 0 || !(await hostLockGatewayKind(text, pid))) return null;
   let stopPid = pid;

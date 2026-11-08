@@ -13,7 +13,7 @@ const {
   publisherHost,
   publisherOffline,
 } = require('../dist/main/targets/preflight');
-const { linuxAutostartFile, syncLinuxAutostart } = require('../dist/main/targets/openAtLogin');
+const { linuxAutostartFile, linuxAutostartExecPath, syncLinuxAutostart } = require('../dist/main/targets/openAtLogin');
 const flow = require('../src/renderer/flow.js');
 
 test('launcher logs omit terminal-only advice and retain replacement diagnostics', () => {
@@ -110,6 +110,13 @@ test('sign-in launch writes a desktop file and can remove it', () => {
   assert.match(files.get(written), /Name=ElastOS/);
   assert.match(files.get(written), /X-GNOME-Autostart-enabled=true/);
   assert.match(linuxAutostartFile('/usr/bin/elastos'), /Exec=\/usr\/bin\/elastos/);
+  assert.equal(
+    linuxAutostartExecPath({ APPIMAGE: '/home/me/ElastOS.AppImage' }, '/tmp/.mount_abc/elastos'),
+    '/home/me/ElastOS.AppImage',
+  );
+  assert.equal(linuxAutostartExecPath({ APPIMAGE: '  ' }, '/usr/bin/elastos'), '/usr/bin/elastos');
+  assert.match(linuxAutostartFile('/home/me/ElastOS App.AppImage'), /Exec="\/home\/me\/ElastOS App\.AppImage"/);
+  assert.match(linuxAutostartFile('/home/me/ElastOS-$APP.AppImage'), /Exec="\/home\/me\/ElastOS-\\\$APP\.AppImage"/);
   assert.equal(syncLinuxAutostart(false, '/home/tester', '/usr/bin/elastos', fs), null);
   assert.equal(files.size, 0);
 });

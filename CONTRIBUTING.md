@@ -14,7 +14,7 @@ A wrong signature or channel, version below the floor, changed metadata snapshot
 - Home is `http://localhost:8090/home/`.
 - Update offers require signed metadata. Runtime 2.0.0 needs a compatibility `update-check.json` record after a successful CLI check. Human-readable stdout never determines the offer. A 2.0.0 source with an unknown head uses the stored signed install record and matching binary version for rollback identity.
 - A foreign listener on 8090 keeps running and its specific error reaches the window. A status probe that overlaps Start, Stop, or Update must honor the newer control phase.
-- On Mac, the signed Home controller owns System update restarts. Re-read the verified host generation before Stop. Other platforms signal the gateway process group with `SIGTERM`, 15 seconds, then `SIGKILL`, and only after the pid has exited and `/healthz` has failed twice.
+- On Mac, the signed Home controller owns System update restarts. Re-read the verified host generation before Stop. On Linux, Stop and Quit signal the controller only when `status.json` and the host lock prove it, and the start time in `/proc` still matches. Windows signals the gateway process group with `SIGTERM`, 15 seconds, then `SIGKILL`, and only after the pid has exited and `/healthz` has failed twice.
 - Reset and uninstall remove only the ElastOS program, its data directory, and the launcher stage file. Other home directories stay on disk.
 - IPC channel names are `elastos:*`. The preload object is `window.elastos`.
 - `src/main/index.ts` does not import `./targets`.

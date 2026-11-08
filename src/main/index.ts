@@ -95,6 +95,7 @@ function createTray(): void {
   }
 
   tray = new Tray(icon.resize({ width: 16, height: 16 }));
+  (global as typeof globalThis & { __elastosTray?: true }).__elastosTray = true;
   tray.setToolTip('ElastOS');
   updateTrayMenu();
 
@@ -139,6 +140,7 @@ function updateTrayMenu(): void {
     { type: 'separator' },
     { label: 'Show Window', click: () => mainWindow?.show() },
     ...(homeLaunchForPlatform(process.platform).offerKeepHomeOnQuit ? [{
+      id: 'quit-keep-home',
       label: 'Quit and keep Home',
       click: () => {
         stopHomeOnQuit = false;
@@ -147,6 +149,7 @@ function updateTrayMenu(): void {
       },
     }] : []),
     {
+      id: 'quit-stop-home',
       label: 'Quit and stop Home',
       click: () => {
         stopHomeOnQuit = true;
@@ -157,6 +160,7 @@ function updateTrayMenu(): void {
   ]);
 
   tray?.setContextMenu(contextMenu);
+  (global as typeof globalThis & { __elastosTrayMenu?: Menu }).__elastosTrayMenu = contextMenu;
 }
 
 // Set up status change listener

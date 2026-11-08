@@ -65,8 +65,14 @@ test('linux e2e runs the linux lifecycle and leaves the mac lifecycle on darwin'
   assert.match(life, /update-controller', 'status.json'/);
   assert.match(life, /__update-controller/);
   assert.match(life, /PASS elastos update --check writes up_to_date/);
+  assert.match(life, /PASS the tray icon is ready/);
+  assert.match(life, /__elastosTray/);
+  assert.match(life, /quit-keep-home/);
+  assert.match(life, /quit-stop-home/);
+  assert.match(life, /PASS Quit and keep Home leaves the controller running/);
+  assert.match(life, /PASS Quit and stop Home after reopen stops the retained Home/);
   assert.equal(life.includes('waitForFunction'), false);
-  assert.equal(life.includes('__elastosTray'), false);
+  assert.equal(life.includes('command ${'), false);
   assert.equal(life.includes('Application Support'), false);
   assert.equal(life.includes('home --browser'), false);
   assert.match(life, /\.local', 'share', 'elastos'/);

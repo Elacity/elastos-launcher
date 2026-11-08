@@ -26,8 +26,12 @@ const {
   procNetAddress,
   procNetListeners,
   procStatParent,
-  descendantPids,
   listenersFromProcSnapshot,
+  linuxProcessIdentity,
+  linuxStatStartTicks,
+  proveLinuxHome,
+  linuxControllerSignalPid,
+  platformAdoptsInstalledHome,
 } = require('../dist/main/targets/runtimeGateway');
 const { uninstallRuntime } = require('../dist/main/targets/runtimeUninstall');
 
@@ -228,27 +232,116 @@ test('the gateway must own every localhost listener, on 127.0.0.1 and on ::1', (
   assert.equal(listenerOwnership(procListenersFor(tcp, tcp6, ['socket:[4242]', 'socket:[4343]']), wants, ['::1']), 'owned');
 });
 
-test('a Home controller owns port 8090 when its child listens', () => {
+function procStat(pid, ppid, start) {
+  const fields = ['S', String(ppid), ...Array(17).fill('0'), String(start)];
+  return `${pid} (elastos) ${fields.join(' ')}`;
+}
+
+test('a Home controller does not own a descendant socket', () => {
   const tcp = [TCP_HEADER, tcpRow('0100007F', 4242)].join('\n');
   const tcp6 = [TCP_HEADER, tcpRow(V6_LOOPBACK, 4343)].join('\n');
   const wants = ['127.0.0.1', '::1'];
   assert.deepEqual(procStatParent('20 (elastos home) S 10 9'), { pid: 20, ppid: 10 });
   assert.equal(procStatParent('no-paren'), null);
-  assert.deepEqual(
-    descendantPids(10, [{ pid: 20, ppid: 10 }, { pid: 21, ppid: 20 }, { pid: 30, ppid: 1 }]).sort((a, b) => a - b),
-    [10, 20, 21],
-  );
+  assert.equal(linuxStatStartTicks(procStat(20, 10, 200)), '200');
+  assert.equal(linuxStatStartTicks('20 (elastos home) S 10'), null);
+  assert.equal(linuxProcessIdentity(procStat(10, 1, 100), 'boot-1'), 'linux:boot-1:100');
   const child = [
     { pid: 10, ppid: 1, fdLinks: ['pipe:[1]'] },
     { pid: 20, ppid: 10, fdLinks: ['socket:[4242]', 'socket:[4343]'] },
   ];
-  assert.equal(listenerOwnership(listenersFromProcSnapshot(tcp, tcp6, 10, child), wants), 'owned');
+  assert.equal(listenerOwnership(listenersFromProcSnapshot(tcp, tcp6, 10, child), wants), 'foreign');
+  const host = [{ pid: 20, ppid: 10, fdLinks: ['socket:[4242]', 'socket:[4343]'] }];
+  assert.equal(listenerOwnership(listenersFromProcSnapshot(tcp, tcp6, 20, host), wants), 'owned');
   const stranger = [
     { pid: 10, ppid: 1, fdLinks: [] },
     { pid: 20, ppid: 10, fdLinks: ['socket:[4242]'] },
     { pid: 30, ppid: 1, fdLinks: ['socket:[4343]'] },
   ];
   assert.equal(listenerOwnership(listenersFromProcSnapshot(tcp, tcp6, 10, stranger), wants), 'foreign');
+});
+
+test('Linux Home ownership follows the controller record, not a descendant or a reused pid', () => {
+  const tcp = [TCP_HEADER, tcpRow('0100007F', 4242)].join('\n');
+  const tcp6 = [TCP_HEADER, tcpRow(V6_LOOPBACK, 4343)].join('\n');
+  const bootId = 'boot-1';
+  const statusText = JSON.stringify({
+    phase: 'ready',
+    controller_pid: 10,
+    controller_start: 'linux:boot-1:100',
+    host_pid: 20,
+    generation: 'abc',
+  });
+  const lockText = JSON.stringify({
+    pid: 20, role: 'gateway', addr: 'localhost:8090', generation: 'abc',
+  });
+  const proved = proveLinuxHome({
+    statusText,
+    lockText,
+    bootId,
+    controllerStat: procStat(10, 1, 100),
+    hostStatBefore: procStat(20, 10, 200),
+    hostFdLinks: ['socket:[4242]', 'socket:[4343]'],
+    hostStatAfter: procStat(20, 10, 200),
+    tcp,
+    tcp6,
+  });
+  assert.equal(proved && proved.controllerPid, 10);
+  assert.equal(linuxControllerSignalPid(proved, 'linux:boot-1:100'), 10);
+  assert.equal(linuxControllerSignalPid(proved, 'linux:boot-1:999'), null);
+  assert.equal(linuxControllerSignalPid(proved, null), null);
+
+  const descendant = proveLinuxHome({
+    statusText,
+    lockText,
+    bootId,
+    controllerStat: procStat(10, 1, 100),
+    hostStatBefore: procStat(20, 10, 200),
+    hostFdLinks: ['pipe:[1]'],
+    hostStatAfter: procStat(20, 10, 200),
+    tcp,
+    tcp6,
+  });
+  assert.equal(descendant, null);
+
+  const reused = proveLinuxHome({
+    statusText,
+    lockText,
+    bootId,
+    controllerStat: procStat(10, 1, 100),
+    hostStatBefore: procStat(20, 10, 200),
+    hostFdLinks: ['socket:[4242]', 'socket:[4343]'],
+    hostStatAfter: procStat(20, 10, 300),
+    tcp,
+    tcp6,
+  });
+  assert.equal(reused, null);
+
+  const stale = proveLinuxHome({
+    statusText,
+    lockText,
+    bootId,
+    controllerStat: procStat(10, 1, 50),
+    hostStatBefore: procStat(20, 10, 200),
+    hostFdLinks: ['socket:[4242]', 'socket:[4343]'],
+    hostStatAfter: procStat(20, 10, 200),
+    tcp,
+    tcp6,
+  });
+  assert.equal(stale, null);
+
+  const wrongRole = proveLinuxHome({
+    statusText,
+    lockText: JSON.stringify({ pid: 20, role: 'serve', addr: 'localhost:8090', generation: 'abc' }),
+    bootId,
+    controllerStat: procStat(10, 1, 100),
+    hostStatBefore: procStat(20, 10, 200),
+    hostFdLinks: ['socket:[4242]', 'socket:[4343]'],
+    hostStatAfter: procStat(20, 10, 200),
+    tcp,
+    tcp6,
+  });
+  assert.equal(wrongRole, null);
 });
 
 test('lsof listeners name the owner pid for IPv4, [::1], and *', () => {
@@ -859,6 +952,9 @@ test('logs omit attach secrets', async () => {
   assert.equal(homeLaunchForPlatform('linux').hideTerminalKeepLine, true);
   assert.equal(homeLaunchForPlatform('linux').openBrowserAfterInstall, false);
   assert.equal(homeLaunchForPlatform('linux').offerKeepHomeOnQuit, true);
+  assert.equal(platformAdoptsInstalledHome('linux'), true);
+  assert.equal(platformAdoptsInstalledHome('darwin'), true);
+  assert.equal(platformAdoptsInstalledHome('win32'), false);
   assert.deepEqual(homeLaunchForPlatform('darwin').args, ['home', '--browser']);
   assert.equal(homeLaunchForPlatform('darwin').quitWhenLastWindowCloses, false);
   assert.equal(homeLaunchForPlatform('darwin').updateRestartsHome, true);

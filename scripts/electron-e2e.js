@@ -226,7 +226,9 @@ async function main() {
           });
         }
         if (process.platform === 'linux') {
-          await require('./linux-lifecycle-e2e')(electronApp, page, home);
+          await require('./linux-lifecycle-e2e')(electronApp, page, home, {
+            executablePath: electronPath, cwd: root, args, env, timeout: 120000,
+          });
         }
         return;
       }

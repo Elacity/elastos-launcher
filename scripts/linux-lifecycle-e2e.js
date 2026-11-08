@@ -37,9 +37,16 @@ async function liveController(data) {
       const record = JSON.parse(fs.readFileSync(statusPath, 'utf8'));
       const pid = record.controller_pid;
       if (record.phase === 'ready' && Number.isInteger(pid) && pid > 0) {
-        const cmdline = fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8').replace(/\0/g, ' ');
-        if (cmdline.includes('__update-controller')) return record;
-        last = `pid ${pid} command ${cmdline}`;
+        const command = Buffer.alloc(4096);
+        const fd = fs.openSync(`/proc/${pid}/cmdline`, 'r');
+        let bytes = 0;
+        try {
+          bytes = fs.readSync(fd, command, 0, command.length, 0);
+        } finally {
+          fs.closeSync(fd);
+        }
+        if (command.subarray(0, bytes).includes('__update-controller')) return record;
+        last = `pid ${pid} is not the update controller`;
       } else {
         last = `phase ${record.phase}`;
       }
@@ -51,7 +58,41 @@ async function liveController(data) {
   throw new Error(`Home system update check did not reach a live controller (${last})`);
 }
 
-module.exports = async function (app, page, home) {
+async function clickTray(app, id) {
+  const exit = new Promise((resolve) => app.process().once('exit', resolve));
+  const clicked = app.evaluate((_electron, itemId) => {
+    const menu = global.__elastosTrayMenu;
+    const item = menu && menu.getMenuItemById(itemId);
+    if (!item || !item.enabled) return false;
+    item.click();
+    return true;
+  }, id).catch(() => false);
+  const ok = await Promise.race([
+    clicked,
+    exit.then(() => true),
+  ]);
+  assert.equal(ok, true, id);
+  await exit;
+}
+
+function portClosed(port, host) {
+  const net = require('node:net');
+  return new Promise((resolve) => {
+    const socket = net.connect({ port, host });
+    const finish = (closed) => {
+      socket.removeAllListeners();
+      socket.destroy();
+      resolve(closed);
+    };
+    socket.once('connect', () => finish(false));
+    socket.once('error', () => finish(true));
+  });
+}
+
+module.exports = async function (app, page, home, launch) {
+  assert.equal(await app.evaluate(() => global.__elastosTray), true);
+  console.log('PASS the tray icon is ready');
+
   await app.evaluate(({ shell }) => {
     global.__openedHome = [];
     shell.openExternal = async (url) => { global.__openedHome.push(url); };
@@ -90,4 +131,27 @@ module.exports = async function (app, page, home) {
   const update = JSON.parse(fs.readFileSync(path.join(data, 'update-check.json'), 'utf8'));
   assert.equal(update.outcome, 'up_to_date');
   console.log('PASS elastos update --check writes up_to_date');
+
+  const keptPid = controller.controller_pid;
+  await clickTray(app, 'quit-keep-home');
+  await health(true);
+  assert.equal(fs.existsSync(`/proc/${keptPid}`), true);
+  console.log('PASS Quit and keep Home leaves the controller running');
+
+  const { _electron: electron } = require('playwright');
+  const reopened = await electron.launch(launch);
+  try {
+    const again = await reopened.firstWindow();
+    await status(again, 'running');
+    assert.equal(await again.locator('#open-label').innerText(), 'Open my computer');
+    console.log('PASS a reopened launcher sees the retained Home');
+    await clickTray(reopened, 'quit-stop-home');
+  } finally {
+    await reopened.close().catch(() => {});
+  }
+  await health(false);
+  assert.equal(await portClosed(8090, '127.0.0.1'), true);
+  assert.equal(await portClosed(8090, '::1'), true);
+  assert.equal(fs.existsSync(`/proc/${keptPid}`), false);
+  console.log('PASS Quit and stop Home after reopen stops the retained Home');
 };
