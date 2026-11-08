@@ -128,7 +128,9 @@ module.exports = async function (app, page, home, launch) {
 
   const checked = await page.evaluate(() => window.elastos.checkForUpdate());
   assert.equal(checked.updateAvailable, false);
-  const update = JSON.parse(fs.readFileSync(path.join(data, 'update-check.json'), 'utf8'));
+  const nativeUpdate = path.join(data, 'update-check.json');
+  const update = JSON.parse(fs.readFileSync(fs.existsSync(nativeUpdate) ? nativeUpdate
+    : path.join(home, '.elastos-launcher', 'update-check.json'), 'utf8'));
   assert.equal(update.outcome, 'up_to_date');
   console.log('PASS elastos update --check writes up_to_date');
 
