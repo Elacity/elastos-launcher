@@ -256,3 +256,90 @@ test('error window hides raw diagnostics even when failure collection fails', as
     kind: 'error', message: 'ElastOS could not finish.', actionLabel: 'Try Again',
   });
 });
+
+for (const outcome of ['reject', 'resolve']) test(`real controller perform drops an old status ${outcome} after Stop then Start`, async () => {
+  const { createLaunchController } = require('../dist/main/launchController');
+  const controller = createLaunchController({ env: {} });
+  let status = 'running';
+  controller.target.getStatus = async () => status;
+  controller.target.openInBrowser = () => {};
+  controller.target.start = async () => { status = 'running'; };
+  controller.target.stop = async () => { status = 'stopped'; };
+  controller.getOpenAtLogin = () => false;
+  controller.resumeInstallPlan = async () => 'none';
+  controller.checkForUpdate = async () => null;
+  const f = await mainFixture({ controller });
+  let settle;
+  controller.target.stop = async () => {
+    status = 'stopped';
+    controller.target.getStatus = () => new Promise((resolve, reject) => {
+      settle = () => outcome === 'reject' ? reject(new Error('stale read')) : resolve('stopped');
+    });
+  };
+  await f.click('Stop Home');
+  assert.equal(typeof settle, 'function', 'Stop reached the trailing perform read');
+  controller.target.getStatus = async () => status;
+  await f.click('Start Home');
+  assert.equal(f.tray.menu[0].label, 'Home is running');
+  settle(); await tick(); await tick();
+  assert.equal(f.tray.menu[0].label, 'Home is running');
+  assert.equal(f.tray.menu.find(item => item.label === 'Stop Home').enabled, true);
+});
+
+test('real main passes the short recovery error to the menu and clears it on a new action', async () => {
+  const f = await mainFixture();
+  f.launch.stop = async () => { throw new Error('raw /private/key'); };
+  f.launch.getStatus = async () => 'error';
+  await f.click('Stop Home');
+  assert.equal(f.tray.menu[0].label, 'The download stopped.');
+  assert.doesNotMatch(f.tray.menu[0].label, /private/);
+  f.launch.getStatus = async () => 'running';
+  await f.click('Start Home');
+  assert.equal(f.tray.menu[0].label, 'Home is running');
+});
+
+
+test('a delayed diagnostics failure cannot replace a newer Home action', async () => {
+  const f = await mainFixture();
+  let reject;
+  f.launch.getDiagnostics = () => new Promise((_resolve, fail) => { reject = fail; });
+  await f.click('Copy Diagnostics');
+  await f.click('Stop Home');
+  reject(new Error('old diagnostics failed')); await tick(); await tick();
+  assert.equal(f.tray.menu[0].label, 'Home is stopped');
+  assert.equal(f.windows.length, 0, 'the old error must not open a window');
+});
+
+test('a delayed maintenance result cannot restore an offer cleared by a newer update', async () => {
+  const f = await mainFixture();
+  let resolve;
+  f.launch.checkForUpdate = () => new Promise(done => { resolve = done; });
+  f.timers[1](); await tick();
+  await f.click('Update to 2.0.1…');
+  await f.invoke('update');
+  assert.equal(f.tray.menu.some(item => item.label === 'Update to 2.0.1…'), false);
+  resolve({ latest: '2.0.1', updateAvailable: true }); await tick(); await tick();
+  assert.equal(f.tray.menu.some(item => item.label === 'Update to 2.0.1…'), false);
+});
+
+
+test('real controller failure from an action pending at Quit cannot replace the stopping state', async () => {
+  const { createLaunchController } = require('../dist/main/launchController');
+  const controller = createLaunchController({ env: {} });
+  controller.target.getStatus = async () => 'running';
+  controller.target.openInBrowser = () => {};
+  controller.getOpenAtLogin = () => false;
+  controller.resumeInstallPlan = async () => 'none';
+  controller.checkForUpdate = async () => null;
+  controller.shutdown = async () => {};
+  controller.describeFailure = async () => ({ message: 'Home could not stop.', fixLabel: null });
+  const f = await mainFixture({ controller });
+  let reject;
+  controller.target.stop = () => new Promise((_resolve, fail) => { reject = fail; });
+  await f.click('Stop Home');
+  f.app.emit('before-quit', { preventDefault() {} });
+  assert.equal(f.tray.menu[0].label, 'Stopping Home…');
+  reject(new Error('old stop failed')); await tick(); await tick();
+  assert.equal(f.tray.menu[0].label, 'Stopping Home…');
+  assert.equal(f.windows.length, 0);
+});

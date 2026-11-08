@@ -1014,7 +1014,7 @@ test('no install record in the distro shows the Fix it screen, and Install then 
       error: message, checks: [], binaryPresent: true, componentsPresent: true, lockText: null, lockPath: null, pidAlive: () => false,
     };
     assert.deepEqual(failureScreen(facts), {
-      kind: 'no-record', title: 'Install ElastOS again, then reset', message: 'ElastOS needs to be installed again before continuing.', retryLabel: 'Try Again', fixLabel: 'Try Again',
+      kind: 'no-record', title: 'Install ElastOS again, then reset', message: 'ElastOS needs to be installed again; Home data is kept and nothing was deleted.', retryLabel: 'Try Again', fixLabel: 'Try Again',
     });
     assert.equal(await applyFix(facts, {}), 'ready');
     // A runtime from before the record (3 October 2026) is an older version, so Install runs install.sh, which writes the record.

@@ -208,7 +208,7 @@ test('a secret or a stack trace is not the error screen', () => {
   assert.equal(plain.message, 'The download stopped.');
 });
 
-test('every failure screen uses one plain sentence and a verb action', () => {
+test('every failure screen uses short plain copy with safety facts and a verb action', () => {
   const inputs = [
     facts({ checks: [{ id: 'network', level: 'block', message: 'offline' }] }),
     facts({ checks: [{ id: 'port', level: 'block', message: 'Port 8090 is busy' }] }),
@@ -223,9 +223,38 @@ test('every failure screen uses one plain sentence and a verb action', () => {
   ];
   for (const input of inputs) {
     const screen = failureScreen(input);
-    assert.match(screen.message, /^[^.?!\n]+[.!?]$/, screen.kind);
+    assert.match(screen.message, /^[^.?!\n]+[.!?](?: [^.?!\n]+[.!?])?$/, screen.kind);
     assert.doesNotMatch(`${screen.title} ${screen.message}`, /port|lock|session|signed|JSON|WSL|\/private|click|already running|commands/i);
     assert.equal(screen.retryLabel, 'Try Again');
     if (screen.fixLabel) assert.equal(screen.fixLabel, 'Try Again');
   }
+});
+
+test('the no-record screen keeps Home data and says nothing was deleted', () => {
+  const screen = failureScreen(facts({ error: 'This folder has no signed ElastOS install record.' }));
+  assert.equal(screen.kind, 'no-record');
+  assert.match(screen.message, /Home data is kept/);
+  assert.match(screen.message, /nothing was deleted/i);
+});
+
+test('the backup refusal screen says nothing was deleted', () => {
+  for (const error of [
+    'ElastOS was not reset. A copy of your data cannot be saved here. Nothing was deleted.',
+    'ElastOS was not reset. The copy of your data could not be saved (disk full). Nothing was deleted.',
+    'ElastOS was not reset. There is not enough free space for a copy of your data. Nothing was deleted.',
+  ]) {
+    const screen = failureScreen(facts({ error }));
+    assert.match(screen.message, /ElastOS could not finish/);
+    assert.match(screen.message, /nothing was deleted/i);
+  }
+});
+
+test('the busy port screen says ElastOS will not close the other app', () => {
+  const screen = failureScreen(facts({ checks: [{ id: 'port', level: 'block', message: 'busy' }] }));
+  assert.match(screen.message, /ElastOS will not close the other app/);
+});
+
+test('the stale lock screen says a running Home is left alone', () => {
+  const screen = failureScreen(facts({ lockText: LOCK_TEXT }));
+  assert.match(screen.message, /a running Home is left alone/);
 });

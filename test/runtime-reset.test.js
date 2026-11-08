@@ -580,7 +580,7 @@ test('an old custom XDG install with no installation folder says in plain words 
     assert.deepEqual(screen, {
       kind: 'no-record',
       title: 'Install ElastOS again, then reset',
-      message: 'ElastOS needs to be installed again before continuing.',
+      message: 'ElastOS needs to be installed again; Home data is kept and nothing was deleted.',
       retryLabel: 'Try Again',
       fixLabel: 'Try Again',
     });

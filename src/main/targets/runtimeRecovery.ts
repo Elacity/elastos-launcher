@@ -128,12 +128,12 @@ export function failureScreen(facts: FailureFacts): FailureScreen {
     };
   }
   if (kind === 'no-record') {
-    // The refusal names the folder and the next clicks (foreignRuntimeDataMessage).
+    // Keep the refusal's safety facts without exposing the folder or record details.
     return {
       kind,
       // Windows Uninstall needs the same record (windowsUninstall.ts).
       title: /click Uninstall/.test(facts.error) ? 'Install ElastOS again, then uninstall' : 'Install ElastOS again, then reset',
-      message: 'ElastOS needs to be installed again before continuing.',
+      message: 'ElastOS needs to be installed again; Home data is kept and nothing was deleted.',
       retryLabel: 'Try Again',
       fixLabel: 'Try Again',
     };
@@ -273,6 +273,7 @@ function blocked(facts: FailureFacts, id: string): boolean {
 // Only known display copy crosses this boundary. Raw errors stay in diagnostics.
 function plainError(error: string, checks: FailureCheck[]): string {
   if (/attach_secret|runtime-coords|BEGIN [A-Z ]*PRIVATE KEY/i.test(error)) return GENERIC;
+  if (/nothing was deleted/i.test(error)) return 'ElastOS could not finish. Nothing was deleted.';
   if (/restart Windows|reboot/i.test(error)) return 'Windows needs to restart before setup can continue.';
   if (/already running|already owns/i.test(error)) return 'Another Home is running.';
   if (/download/i.test(error)) return 'The download stopped.';
@@ -291,7 +292,7 @@ const COPY: Record<Exclude<FailureKind, 'other' | 'windows' | 'no-record'>, { ti
   },
   port: {
     title: 'Home could not start',
-    message: 'Another app is preventing Home from starting.',
+    message: 'Another app is preventing Home from starting; ElastOS will not close the other app.',
   },
   interrupted: {
     title: 'The install did not finish',
@@ -299,7 +300,7 @@ const COPY: Record<Exclude<FailureKind, 'other' | 'windows' | 'no-record'>, { ti
   },
   'stale-lock': {
     title: 'A previous ElastOS did not close',
-    message: 'ElastOS did not close properly.',
+    message: 'ElastOS did not close properly; a running Home is left alone.',
   },
 };
 

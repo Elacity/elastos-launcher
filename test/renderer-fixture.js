@@ -19,6 +19,7 @@ const failures = {
   windows: { checks: [{ id: 'windows', level: 'block' }] },
   'no-record': { error: 'This folder has no signed ElastOS install record.' },
   other: { error: 'Release head is not valid JSON.' },
+  backup: { error: 'ElastOS was not reset. A copy of your data cannot be saved here. Nothing was deleted.' },
   disk: { checks: [{ id: 'disk', level: 'block' }] },
   platform: { checks: [{ id: 'platform', level: 'block', message: 'Intel Mac is not supported yet.' }] },
   localhost: { checks: [{ id: 'localhost', level: 'block' }] },

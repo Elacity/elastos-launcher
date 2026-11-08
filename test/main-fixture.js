@@ -3,7 +3,7 @@ const Module = require('node:module');
 const tick = () => new Promise(resolve => setImmediate(resolve));
 
 // Load the real entry point, replacing only OS/runtime boundaries. No source extraction.
-async function mainFixture({ login = false, enabled = true, lock = true, platform = 'darwin', installed = true, status = 'stopped', entry = '../dist/main/index' } = {}) {
+async function mainFixture({ login = false, enabled = true, lock = true, platform = 'darwin', installed = true, status = 'stopped', entry = '../dist/main/index', controller = null } = {}) {
   const calls = [], windows = [], handlers = new Map(), dialogs = [], answers = [], timers = [];
   let statusListener;
   const app = new EventEmitter();
@@ -27,12 +27,12 @@ async function mainFixture({ login = false, enabled = true, lock = true, platfor
     show() { this.shows++; } focus() {} isMinimized() { return false; }
     close() { this.emit('closed'); }
   }
-  const launch = {
+  const launch = controller || {
     onStatusChange(fn) { statusListener = fn; }, onLog() {}, onActionSuccess() {}, getLogs: async () => '',
     getStatus: async () => installed ? status : 'not-installed',
     getOpenAtLogin: () => enabled, setOpenAtLogin(value) { enabled = value; calls.push(['login', value]); },
-    start: async () => { calls.push('start'); status = 'running'; statusListener(status); },
-    stop: async () => { calls.push('stop'); status = 'stopped'; statusListener(status); },
+    start: async () => { calls.push('start'); status = 'running'; statusListener?.(status); },
+    stop: async () => { calls.push('stop'); status = 'stopped'; statusListener?.(status); },
     openInBrowser() { calls.push('open'); },
     checkForUpdate: async () => ({ latest: '2.0.1', updateAvailable: true, releaseUrl: '' }),
     describeResetBackup: async () => ({ present: true, enough: true }),
