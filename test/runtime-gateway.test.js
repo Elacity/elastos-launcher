@@ -8,6 +8,8 @@ const {
   createGatewaySupervisor,
   isHealthOk,
   scrubRuntimeLog,
+  launcherLogText,
+  homeLaunchForPlatform,
   signalProcessGroup,
   ForeignGatewayError,
   foreignListenerIsElastos,
@@ -820,6 +822,57 @@ test('logs omit attach secrets', async () => {
   assert.equal(text.includes('sekrit'), false);
   assert.match(text, /omitted a line/);
   assert.equal(scrubRuntimeLog('attach_secret=nope').includes('nope'), false);
+  const keep = 'Keep this terminal open. Press Ctrl+C to stop Home.\nwas replaced on disk\n';
+  assert.equal(launcherLogText(keep, true).includes('Keep this terminal open'), false);
+  assert.match(launcherLogText(keep, true), /was replaced on disk/);
+  assert.match(launcherLogText(keep, false), /Keep this terminal open/);
+  assert.deepEqual(homeLaunchForPlatform('linux').args, ['home', '--browser']);
+  assert.equal(homeLaunchForPlatform('linux').quitWhenLastWindowCloses, false);
+  assert.equal(homeLaunchForPlatform('linux').updateRestartsHome, true);
+  assert.equal(homeLaunchForPlatform('linux').rollbackRestartsHome, true);
+  assert.equal(homeLaunchForPlatform('linux').hideTerminalKeepLine, true);
+  assert.equal(homeLaunchForPlatform('linux').openBrowserAfterInstall, false);
+  assert.equal(homeLaunchForPlatform('linux').offerKeepHomeOnQuit, true);
+  assert.deepEqual(homeLaunchForPlatform('darwin').args, ['home', '--browser']);
+  assert.equal(homeLaunchForPlatform('darwin').quitWhenLastWindowCloses, false);
+  assert.equal(homeLaunchForPlatform('darwin').updateRestartsHome, true);
+  assert.equal(homeLaunchForPlatform('darwin').rollbackRestartsHome, false);
+  assert.equal(homeLaunchForPlatform('darwin').hideTerminalKeepLine, false);
+  assert.equal(homeLaunchForPlatform('darwin').openBrowserAfterInstall, true);
+  assert.equal(homeLaunchForPlatform('darwin').offerKeepHomeOnQuit, false);
+  assert.deepEqual(homeLaunchForPlatform('win32').args, ['gateway', '--addr', 'localhost:8090']);
+  assert.equal(homeLaunchForPlatform('win32').quitWhenLastWindowCloses, true);
+  assert.equal(homeLaunchForPlatform('win32').updateRestartsHome, false);
+  assert.equal(homeLaunchForPlatform('win32').openBrowserAfterInstall, true);
+  assert.equal(homeLaunchForPlatform('win32').offerKeepHomeOnQuit, false);
+});
+
+test('a Linux supervisor log drops the terminal sentence and keeps the other lines', async () => {
+  const launch = homeLaunchForPlatform('linux');
+  let proc;
+  const logs = [];
+  const sup = createGatewaySupervisor({
+    binary: '/bin/elastos',
+    args: launch.args,
+    hideTerminalKeepLine: launch.hideTerminalKeepLine,
+    spawn() {
+      proc = fakeProcess(11);
+      return proc;
+    },
+    fetchHealth: async () => {
+      proc.emit('Keep this terminal open. Press Ctrl+C to stop Home.\nHome: http://localhost:8090/home/\n');
+      return { status: 200, body: 'OK' };
+    },
+    sleep: async () => {},
+    now: () => 0,
+    openUrl() {},
+    log: (line) => logs.push(line),
+    listenerOwned: () => true,
+  });
+  await sup.start();
+  const text = logs.join('\n');
+  assert.equal(text.includes('Keep this terminal open'), false);
+  assert.match(text, /Home: http:\/\/localhost:8090\/home\//);
 });
 
 test('uninstall removes only the runtime binary and data dir', async () => {

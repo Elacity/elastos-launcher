@@ -20,6 +20,31 @@ export { HEALTH_URL, HOME_URL, LEGACY_GATEWAY_ADDR, LOOPBACK_ADDRESSES };
 
 /** Supervised command from the launcher contract. */
 export const GATEWAY_ARGS: readonly string[] = ['gateway', '--addr', GATEWAY_ADDR];
+const TERMINAL_KEEP_LINE = 'Keep this terminal open. Press Ctrl+C to stop Home.';
+
+export interface HomeLaunch {
+  args: readonly string[];
+  quitWhenLastWindowCloses: boolean;
+  updateRestartsHome: boolean;
+  rollbackRestartsHome: boolean;
+  hideTerminalKeepLine: boolean;
+  openBrowserAfterInstall: boolean;
+  offerKeepHomeOnQuit: boolean;
+}
+
+/** Darwin and Linux start the signed Home controller. Windows keeps the gateway command. */
+export function homeLaunchForPlatform(platform: string): HomeLaunch {
+  const browserHome = platform === 'darwin' || platform === 'linux';
+  return {
+    args: browserHome ? ['home', '--browser'] : GATEWAY_ARGS,
+    quitWhenLastWindowCloses: platform !== 'darwin' && platform !== 'linux',
+    updateRestartsHome: browserHome,
+    rollbackRestartsHome: platform === 'linux',
+    hideTerminalKeepLine: platform === 'linux',
+    openBrowserAfterInstall: platform !== 'linux',
+    offerKeepHomeOnQuit: platform === 'linux',
+  };
+}
 export const ALREADY_OWNS_TEXT = 'another ElastOS host already owns';
 export const EXIT_BINARY_REPLACED = 75;
 export const STOP_GRACE_MS = 15_000;
@@ -149,6 +174,8 @@ export interface GatewaySupervisorDeps {
   now: () => number;
   openUrl: (url: string) => void;
   log: (line: string) => void;
+  /** Linux drops the runtime's terminal sentence. Exit 75 still reads the raw stream. */
+  hideTerminalKeepLine?: boolean;
   confirmForeign?: () => Promise<boolean>;
   /**
    * True when the running gateway is one an earlier launcher started on
@@ -319,6 +346,12 @@ export function scrubRuntimeLog(chunk: string): string {
   return chunk;
 }
 
+export function launcherLogText(text: string, hideTerminalKeepLine: boolean): string {
+  const clean = scrubRuntimeLog(text);
+  if (!hideTerminalKeepLine) return clean;
+  return clean.split('\n').filter((line) => !line.includes(TERMINAL_KEEP_LINE)).join('\n');
+}
+
 export function createGatewaySupervisor(deps: GatewaySupervisorDeps): GatewaySupervisor {
   const graceMs = deps.graceMs ?? STOP_GRACE_MS;
   const healthTimeoutMs = deps.healthTimeoutMs ?? 60_000;
@@ -332,7 +365,7 @@ export function createGatewaySupervisor(deps: GatewaySupervisorDeps): GatewaySup
   let current: 'running' | 'stopped' | 'starting' | 'stopping' | 'error' = 'stopped';
 
   const note = (line: string) => {
-    const clean = scrubRuntimeLog(line).replace(/\s+$/g, '');
+    const clean = launcherLogText(line, deps.hideTerminalKeepLine === true).replace(/\s+$/g, '');
     if (!clean) return;
     logs.push(clean);
     deps.log(clean);
@@ -415,7 +448,7 @@ export function createGatewaySupervisor(deps: GatewaySupervisorDeps): GatewaySup
     if (output.includes(ALREADY_OWNS_TEXT)) {
       return 'already';
     }
-    const tail = scrubRuntimeLog(output).trim().split('\n').slice(-3).join(' ');
+    const tail = launcherLogText(output, deps.hideTerminalKeepLine === true).trim().split('\n').slice(-3).join(' ');
     throw new Error(
       tail
         ? `ElastOS stopped before it was ready. ${tail}`
@@ -754,9 +787,11 @@ export async function pidOwnsGatewayPort(
 }
 
 export function createDefaultGatewaySupervisor(binary: string, platform: string = process.platform): GatewaySupervisor {
+  const launch = homeLaunchForPlatform(platform);
   return createGatewaySupervisor({
     binary,
-    args: platform === 'darwin' ? ['home', '--browser'] : GATEWAY_ARGS,
+    args: launch.args,
+    hideTerminalKeepLine: launch.hideTerminalKeepLine,
     adoptForControls: platform === 'darwin',
     healthTimeoutMs: platform === 'darwin' ? 150000 : 60000,
     spawn: spawnGatewayProcess,

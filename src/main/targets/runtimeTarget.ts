@@ -8,6 +8,7 @@ import {
   confirmInstalledGateway,
   ForeignGatewayError,
   GatewaySupervisor,
+  homeLaunchForPlatform,
   isHealthOk,
   openRuntimeHome,
   probeGatewayHealth,
@@ -53,6 +54,25 @@ export function createRuntimeTarget(platform: NodeJS.Platform = process.platform
         : createDefaultGatewaySupervisor(binary() ?? runtimeBinaryPath(os.homedir()), platform);
     }
     await supervisor.stop({ adopt });
+  }
+
+  async function runWithHomeRestart(action: () => Promise<void>): Promise<void> {
+    if (updating) throw new Error('An ElastOS update is already running.');
+    updating = true;
+    try {
+      await stopGateway(true);
+      await action();
+    } finally {
+      supervisor = null;
+      try {
+        const file = binary();
+        if (!file) throw new Error('ElastOS is not installed yet. Click Install.');
+        supervisor = createDefaultGatewaySupervisor(file, platform);
+        await supervisor.start();
+      } finally {
+        updating = false;
+      }
+    }
   }
 
   return {
@@ -124,24 +144,14 @@ export function createRuntimeTarget(platform: NodeJS.Platform = process.platform
       await supervisor.start();
     },
     install: (onProgress) => runtimeInstall.installRuntimeOnThisComputer(onProgress),
-    update: async (onProgress) => {
-      if (platform !== 'darwin') return applyRuntimeUpdate(runtimeCommand(), runtimeHeadStore(), headVerify(), onProgress);
-      if (updating) throw new Error('An ElastOS update is already running.');
-      updating = true;
-      try {
-        await stopGateway(true);
-        await applyRuntimeUpdate(runtimeCommand(), runtimeHeadStore(), headVerify(), onProgress);
-      } finally {
-        supervisor = null;
-        try {
-          const file = binary();
-          if (!file) throw new Error('ElastOS is not installed yet. Click Install.');
-          supervisor = createDefaultGatewaySupervisor(file, platform);
-          await supervisor.start();
-        } finally {
-          updating = false;
-        }
-      }
+    update: (onProgress) => {
+      const action = () => applyRuntimeUpdate(runtimeCommand(), runtimeHeadStore(), headVerify(), onProgress);
+      if (!homeLaunchForPlatform(platform).updateRestartsHome) return action();
+      return runWithHomeRestart(action);
+    },
+    rollback: (onProgress) => {
+      if (!homeLaunchForPlatform(platform).rollbackRestartsHome) return rollbackRuntimeUpdate(onProgress);
+      return runWithHomeRestart(() => rollbackRuntimeUpdate(onProgress));
     },
     // On Windows the launch controller runs uninstallRuntimeInDistro (windowsUninstall.ts) with the two answers.
     uninstall: () => (platform === 'win32' ? Promise.reject(new Error('Uninstall on Windows needs your answer in the Uninstall window. Nothing was removed.')) : runtimeUninstall(() => stopGateway(true))),

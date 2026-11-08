@@ -99,6 +99,8 @@ declare global {
         preflight: { ok: boolean; checks: Array<{ id: string; level: string; message: string }> };
         openAtLogin: boolean;
         canRollback: boolean;
+        error: string | null;
+        openBrowserAfterInstall: boolean;
       }>;
       getPreflight: () => Promise<{ ok: boolean; checks: Array<{ id: string; level: string; message: string }> }>;
       getDiagnostics: () => Promise<string>;

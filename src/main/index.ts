@@ -1,7 +1,7 @@
 import { app, BrowserWindow, dialog, ipcMain, Tray, Menu, nativeImage, shell } from 'electron';
 import * as path from 'path';
 import log from 'electron-log';
-import { createDefaultLaunchController, finishQuitAfterGatewayStop, TargetStatus } from './launchController';
+import { createDefaultLaunchController, finishQuitAfterGatewayStop, homeLaunchForPlatform, TargetStatus } from './launchController';
 import { describeLegacyPc2OnThisComputer, removeLegacyPc2OnThisComputer, withSupportBundle } from './legacyPc2Removal';
 
 const launch = createDefaultLaunchController(process.env);
@@ -27,6 +27,7 @@ if (process.platform === 'darwin') {
 let mainWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
 let isQuitting = false;
+let stopHomeOnQuit = true;
 const quitGate = { started: false, ready: false };
 let currentStatus: TargetStatus = 'stopped';
 
@@ -137,9 +138,18 @@ function updateTrayMenu(): void {
     },
     { type: 'separator' },
     { label: 'Show Window', click: () => mainWindow?.show() },
+    ...(homeLaunchForPlatform(process.platform).offerKeepHomeOnQuit ? [{
+      label: 'Quit and keep Home',
+      click: () => {
+        stopHomeOnQuit = false;
+        isQuitting = true;
+        app.quit();
+      },
+    }] : []),
     {
       label: 'Quit and stop Home',
       click: () => {
+        stopHomeOnQuit = true;
         isQuitting = true;
         app.quit();
       }
@@ -273,7 +283,7 @@ app.whenReady().then(() => {
 });
 
 app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') {
+  if (homeLaunchForPlatform(process.platform).quitWhenLastWindowCloses) {
     isQuitting = true;
     app.quit();
   }
@@ -289,6 +299,7 @@ app.on('activate', () => {
 
 app.on('before-quit', (event) => {
   isQuitting = true;
+  if (!stopHomeOnQuit) return;
   void finishQuitAfterGatewayStop(quitGate, event, () => launch.shutdown(), () => {
     app.quit();
   }, {

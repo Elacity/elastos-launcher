@@ -222,6 +222,31 @@ test('Linux Update stops Home, runs the update, and starts the current binary ev
   assert.deepEqual(calls, ['stop', 'update', 'start-current-binary']);
 });
 
+test('Linux Undo stops Home, restores the release, and starts Home again', async (t) => {
+  const gateway = require('../dist/main/targets/runtimeGateway');
+  const updates = require('../dist/main/targets/runtimeUpdate');
+  const probe = require('../dist/main/targets/runtimeProbe');
+  const { createRuntimeTarget } = require('../dist/main/targets/runtimeTarget');
+  const calls = [];
+  t.mock.method(probe, 'findRuntimeBinary', () => '/installed/elastos');
+  t.mock.method(gateway, 'createDefaultGatewaySupervisor', () => ({
+    stop: async () => { calls.push('stop'); },
+    start: async () => { calls.push('start-current-binary'); },
+  }));
+  t.mock.method(updates, 'rollbackRuntime', async () => { calls.push('rollback'); });
+  await createRuntimeTarget('linux').rollback(() => {});
+  assert.deepEqual(calls, ['stop', 'rollback', 'start-current-binary']);
+});
+
+test('Mac Undo does not stop or start Home around the command', async (t) => {
+  const updates = require('../dist/main/targets/runtimeUpdate');
+  const { createRuntimeTarget } = require('../dist/main/targets/runtimeTarget');
+  const calls = [];
+  t.mock.method(updates, 'rollbackRuntime', async () => { calls.push('rollback'); });
+  await createRuntimeTarget('darwin').rollback(() => {});
+  assert.deepEqual(calls, ['rollback']);
+});
+
 test('Windows Update does not stop or start Home around the command', async (t) => {
   const gateway = require('../dist/main/targets/runtimeGateway');
   const updates = require('../dist/main/targets/runtimeUpdate');

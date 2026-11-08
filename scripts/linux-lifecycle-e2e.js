@@ -28,6 +28,29 @@ async function status(page, wanted) {
     10000, `Window status did not become ${wanted}`);
 }
 
+async function liveController(data) {
+  const statusPath = path.join(data, 'update-controller', 'status.json');
+  const deadline = Date.now() + 180000;
+  let last = 'absent';
+  while (Date.now() < deadline) {
+    try {
+      const record = JSON.parse(fs.readFileSync(statusPath, 'utf8'));
+      const pid = record.controller_pid;
+      if (record.phase === 'ready' && Number.isInteger(pid) && pid > 0) {
+        const cmdline = fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8').replace(/\0/g, ' ');
+        if (cmdline.includes('__update-controller')) return record;
+        last = `pid ${pid} command ${cmdline}`;
+      } else {
+        last = `phase ${record.phase}`;
+      }
+    } catch (err) {
+      last = err && err.code ? err.code : 'unread';
+    }
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+  throw new Error(`Home system update check did not reach a live controller (${last})`);
+}
+
 module.exports = async function (app, page, home) {
   await app.evaluate(({ shell }) => {
     global.__openedHome = [];
@@ -55,9 +78,15 @@ module.exports = async function (app, page, home) {
   await health(true);
   console.log('PASS Start Home becomes healthy');
 
+  const data = path.join(home, '.local', 'share', 'elastos');
+  const controller = await liveController(data);
+  assert.equal(controller.phase, 'ready');
+  console.log('PASS Home system update check reaches the live controller');
+  console.log('NOT EXERCISED a full System update because no newer signed release exists');
+  console.log('NOT EXERCISED the owner System summary because that route needs a wallet token');
+
   const checked = await page.evaluate(() => window.elastos.checkForUpdate());
   assert.equal(checked.updateAvailable, false);
-  const data = path.join(home, '.local', 'share', 'elastos');
   const update = JSON.parse(fs.readFileSync(path.join(data, 'update-check.json'), 'utf8'));
   assert.equal(update.outcome, 'up_to_date');
   console.log('PASS elastos update --check writes up_to_date');
