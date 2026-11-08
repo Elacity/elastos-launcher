@@ -3,10 +3,15 @@ const test = require('node:test');
 const { buildHomeMenu, trayPresentation } = require('../dist/main/homeMenu');
 const { createOpenHome } = require('../dist/main/openHome');
 const actions = Object.fromEntries(['open','start','stop','update','login','diagnostics','logs','removePc2','reset','uninstall','about','quit'].map(key => [key, () => {}]));
+function stateFor(status) {
+  return { observed: status === 'updating' ? 'running' : status, failure: null, quitting: false,
+    inFlight: ['starting', 'stopping', 'updating'].includes(status)
+      ? { kind: { starting: 'start', stopping: 'stop', updating: 'update' }[status], generation: 1 } : null };
+}
 for (const platform of ['darwin', 'win32', 'linux']) {
   for (const status of ['running', 'stopped', 'starting', 'stopping', 'updating', 'error', 'other-home', 'not-installed']) {
     test(`${platform} real menu: ${status}`, () => {
-      const menu = buildHomeMenu({ status, login: false, pc2: false, platform }, actions);
+      const menu = buildHomeMenu({ ...stateFor(status), login: false, pc2: false, platform }, actions);
       assert.equal(menu[0].enabled, false);
       assert.equal(menu.filter(i => i.type !== 'separator')[1].label, 'Open Home');
       assert.equal(menu.find(i => i.label === 'Open Home').accelerator, 'CommandOrControl+O');
@@ -16,7 +21,7 @@ for (const platform of ['darwin', 'win32', 'linux']) {
       assert.equal(power.enabled, ['running', 'stopped', 'error'].includes(status));
       assert.equal(menu.at(-1).label, 'Quit ElastOS');
       assert.equal(menu.at(-1).accelerator, 'CommandOrControl+Q');
-      assert.ok(trayPresentation(status).tooltip.startsWith('ElastOS: '));
+      assert.ok(trayPresentation(stateFor(status)).tooltip.startsWith('ElastOS: '));
     });
   }
 }
@@ -24,7 +29,7 @@ test('offer, PC2 and login values come from state; clicks call real actions', ()
   for (const login of [true, false]) for (const pc2 of [true, false]) for (const offered of [true, false]) {
     const calls = [];
     const callbacks = Object.fromEntries(Object.keys(actions).map(key => [key, (...args) => calls.push([key, ...args])]));
-    const menu = buildHomeMenu({ status: 'running', login, pc2, platform: 'darwin', update: offered ? { latest: '2.0.1', updateAvailable: true } : null }, callbacks);
+    const menu = buildHomeMenu({ ...stateFor('running'), login, pc2, platform: 'darwin', update: offered ? { latest: '2.0.1', updateAvailable: true } : null }, callbacks);
     const item = menu.find(i => i.type === 'checkbox');
     assert.equal(item.checked, login);
     item.click({ checked: !login });
@@ -36,11 +41,11 @@ test('offer, PC2 and login values come from state; clicks call real actions', ()
     menu.at(-1).click();
     assert.deepEqual(calls, [['open'], ['quit']]);
   }
-  assert.equal(buildHomeMenu({ status: 'running', platform: 'darwin', update: { latest: '2.0.1', updateAvailable: false } }, actions).some(i => /^Update to/.test(i.label || '')), false);
+  assert.equal(buildHomeMenu({ ...stateFor('running'), platform: 'darwin', update: { latest: '2.0.1', updateAvailable: false } }, actions).some(i => /^Update to/.test(i.label || '')), false);
 });
 test('icon states are distinct', () => {
-  assert.equal(new Set(['running', 'stopped', 'starting', 'error'].map(s => trayPresentation(s).image)).size, 4);
-  assert.equal(trayPresentation('updating').image, trayPresentation('starting').image);
+  assert.equal(new Set(['running', 'stopped', 'starting', 'error'].map(s => trayPresentation(stateFor(s)).image)).size, 4);
+  assert.equal(trayPresentation(stateFor('updating')).image, trayPresentation(stateFor('starting')).image);
 });
 for (const status of ['running', 'stopped', 'error', 'not-installed', 'other-home']) {
   test(`open app = start if needed then open Home: ${status}`, async () => {

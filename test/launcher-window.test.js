@@ -263,7 +263,8 @@ for (const outcome of ['reject', 'resolve']) test(`real controller perform drops
   let status = 'running';
   controller.target.getStatus = async () => status;
   controller.target.openInBrowser = () => {};
-  controller.target.start = async () => { status = 'running'; };
+  let starts = 0;
+  controller.target.start = async () => { starts++; status = 'running'; };
   controller.target.stop = async () => { status = 'stopped'; };
   controller.getOpenAtLogin = () => false;
   controller.resumeInstallPlan = async () => 'none';
@@ -279,7 +280,9 @@ for (const outcome of ['reject', 'resolve']) test(`real controller perform drops
   await f.click('Stop Home');
   assert.equal(typeof settle, 'function', 'Stop reached the trailing perform read');
   controller.target.getStatus = async () => status;
-  await f.click('Start Home');
+  // Stop has not produced an observation yet. Open Home reads the stopped target and starts it.
+  await f.click('Open Home');
+  assert.equal(starts, 1);
   assert.equal(f.tray.menu[0].label, 'Home is running');
   settle(); await tick(); await tick();
   assert.equal(f.tray.menu[0].label, 'Home is running');

@@ -3,10 +3,10 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import log from 'electron-log';
-import { createDefaultLaunchController, finishQuitAfterGatewayStop, isLoginLaunch, startHomeAtLogin, homeLogFolder, TargetStatus } from './launchController';
+import { createDefaultLaunchController, finishQuitAfterGatewayStop, isLoginLaunch, startHomeAtLogin, homeLogFolder } from './launchController';
 import { describeLegacyPc2OnThisComputer, removeLegacyPc2OnThisComputer, withSupportBundle } from './legacyPc2Removal';
 import { contentWindowBounds } from './launcherWindow';
-import { buildHomeMenu, HomeState, trayPresentation } from './homeMenu';
+import { buildHomeMenu, HomeModel, HomeActionKind, trayPresentation } from './homeMenu';
 import { createOpenHome } from './openHome';
 import { scrubSupportText } from './targets/preflight';
 import type { UpdateCheck } from './targets/types';
@@ -28,23 +28,9 @@ let mainWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
 let actionGeneration = 0;
 let menuSignature = '';
-let isQuitting = false;
-type HomeMenuState = {
-  currentStatus: TargetStatus;
-  updating: boolean;
-  busy: boolean;
-  error: string;
-  offer: UpdateCheck | null;
-  legacyItems: Awaited<ReturnType<typeof describeLegacyPc2OnThisComputer>>;
-};
-let homeState: Readonly<HomeMenuState> = {
-  currentStatus: 'stopped',
-  updating: false,
-  busy: false,
-  error: '',
-  offer: null,
-  legacyItems: [],
-};
+const homeState: HomeModel = { observed: 'stopped', inFlight: null, failure: null, quitting: false };
+let offer: UpdateCheck | null = null;
+let legacyItems: Awaited<ReturnType<typeof describeLegacyPc2OnThisComputer>> = [];
 const quitGate = { started: false, ready: false };
 type WindowState = {
   kind: 'install' | 'progress' | 'error' | 'update';
@@ -54,12 +40,14 @@ let windowState: WindowState = { kind: 'install' };
 type HomeAction = (generation: number) => Promise<void>;
 let retry: HomeAction | null = null;
 
-// All menu state publications use the generation captured before asynchronous work.
-function publishHomeState(generation: number, state: Partial<HomeMenuState>): boolean {
-  if (generation !== actionGeneration) return false;
-  homeState = { ...homeState, ...state };
+// Reads own only the observation. An older request cannot replace a newer action/read.
+async function readStatus(): Promise<void> {
+  const generation = actionGeneration;
+  try {
+    const observed = await launch.getStatus();
+    if (generation === actionGeneration) homeState.observed = observed;
+  } catch (error) { log.error(String(error)); }
   updateMenu();
-  return true;
 }
 
 function setWindowState(state: WindowState): void {
@@ -86,37 +74,40 @@ function showWindow(state: WindowState): void {
   }
 }
 function closeWindow(): void { mainWindow?.close(); }
-async function showError(error: unknown, again: HomeAction | null = null, generation = actionGeneration): Promise<void> {
+async function showError(error: unknown, again: HomeAction | null = null, generation = actionGeneration): Promise<string | null> {
   log.error(error instanceof Error ? error.message : String(error));
   const failure = await launch.describeFailure().catch(() => null);
   const message = failure?.message || 'ElastOS could not finish.';
-  if (!publishHomeState(generation, { currentStatus: 'error', error: message })) return;
+  if (homeState.quitting || generation !== actionGeneration) return null;
   retry = again;
   showWindow({ kind: 'error', message,
     actionLabel: failure?.fixLabel ? 'Try Again' : (again ? 'Try Again' : 'Show Logs') });
+  return message;
 }
 async function reportReadError(action: () => Promise<void>): Promise<void> {
   const generation = actionGeneration;
   try { await action(); } catch (error) { await showError(error, null, generation); }
 }
-async function perform(action: HomeAction): Promise<void> {
-  if (homeState.busy || isQuitting) return;
+async function perform(kind: HomeActionKind, action: HomeAction): Promise<void> {
+  if (homeState.inFlight || homeState.quitting) return;
   const generation = ++actionGeneration;
-  publishHomeState(generation, { busy: true, error: '' });
-  try { await action(generation); } catch (error) { await showError(error, action, generation); }
+  homeState.inFlight = { kind, generation };
+  homeState.failure = null;
+  updateMenu();
+  try { await action(generation); } catch (error) { homeState.failure = await showError(error, action, generation); }
   finally {
-    publishHomeState(generation, { busy: false });
-    const currentStatus = await launch.getStatus().catch(() => 'error' as const);
-    publishHomeState(generation, { currentStatus });
+    homeState.inFlight = null;
+    updateMenu();
+    await readStatus();
   }
 }
 // Signed 2.0.0's Home command opens the browser itself on a cold start.
-async function startHome(generation: number): Promise<void> { publishHomeState(generation, { currentStatus: 'starting' }); await launch.start(); }
-async function stopHome(generation: number): Promise<void> { publishHomeState(generation, { currentStatus: 'stopping' }); await launch.stop(); }
-async function openHome(generation: number): Promise<void> {
-  await createOpenHome({ getStatus: () => launch.getStatus(), start: () => startHome(generation), openInBrowser: () => launch.openInBrowser() }, () => showWindow({ kind: 'install' }), true)();
+async function startHome(): Promise<void> { await launch.start(); }
+async function stopHome(): Promise<void> { await launch.stop(); }
+async function openHome(): Promise<void> {
+  await createOpenHome({ getStatus: () => launch.getStatus(), start: startHome, openInBrowser: () => launch.openInBrowser() }, () => showWindow({ kind: 'install' }), true)();
 }
-async function openApp(): Promise<void> { await perform(openHome); }
+async function openApp(): Promise<void> { await perform('open', openHome); }
 async function copyDiagnostics(): Promise<void> {
   const file = log.transports.file.getFile().path;
   let tail = '';
@@ -182,22 +173,21 @@ async function removePc2(generation: number): Promise<void> {
 }
 function updateMenu(): void {
   if (!tray) return;
-  const status: HomeState = homeState.updating ? 'updating' : homeState.currentStatus;
-  const state = { status, platform: platform, busy: homeState.busy, error: homeState.error, login: launch.getOpenAtLogin(), pc2: homeState.legacyItems.length > 0, update: homeState.offer };
+  const state = { ...homeState, platform, login: launch.getOpenAtLogin(), pc2: legacyItems.length > 0, update: offer };
   const signature = JSON.stringify(state);
   if (signature === menuSignature) return;
   menuSignature = signature;
-  const presentation = trayPresentation(status);
+  const presentation = trayPresentation(state);
   const icon = nativeImage.createFromPath(path.join(__dirname, `../../resources/tray/${presentation.image}${platform === 'darwin' ? 'Template' : ''}.png`)).resize({ width: 18, height: 18 });
   if (platform === 'darwin') icon.setTemplateImage(true);
   tray.setImage(icon);
   tray.setToolTip(presentation.tooltip);
   const template = buildHomeMenu(state, {
-    open: () => { void openApp(); }, start: () => { void perform(startHome); }, stop: () => { void perform(stopHome); },
-    update: () => { if (homeState.offer) showWindow({ kind: 'update', message: `Update ElastOS to ${homeState.offer.latest}?`, releaseNotes: Boolean(homeState.offer.releaseUrl) }); },
-    login: enabled => { void perform(async () => { launch.setOpenAtLogin(enabled); }); },
+    open: () => { void openApp(); }, start: () => { void perform('start', startHome); }, stop: () => { void perform('stop', stopHome); },
+    update: () => { if (offer) showWindow({ kind: 'update', message: `Update ElastOS to ${offer.latest}?`, releaseNotes: Boolean(offer.releaseUrl) }); },
+    login: enabled => { void perform('maintenance', async () => { launch.setOpenAtLogin(enabled); }); },
     diagnostics: () => { void reportReadError(copyDiagnostics); }, logs: () => { void reportReadError(showLogs); },
-    removePc2: () => { void perform(removePc2); }, reset: () => { void perform(reset); }, uninstall: () => { void perform(uninstall); },
+    removePc2: () => { void perform('maintenance', removePc2); }, reset: () => { void perform('maintenance', reset); }, uninstall: () => { void perform('maintenance', uninstall); },
     about: () => app.showAboutPanel(), quit: () => app.quit(),
   });
   const menu = Menu.buildFromTemplate(template);
@@ -210,18 +200,19 @@ function updateMenu(): void {
   (global as typeof globalThis & { __elastosTrayState?: string }).__elastosTrayState = presentation.image;
 }
 async function refreshMaintenance(generation = actionGeneration): Promise<void> {
-  const legacyItems = await describeLegacyPc2OnThisComputer().catch(error => { log.warn(String(error)); return []; });
-  const offer = await launch.checkForUpdate().catch(error => { log.warn(String(error)); return null; });
-  publishHomeState(generation, { legacyItems, offer });
+  const items = await describeLegacyPc2OnThisComputer().catch(error => { log.warn(String(error)); return []; });
+  const update = await launch.checkForUpdate().catch(error => { log.warn(String(error)); return null; });
+  if (generation !== actionGeneration || homeState.quitting) return;
+  legacyItems = items; offer = update;
+  updateMenu();
 }
 function step(message: string): void {
   log.info(message);
   setWindowState({ kind: 'progress', message: /start|home ready/i.test(message) ? 'Starting Home' : /download|fetch/i.test(message) ? 'Downloading' : 'Setting up' });
 }
 async function install(login: boolean): Promise<void> {
-  await perform(async generation => {
+  await perform('start', async generation => {
     launch.setOpenAtLogin(login);
-    publishHomeState(generation, { currentStatus: 'starting' });
     showWindow({ kind: 'progress', message: 'Downloading' });
     await launch.install(step);
     setWindowState({ kind: 'install', ready: true, message: 'Home is ready.' });
@@ -229,20 +220,16 @@ async function install(login: boolean): Promise<void> {
   });
 }
 async function update(): Promise<void> {
-  if (!homeState.offer?.updateAvailable) return;
-  await perform(async generation => {
-    publishHomeState(generation, { updating: true });
+  if (!offer?.updateAvailable) return;
+  await perform('update', async generation => {
     showWindow({ kind: 'progress', message: 'Downloading' });
-    try {
-      await launch.update(step);
-      if (await launch.getStatus() !== 'running') await launch.start();
-      publishHomeState(generation, { offer: null });
-      closeWindow();
-    } finally { publishHomeState(generation, { updating: false }); }
+    await launch.update(step);
+    if (await launch.getStatus() !== 'running') await launch.start();
+    if (generation === actionGeneration) offer = null;
+    closeWindow();
   });
 }
-// perform publishes action failures with their original generation; do not republish
-// controller notifications using the generation at notification time.
+// Only the action catch records a failure; controller notifications do not own menu state.
 launch.onLog(message => log.info(message));
 
 // Only the current small window may invoke its actions. No destructive renderer IPC.
@@ -255,7 +242,7 @@ function handle(name: string, action: (...args: any[]) => unknown): void {
 handle('getWindowState', () => windowState);
 handle('install', login => windowState.kind === 'install' && !windowState.ready ? install(login === true) : undefined);
 handle('update', () => windowState.kind === 'update' ? update() : undefined);
-handle('retry', () => perform(async generation => {
+handle('retry', () => perform('maintenance', async generation => {
   const failure = await launch.describeFailure();
   if (failure.fixLabel) {
     if (platform === 'win32' && failure.kind === 'windows') {
@@ -269,16 +256,16 @@ handle('retry', () => perform(async generation => {
       .some(check => check.id === 'windows' && check.level === 'block');
     if (windowsReady && retry) await retry(generation);
     else if (result === 'ready') {
-      if (await launch.isInstalled()) { await openHome(generation); closeWindow(); }
+      if (await launch.isInstalled()) { await openHome(); closeWindow(); }
       else showWindow({ kind: 'install' });
     }
-    else await showError(new Error((await launch.describeFailure()).message), retry, generation);
+    else throw new Error((await launch.describeFailure()).message);
   } else if (retry) await retry(generation);
   else await showLogs();
 }));
 handle('openHome', async () => { await openApp(); if (windowState.kind !== 'error') closeWindow(); });
 handle('copyDiagnostics', copyDiagnostics);
-handle('releaseNotes', () => { if (homeState.offer?.releaseUrl && /^https:\/\//.test(homeState.offer.releaseUrl)) return shell.openExternal(homeState.offer.releaseUrl); });
+handle('releaseNotes', () => { if (offer?.releaseUrl && /^https:\/\//.test(offer.releaseUrl)) return shell.openExternal(offer.releaseUrl); });
 handle('closeWindow', closeWindow);
 ipcMain.on('elastos:contentSize', (event, height: unknown) => {
   if (!mainWindow || event.sender !== mainWindow.webContents || typeof height !== 'number' || !Number.isFinite(height) || height <= 0) return;
@@ -299,7 +286,7 @@ app.whenReady().then(async () => {
   if (platform === 'win32') tray.on('click', () => tray?.popUpContextMenu());
   const login = isLoginLaunch(platform, process.argv, platform === 'darwin' ? app.getLoginItemSettings() : {});
   if (launch.getOpenAtLogin()) launch.setOpenAtLogin(true);
-  if (login) await perform(() => startHomeAtLogin(launch.getOpenAtLogin(), launch));
+  if (login) await perform('start', () => startHomeAtLogin(launch.getOpenAtLogin(), launch));
   else if (await launch.resumeInstallPlan() === 'install') {
     await install(launch.getOpenAtLogin());
     launch.finishResumeInstall(windowState.ready === true);
@@ -307,24 +294,21 @@ app.whenReady().then(async () => {
   void refreshMaintenance();
   let checkingStatus = false;
   const statusTimer = setInterval(async () => {
-    if (homeState.busy || isQuitting || checkingStatus) return;
+    if (homeState.inFlight || homeState.quitting || checkingStatus) return;
     checkingStatus = true;
-    const generation = actionGeneration;
-    try {
-      const status = await launch.getStatus();
-      publishHomeState(generation, { currentStatus: status });
-    } catch (error) { log.error(String(error)); }
+    try { await readStatus(); }
     finally { checkingStatus = false; }
   }, 2000);
   statusTimer.unref();
-  const updateTimer = setInterval(() => { if (!homeState.busy && !isQuitting) void refreshMaintenance(); }, 60 * 60 * 1000);
+  const updateTimer = setInterval(() => { if (!homeState.inFlight && !homeState.quitting) void refreshMaintenance(); }, 60 * 60 * 1000);
   updateTimer.unref();
 }).catch(error => { void showError(error); });
 app.on('before-quit', event => {
-  isQuitting = true;
-  const generation = ++actionGeneration;
+  if (!homeState.quitting) ++actionGeneration;
+  homeState.quitting = true;
+  updateMenu();
   void finishQuitAfterGatewayStop(quitGate, event, () => launch.shutdown(), () => app.quit(), {
     log: line => log.error(line), onBudget: () => launch.forceStopGateway(),
-    onStopping: () => { publishHomeState(generation, { currentStatus: 'stopping' }); log.info('Stopping Home before quit.'); },
+    onStopping: () => log.info('Stopping Home before quit.'),
   }).catch(error => log.error(String(error)));
 });
