@@ -194,7 +194,7 @@ test('adoptInstalledGatewayProcess rejects a lookalike executable and accepts th
   const w = adoption(t);
   w.executable('/another/elastos');
   assert.equal(await w.adopt(), null);
-  const custom = path.join(w.home, 'custom', 'elastos');
+  const custom = path.join(w.home, 'custom', 'runtime-bin');
   fs.mkdirSync(path.dirname(custom));
   fs.writeFileSync(custom, 'custom install');
   fs.writeFileSync(path.join(w.data, 'sources.json'), JSON.stringify({ default_source: 'stable', sources: [{ name: 'stable', install_path: custom }] }));

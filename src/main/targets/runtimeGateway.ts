@@ -110,6 +110,8 @@ export function lockAddressWants(kind: InstalledGatewayKind): readonly string[] 
 export function installedGatewayKind(input: {
   lockText: string | null;
   command: string | null;
+  /** macOS caller already matched the kernel executable to an installed path. */
+  verifiedExecutable?: string;
   pidAlive: (pid: number) => boolean;
   ownsSocket: (pid: number, wants: readonly string[]) => boolean;
 }): InstalledGatewayKind | null {
@@ -129,6 +131,11 @@ export function installedGatewayKind(input: {
   if (!input.ownsSocket(parsed.pid, lockAddressWants(kind))) return null;
   if (!input.command) return null;
   const command = input.command.trim();
+  if (input.verifiedExecutable) {
+    if (!command.startsWith(`${input.verifiedExecutable} `)) return null;
+    const args = command.slice(input.verifiedExecutable.length).trim();
+    return /^(gateway(?:\s|$)|home\s+--browser(?:\s|$))/.test(args) ? kind : null;
+  }
   if (!/(^|[\\/\s])elastos(\.exe)?(\s|$)/i.test(command)
     || !(/\bgateway\b/.test(command) || /\bhome\s+--browser(?:\s|$)/.test(command))) return null;
   return kind;
@@ -849,8 +856,8 @@ function macProcessIdentity(pid: number): MacProcessIdentity | null {
     const report = execFileSync('/usr/bin/vmmap', ['-w', '-summary', String(pid)], {
       encoding: 'utf8', timeout: 2000, maxBuffer: 64 * 1024, env: { ...process.env, LC_ALL: 'C' },
     });
-    const executable = report.match(/^Path:\s+(.+)$/m)?.[1]?.trim() ?? '';
-    const start = report.match(/^Launch Time:\s+(.+)$/m)?.[1]?.trim() ?? '';
+    const executable = report.match(/^Path:[ \t]+(.+)$/m)?.[1]?.trim() ?? '';
+    const start = report.match(/^Launch Time:[ \t]+(.+)$/m)?.[1]?.trim() ?? '';
     if (!start || !path.isAbsolute(executable)) return null;
     return { executable, start };
   } catch {
@@ -888,6 +895,7 @@ async function hostLockGatewayKind(
   const kind = installedGatewayKind({
     lockText: text,
     command: processCommand(pid, platform),
+    verifiedExecutable: identity?.executable,
     pidAlive: (id) => {
       try {
         process.kill(id, 0);
