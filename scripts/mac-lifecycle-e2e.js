@@ -32,10 +32,15 @@ async function status(page, wanted) {
       last = await page.evaluate(() => window.elastos.getStatus());
       return last === wanted;
     }, 180000, `Launcher status did not become ${wanted}`);
-    await waitFor(async () => (await page.locator('#status-text').innerText()).toLowerCase() === wanted,
+    const label = wanted === 'error' ? 'needs attention' : wanted;
+    await waitFor(async () => (await page.locator('#status-text').innerText()).toLowerCase() === label,
       10000, `Window status did not become ${wanted}`);
   } catch (error) {
     console.log(`Status failure wanted=${wanted} last=${last} window=${await page.locator('#status-text').innerText()} error=${await page.locator('#error-text').innerText()}`);
+    const logs = await page.locator('#logs-content').innerText();
+    for (const match of logs.matchAll(/Home ownership check: (host-lock|native-host|host-proof|host-changed|controller-status|controller-metadata)\b/g)) {
+      console.log(match[0]);
+    }
     throw error;
   }
 }
@@ -79,13 +84,16 @@ module.exports = async function (app, page, home, options) {
   const controllerStatus = path.join(data, 'update-controller', 'status.json');
   // This controller was started by this test's launcher on the disposable runner.
   const startedController = JSON.parse(fs.readFileSync(controllerStatus, 'utf8')).controller_pid;
-  process.kill(startedController, 'SIGTERM');
+  process.kill(startedController, 'SIGKILL');
+  await status(page, 'error');
+  console.log(`Home retained after controller crash: ${isHealthOk(await probeGatewayHealth())}`);
+  await page.evaluate(() => window.elastos.stop());
   await health(false);
   await status(page, 'stopped');
   await page.click('#open-btn');
   await status(page, 'running');
   await health(true);
-  console.log('PASS spawned controller exit reports Stopped and explicit Start starts Home again');
+  console.log('PASS controller crash reports Error; Stop and explicit Start recover a healthy Home');
 
   const checked = await page.evaluate(() => window.elastos.checkForUpdate());
   assert.equal(checked.updateAvailable, false);

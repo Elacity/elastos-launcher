@@ -1,4 +1,5 @@
 const assert = require('node:assert/strict');
+const { spawn } = require('node:child_process');
 const test = require('node:test');
 
 const {
@@ -8,6 +9,7 @@ const {
   controllerGateway,
   confirmedControllerPid,
   signalRecordedController,
+  signalProcessGroup,
   isHealthOk,
   scrubRuntimeLog,
   launcherLogText,
@@ -778,7 +780,7 @@ test('a process this launcher spawned is signaled through its own handle', async
     const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
     process.stdout.write(String(child.pid));
     setInterval(() => {}, 1000);
-  `]);
+  `], 'linux');
   let grandchild = 0;
   try {
     grandchild = await new Promise((resolve, reject) => {
@@ -1227,12 +1229,78 @@ test('Mac controls adopt a proved Home and re-read its generation after a System
 });
 
 test('Mac adoption refuses an unproved listener without sending any signal', async () => {
+  let attempts = 0;
   const sup = createGatewaySupervisor({
     binary: '/bin/elastos', adoptForControls: true,
     spawn() { throw new Error('must not spawn'); },
     fetchHealth: async () => ({ status: 200, body: 'OK' }),
-    adoptInstalled: async () => null,
+    adoptInstalled: async () => { attempts++; return null; },
     now: () => 0, sleep: async () => {}, openUrl() {}, log() {},
   });
   await assert.rejects(() => sup.stop(), ForeignGatewayError);
+  assert.equal(attempts, 3, 'unknown ownership is retried only a bounded number of times');
+});
+
+test('signalProcessGroup uses the negative pid and surfaces a failed kill', () => {
+  const seen = [];
+  signalProcessGroup(42, 'SIGTERM', (pid, signal) => { seen.push([pid, signal]); });
+  assert.deepEqual(seen, [[-42, 'SIGTERM']]);
+  signalProcessGroup(0, 'SIGTERM', () => { throw new Error('pid 0 must not be signaled'); });
+  signalProcessGroup(-5, 'SIGTERM', () => { throw new Error('a negative pid must not be signaled'); });
+  signalProcessGroup(42, 'SIGTERM', () => {
+    const err = new Error('gone');
+    err.code = 'ESRCH';
+    throw err;
+  });
+  assert.throws(
+    () => signalProcessGroup(42, 'SIGKILL', () => {
+      const err = new Error('operation not permitted');
+      err.code = 'EPERM';
+      throw err;
+    }),
+    /Could not signal ElastOS \(SIGKILL\): operation not permitted/,
+  );
+});
+
+test('signalProcessGroup kills the leader and a child in that group', async () => {
+  const child = spawn('bash', ['-c', 'sleep 30 & echo $!; wait'], {
+    detached: true,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  try {
+    const grandchild = await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('grandchild pid was not printed')), 3000);
+      let buf = '';
+      child.stdout.on('data', (chunk) => {
+        buf += chunk.toString();
+        const line = buf.trim();
+        if (/^\d+$/.test(line)) {
+          clearTimeout(timer);
+          resolve(Number(line));
+        }
+      });
+    });
+    signalProcessGroup(child.pid, 'SIGTERM');
+    await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('leader did not exit')), 3000);
+      child.once('exit', () => {
+        clearTimeout(timer);
+        resolve();
+      });
+    });
+    const gone = () => {
+      try {
+        process.kill(grandchild, 0);
+        return false;
+      } catch {
+        return true;
+      }
+    };
+    for (let waited = 0; waited < 5000 && !gone(); waited += 50) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    assert.throws(() => process.kill(grandchild, 0));
+  } finally {
+    try { process.kill(-(child.pid), 'SIGKILL'); } catch { /* already gone */ }
+  }
 });

@@ -101,6 +101,25 @@ export function binaryReplacement(output: string, code: number | null): boolean 
   return /was replaced on disk|changed on disk/i.test(output);
 }
 
+/** The gateway is its own process group. Signal the group, not only the leader. */
+export function signalProcessGroup(
+  pid: number,
+  signal: NodeJS.Signals,
+  kill: (pid: number, signal: NodeJS.Signals) => void = process.kill,
+): void {
+  if (!Number.isInteger(pid) || pid <= 0) return;
+  try {
+    kill(-pid, signal);
+  } catch (err) {
+    const code = err && typeof err === 'object' && 'code' in err
+      ? String((err as { code?: string }).code)
+      : '';
+    if (code === 'ESRCH') return;
+    const message = err instanceof Error ? err.message : String(err);
+    throw new Error(`Could not signal ElastOS (${signal}): ${message}`);
+  }
+}
+
 /**
  * `current` is a gateway on `localhost:8090`, the address this launcher
  * starts. `legacy` is one an earlier launcher started on `127.0.0.1:8090`.
@@ -144,9 +163,8 @@ export function installedGatewayKind(input: {
   if (!input.command) return null;
   const command = input.command.trim();
   if (input.verifiedExecutable) {
-    if (!command.startsWith(`${input.verifiedExecutable} `)) return null;
-    const args = command.slice(input.verifiedExecutable.length).trim();
-    return /^(gateway(?:\s|$)|home\s+--browser(?:\s|$))/.test(args) ? kind : null;
+    // argv[0] may be an alias or symlink; authority comes from the kernel path.
+    return /\bgateway\b|\bhome\s+--browser(?:\s|$)/.test(command) ? kind : null;
   }
   if (!/(^|[\\/\s])elastos(\.exe)?(\s|$)/i.test(command)
     || !(/\bgateway\b/.test(command) || /\bhome\s+--browser(?:\s|$)/.test(command))) return null;
@@ -194,6 +212,11 @@ export interface GatewaySupervisorDeps {
    * Returning null leaves a listener that is not that gateway running.
    */
   adoptInstalled?: () => GatewayProcess | null | Promise<GatewayProcess | null>;
+  /**
+   * Linux Stop signals the process this window spawned. Mac Stop adopts the
+   * proved controller instead, including after that process has exited.
+   */
+  keepSpawnedHandle?: boolean;
   graceMs?: number;
   healthTimeoutMs?: number;
   pollMs?: number;
@@ -612,13 +635,28 @@ export function createGatewaySupervisor(deps: GatewaySupervisorDeps): GatewaySup
     owned = null;
     foreign = false;
     if (intentionalStop || current !== 'running') return;
-    current = code === 0 || code === null ? 'stopped' : 'error';
-    note(code === 0 || code === null ? 'ElastOS stopped.' : `ElastOS stopped (exit ${code}). Click Start to try again.`);
+    current = code === 0 ? 'stopped' : 'error';
+    note(code === 0 ? 'ElastOS stopped.' : code === null
+      ? 'ElastOS stopped unexpectedly. Click Start to try again.'
+      : `ElastOS stopped (exit ${code}). Click Start to try again.`);
   }
 
   function ownAdopted(proc: GatewayProcess | null): void {
     owned = proc;
     proc?.onExit((code) => recordExit(proc, code));
+  }
+
+  async function findInstalled(): Promise<GatewayProcess | null> {
+    const attempts = deps.adoptForControls ? 3 : 1;
+    for (let attempt = 0; attempt < attempts; attempt++) {
+      const proc = await (deps.adoptInstalled?.() ?? null);
+      if (proc) return proc;
+      if (attempt + 1 < attempts) {
+        note('Checking Home ownership again.');
+        await deps.sleep(pollMs);
+      }
+    }
+    return null;
   }
 
   async function launchOnce(): Promise<'ready' | 'replaced' | 'already'> {
@@ -774,7 +812,7 @@ export function createGatewaySupervisor(deps: GatewaySupervisorDeps): GatewaySup
             // localhost, so stop it once and start it again here.
             legacyStopped = true;
             note('An older ElastOS is running on 127.0.0.1:8090. Starting it again on localhost:8090.');
-            const adopted = await (deps.adoptInstalled?.() ?? null);
+            const adopted = await findInstalled();
             if (!adopted) {
               current = 'error';
               throw new Error(LEGACY_STILL_RUNNING_MESSAGE);
@@ -801,7 +839,7 @@ export function createGatewaySupervisor(deps: GatewaySupervisorDeps): GatewaySup
           }
           foreign = true;
           intentionalStop = false;
-          ownAdopted(deps.adoptForControls ? await (deps.adoptInstalled?.() ?? null) : null);
+          ownAdopted(deps.adoptForControls ? await findInstalled() : null);
           current = 'running';
           deps.openUrl(HOME_URL);
           return 'already-running';
@@ -812,10 +850,11 @@ export function createGatewaySupervisor(deps: GatewaySupervisorDeps): GatewaySup
     },
     async stop(options?: { adopt?: boolean }) {
       const currentProc = owned;
-      const keepSpawned = currentProc !== null && currentProc.spawnedHere === true
+      const keepSpawned = deps.keepSpawnedHandle === true
+        && currentProc !== null && currentProc.spawnedHere === true
         && !(await currentProc.hasExited());
       if (!keepSpawned && deps.adoptForControls && isHealthOk(await deps.fetchHealth())) {
-        const installed = await (deps.adoptInstalled?.() ?? null);
+        const installed = await findInstalled();
         if (!installed) throw new ForeignGatewayError();
         ownAdopted(installed);
       }
@@ -823,7 +862,7 @@ export function createGatewaySupervisor(deps: GatewaySupervisorDeps): GatewaySup
         const health = await deps.fetchHealth();
         if (isHealthOk(health)) {
           const adopted = (options?.adopt || deps.adoptForControls)
-            ? await (deps.adoptInstalled?.() ?? null)
+            ? await findInstalled()
             : null;
           if (!adopted) throw new ForeignGatewayError();
           ownAdopted(adopted);
@@ -865,7 +904,11 @@ export function createGatewaySupervisor(deps: GatewaySupervisorDeps): GatewaySup
   return supervisor;
 }
 
-export function spawnGatewayProcess(binary: string, args: readonly string[]): GatewayProcess {
+export function spawnGatewayProcess(
+  binary: string,
+  args: readonly string[],
+  platform: string = process.platform,
+): GatewayProcess {
   const child = spawn(binary, [...args], {
     detached: true,
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -897,6 +940,10 @@ export function spawnGatewayProcess(binary: string, args: readonly string[]): Ga
     },
     spawnedHere: true,
     signal(signal) {
+      if (platform === 'darwin') {
+        signalProcessGroup(child.pid ?? -1, signal);
+        return;
+      }
       try {
         child.kill(signal);
       } catch (err) {
@@ -1175,21 +1222,27 @@ export function createDefaultGatewaySupervisor(binary: string, platform: string 
     args: launch.args,
     hideTerminalKeepLine: launch.hideTerminalKeepLine,
     adoptForControls: platformAdoptsInstalledHome(platform),
+    keepSpawnedHandle: platform === 'linux',
     healthTimeoutMs: platform === 'darwin' ? 150000 : 60000,
-    spawn: spawnGatewayProcess,
+    spawn: (command, commandArgs) => spawnGatewayProcess(command, commandArgs, platform),
     fetchHealth: () => probeGatewayHealth(),
     sleep: (ms) => new Promise((resolve) => { setTimeout(resolve, ms); }),
     now: () => Date.now(),
     openUrl: openRuntimeHome,
     log: (line) => logSink(line),
     confirmForeign: confirmInstalledGateway,
-    reportLegacyHome: async () => (await installedGatewayOnThisComputer(platform)) === 'legacy',
+    foreignIsLegacy: platform === 'darwin'
+      ? async () => (await installedGatewayOnThisComputer(platform)) === 'legacy'
+      : undefined,
+    reportLegacyHome: platform === 'linux'
+      ? async () => (await installedGatewayOnThisComputer(platform)) === 'legacy'
+      : undefined,
     listenerOwned: (pid, health) => platform === 'darwin'
-      ? confirmInstalledGateway()
+      ? installedGatewayOnThisComputer(platform).then((kind) => kind === 'current')
       : platform === 'linux'
         ? linuxControllerOwnsListeners(pid, health)
         : pidOwnsGatewayPort(pid, LOOPBACK_ADDRESSES, health.addresses ?? []),
-    adoptInstalled: adoptInstalledGatewayProcess,
+    adoptInstalled: () => adoptInstalledGatewayProcess(platform),
   });
 }
 
@@ -1234,14 +1287,15 @@ function psField(pid: number, field: string): string {
 function macProcessIdentity(pid: number): MacProcessIdentity | null {
   if (!Number.isInteger(pid) || pid <= 0) return null;
   try {
-    // vmmap reports the kernel's executable path and precise launch time.
-    // ps comm is argv[0] on macOS and can be forged.
-    const report = execFileSync('/usr/bin/vmmap', ['-w', '-summary', String(pid)], {
-      encoding: 'utf8', timeout: 2000, maxBuffer: 64 * 1024, env: { ...process.env, LC_ALL: 'C' },
+    const helper = path.join(__dirname, '../../native/mac-process-info')
+      .replace(`${path.sep}app.asar${path.sep}`, `${path.sep}app.asar.unpacked${path.sep}`);
+    const report = execFileSync(helper, [String(pid)], {
+      encoding: 'utf8', timeout: 1000, maxBuffer: 16 * 1024,
     });
-    const executable = report.match(/^Path:[ \t]+(.+)$/m)?.[1]?.trim() ?? '';
-    const start = report.match(/^Launch Time:[ \t]+(.+)$/m)?.[1]?.trim() ?? '';
-    if (!start || !path.isAbsolute(executable)) return null;
+    const newline = report.indexOf('\n');
+    const start = report.slice(0, newline);
+    const executable = report.slice(newline + 1);
+    if (!/^\d+\.\d{6}$/.test(start) || !path.isAbsolute(executable) || executable.includes('\0')) return null;
     return { executable, start };
   } catch {
     return null;
@@ -1412,10 +1466,16 @@ export async function adoptInstalledGatewayProcess(
 ): Promise<GatewayProcess | null> {
   if (platform === 'win32') return null;
   if (platform === 'linux') return adoptLinuxGatewayProcess(homeDir);
+  const refused = (reason: string): null => {
+    logSink(`Home ownership check: ${reason}`);
+    return null;
+  };
   const { text, pid } = readHostLock(platform, homeDir);
+  if (pid <= 0) return refused('host-lock');
   const hostIdentity = platform === 'darwin' ? macProcessIdentity(pid) : null;
-  if (pid <= 0 || !(await hostLockGatewayKind(text, pid, platform, homeDir))) return null;
-  if (platform === 'darwin' && (!hostIdentity || !sameMacProcess(hostIdentity, macProcessIdentity(pid)))) return null;
+  if (platform === 'darwin' && !hostIdentity) return refused('native-host');
+  if (!(await hostLockGatewayKind(text, pid, platform, homeDir))) return refused('host-proof');
+  if (platform === 'darwin' && (!hostIdentity || !sameMacProcess(hostIdentity, macProcessIdentity(pid)))) return refused('host-changed');
   let stopPid = pid;
   let stopIdentity = hostIdentity;
   if (platform === 'darwin') {
@@ -1428,17 +1488,20 @@ export async function adoptInstalledGatewayProcess(
         const lock = JSON.parse(text ?? '{}');
         const controller = status.controller_pid;
         const identity = macProcessIdentity(controller);
-        if (status.host_pid !== pid || typeof lock.generation !== 'string' || status.generation !== lock.generation
-          || !identity || identity.executable !== path.join(data, 'update-controller', 'runtime')
-          || !processCommand(controller, platform)?.startsWith(`${identity.executable} __update-controller `)
-          || Number(psField(pid, 'ppid')) !== controller) return null;
-        stopPid = controller;
-        stopIdentity = identity;
+        if (status.host_pid === pid && typeof lock.generation === 'string' && status.generation === lock.generation
+          && identity && identity.executable === path.join(data, 'update-controller', 'runtime')
+          && processCommand(controller, platform)?.startsWith(`${identity.executable} __update-controller `)
+          && Number(psField(pid, 'ppid')) === controller) {
+          stopPid = controller;
+          stopIdentity = identity;
+        }
+        // A stale controller record grants no authority over that controller.
+        // The independently proved host can still be stopped after a crash.
       } else if (fs.existsSync(path.join(data, 'update-controller', 'status.json'))) {
-        return null;
+        return refused('controller-status');
       }
     } catch {
-      return null;
+      return refused('controller-metadata');
     }
   }
   let timer: ReturnType<typeof setInterval> | undefined;
@@ -1453,7 +1516,7 @@ export async function adoptInstalledGatewayProcess(
     if (gone(stopPid, stopIdentity) && !notified) {
       notified = true;
       if (timer) clearInterval(timer);
-      for (const listener of exitListeners) listener(null);
+      for (const listener of exitListeners) listener(gone(pid, hostIdentity) ? 0 : null);
     }
   }
   function hasExited(): boolean {
@@ -1479,6 +1542,8 @@ export async function adoptInstalledGatewayProcess(
           throw new Error('ElastOS process identity changed. Refusing to signal a reused PID.');
         }
         process.kill(stopPid, signal);
+      } else {
+        signalProcessGroup(pid, signal);
       }
     },
   };

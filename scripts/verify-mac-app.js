@@ -10,6 +10,13 @@ const loaderOnly = process.argv[3] === '--loader-only';
 if (!loaderOnly && process.env.GITHUB_ACTIONS !== 'true') {
   throw new Error('Full packaged launch runs only on the GitHub runner. Use --loader-only locally.');
 }
+const helper = path.join(process.argv[2], 'Contents', 'Resources', 'app.asar.unpacked', 'dist', 'native', 'mac-process-info');
+const identity = spawnSync(helper, [String(process.pid)], { encoding: 'utf8', timeout: 5000 });
+assert.equal(identity.status, 0, identity.error?.message || identity.stderr);
+const newline = identity.stdout.indexOf('\n');
+assert.match(identity.stdout.slice(0, newline), /^\d+\.\d{6}$/);
+assert.equal(identity.stdout.slice(newline + 1), fs.realpathSync(process.execPath));
+console.log('PASS packaged native helper reads the actual executable and process birth time');
 const loaderHome = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'launcher-app-check-'));
 const binary = path.join(process.argv[2], 'Contents', 'MacOS', 'ElastOS');
 const marker = 'PASS packaged Electron starts';
