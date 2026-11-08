@@ -32,7 +32,7 @@ async function main() {
   try {
     const page = await app.firstWindow();
     await page.waitForLoadState('domcontentloaded');
-    const geometry = await app.evaluate(({ ipcMain, BrowserWindow, app }) => {
+    await app.evaluate(({ ipcMain, BrowserWindow, app }) => {
       global.__dialogCalls = [];
       const info = { id: 'runtime', status: 'stopped', openUrl: 'http://localhost:8090/home/',
         preflight: { ok: true, checks: [] }, openAtLogin: false, canRollback: true };
@@ -65,20 +65,28 @@ async function main() {
       window.webContents.send = (channel, ...args) => send(channel,
         ...(channel === 'elastos:status' ? ['stopped'] : args));
       window.setPosition(100, 100);
-      // Hosted Macs clamp the requested 860px window to their shorter display.
-      // Fit the intended CSS viewport on that display; native coordinates below
-      // use the measured zoom, and Logs calibrates the OS click translation.
-      const bounds = window.getContentBounds();
-      window.webContents.setZoomFactor(Math.min(1, bounds.height / 860));
       window.show(); window.focus(); app.focus({ steal: true });
-      return { bounds, zoom: window.webContents.getZoomFactor() };
     });
-    console.log(`Dialog viewport: ${JSON.stringify(geometry)}`);
     await page.reload();
     await page.locator('#remove-pc2-btn').waitFor({ state: 'visible' });
     await page.waitForTimeout(2100);
     assert.equal(await page.locator('#status-text').textContent(), 'Stopped', 'fixture survives the production status poll');
     assert.equal(await page.locator('#uninstall-btn').isEnabled(), true);
+    // Set size after ready-to-show/reload has settled. Both packages must use
+    // the same native bounds and CSS viewport, even on a short hosted display.
+    const geometry = await app.evaluate(({ BrowserWindow }) => {
+      const window = BrowserWindow.getAllWindows()[0];
+      window.setContentSize(500, 600);
+      window.setPosition(100, 100);
+      window.webContents.setZoomFactor(600 / 860);
+      return { bounds: window.getContentBounds(), zoom: window.webContents.getZoomFactor() };
+    });
+    assert.deepEqual(geometry.bounds, { x: 100, y: 100, width: 500, height: 600 });
+    console.log(`Dialog viewport: ${JSON.stringify(geometry)}`);
+    for (let attempt = 0; attempt < 20; attempt++) {
+      if (Math.abs(await page.evaluate(() => innerHeight) - 860) < 1) break;
+      await page.waitForTimeout(100);
+    }
     const dragElements = await page.evaluate(() => [...document.querySelectorAll('*')]
       .filter((el) => getComputedStyle(el).webkitAppRegion === 'drag')
       .map((el) => el.tagName === 'BODY' ? 'body' : el.className));
@@ -115,9 +123,10 @@ async function main() {
           for (let node = element; node; node = node.parentElement) {
             ancestors.push({ element: identify(node), region: getComputedStyle(node).webkitAppRegion, rect: rect(node) });
           }
-          return { control: identify(element), center, drag, regions, ancestors,
+          return { control: identify(element), center, drag, regions, ancestors, viewportHeight: innerHeight,
             card: rect(document.querySelector('.hardware-box')), dialog: rect(document.querySelector('.confirm-content')) };
         });
+        assert.ok(Math.abs(report.viewportHeight - 860) < 1, 'both packages retain the same 860px CSS viewport');
         console.log(`${report.drag ? 'FAIL' : 'PASS'} region ${label} ${JSON.stringify(report)}`);
         if (report.drag) failures.push(`${label} ${report.control}`);
       }
