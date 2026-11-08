@@ -25,6 +25,9 @@ const {
   procListenersFor,
   procNetAddress,
   procNetListeners,
+  procStatParent,
+  descendantPids,
+  listenersFromProcSnapshot,
 } = require('../dist/main/targets/runtimeGateway');
 const { uninstallRuntime } = require('../dist/main/targets/runtimeUninstall');
 
@@ -223,6 +226,29 @@ test('the gateway must own every localhost listener, on 127.0.0.1 and on ::1', (
   // (macOS lsof cannot list another account's sockets).
   assert.equal(listenerOwnership(procListenersFor(tcp, '', ['socket:[4242]']), wants, ['127.0.0.1', '::1']), 'foreign');
   assert.equal(listenerOwnership(procListenersFor(tcp, tcp6, ['socket:[4242]', 'socket:[4343]']), wants, ['::1']), 'owned');
+});
+
+test('a Home controller owns port 8090 when its child listens', () => {
+  const tcp = [TCP_HEADER, tcpRow('0100007F', 4242)].join('\n');
+  const tcp6 = [TCP_HEADER, tcpRow(V6_LOOPBACK, 4343)].join('\n');
+  const wants = ['127.0.0.1', '::1'];
+  assert.deepEqual(procStatParent('20 (elastos home) S 10 9'), { pid: 20, ppid: 10 });
+  assert.equal(procStatParent('no-paren'), null);
+  assert.deepEqual(
+    descendantPids(10, [{ pid: 20, ppid: 10 }, { pid: 21, ppid: 20 }, { pid: 30, ppid: 1 }]).sort((a, b) => a - b),
+    [10, 20, 21],
+  );
+  const child = [
+    { pid: 10, ppid: 1, fdLinks: ['pipe:[1]'] },
+    { pid: 20, ppid: 10, fdLinks: ['socket:[4242]', 'socket:[4343]'] },
+  ];
+  assert.equal(listenerOwnership(listenersFromProcSnapshot(tcp, tcp6, 10, child), wants), 'owned');
+  const stranger = [
+    { pid: 10, ppid: 1, fdLinks: [] },
+    { pid: 20, ppid: 10, fdLinks: ['socket:[4242]'] },
+    { pid: 30, ppid: 1, fdLinks: ['socket:[4343]'] },
+  ];
+  assert.equal(listenerOwnership(listenersFromProcSnapshot(tcp, tcp6, 10, stranger), wants), 'foreign');
 });
 
 test('lsof listeners name the owner pid for IPv4, [::1], and *', () => {

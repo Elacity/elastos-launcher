@@ -278,6 +278,65 @@ export function procListenersFor(tcp: string, tcp6: string, fdLinks: readonly st
   return procNetListeners(tcp, tcp6, port).map((entry) => ({ address: entry.address, owned: owned.has(entry.inode) }));
 }
 
+export interface ProcProcess {
+  pid: number;
+  ppid: number;
+  fdLinks: readonly string[];
+}
+
+/** `comm` may contain spaces. The kernel ends the name at the last `)`. */
+export function procStatParent(stat: string): { pid: number; ppid: number } | null {
+  const end = stat.lastIndexOf(')');
+  const space = stat.indexOf(' ');
+  if (end < 0 || space <= 0 || space > end) return null;
+  const pid = Number(stat.slice(0, space));
+  const ppid = Number(stat.slice(end + 2).split(' ')[1]);
+  if (!Number.isInteger(pid) || pid <= 0 || !Number.isInteger(ppid) || ppid < 0) return null;
+  return { pid, ppid };
+}
+
+/** `root` and every process that descends from it. A cycle is visited once. */
+export function descendantPids(root: number, rows: readonly { pid: number; ppid: number }[]): number[] {
+  const children = new Map<number, number[]>();
+  for (const row of rows) {
+    const list = children.get(row.ppid);
+    if (list) list.push(row.pid);
+    else children.set(row.ppid, [row.pid]);
+  }
+  const out: number[] = [];
+  const seen = new Set<number>();
+  const stack = [root];
+  while (stack.length > 0) {
+    const pid = stack.pop() as number;
+    if (seen.has(pid)) continue;
+    seen.add(pid);
+    out.push(pid);
+    const kids = children.get(pid);
+    if (kids) for (const kid of kids) stack.push(kid);
+  }
+  return out;
+}
+
+/**
+ * The Home controller does not hold the listen socket. Its child does.
+ * A socket of a process outside that tree stays foreign.
+ */
+export function listenersFromProcSnapshot(
+  tcp: string,
+  tcp6: string,
+  root: number,
+  rows: readonly ProcProcess[],
+  port = GATEWAY_PORT,
+): PortListener[] {
+  const tree = new Set(descendantPids(root, rows));
+  const links: string[] = [];
+  for (const row of rows) {
+    if (!tree.has(row.pid)) continue;
+    for (const link of row.fdLinks) links.push(link);
+  }
+  return procListenersFor(tcp, tcp6, links, port);
+}
+
 /**
  * `lsof -nP -iTCP:<port> -sTCP:LISTEN -Fpn` output. `n` names look like
  * `127.0.0.1:8090`, `[::1]:8090`, or `*:8090`. A socket of another account is
@@ -723,38 +782,82 @@ export async function probeGatewayHealth(options: {
   return combineHealth(results);
 }
 
-/** LISTEN sockets on the gateway port, marked by whether `pid` holds each. Null when they cannot be read. */
+const PROC_STAT_MAX = 4096;
+const PROC_TREE_MAX = 64;
+
+function fdLinks(pid: number): string[] | null {
+  const links: string[] = [];
+  let names: string[];
+  try {
+    names = fs.readdirSync(`/proc/${pid}/fd`);
+  } catch {
+    return null;
+  }
+  for (const name of names) {
+    try {
+      links.push(fs.readlinkSync(`/proc/${pid}/fd/${name}`));
+    } catch {
+      // A descriptor can disappear between readdir and readlink.
+    }
+  }
+  return links;
+}
+
+/** Listeners held by `pid` or its descendants. Null when the tree cannot be read. */
+function linuxProcessListeners(pid: number): PortListener[] | null {
+  let tcp: string;
+  try {
+    tcp = fs.readFileSync('/proc/net/tcp', 'utf8');
+  } catch {
+    return null;
+  }
+  let tcp6 = '';
+  try {
+    tcp6 = fs.readFileSync('/proc/net/tcp6', 'utf8');
+  } catch {
+    // No IPv6 on this kernel. Nothing can listen on ::1.
+    tcp6 = '';
+  }
+  let names: string[];
+  try {
+    names = fs.readdirSync('/proc');
+  } catch {
+    return null;
+  }
+  const parents: { pid: number; ppid: number }[] = [];
+  for (const name of names) {
+    if (!/^[1-9][0-9]*$/.test(name)) continue;
+    try {
+      const buf = fs.readFileSync(`/proc/${name}/stat`);
+      if (buf.length > PROC_STAT_MAX) continue;
+      const parsed = procStatParent(buf.toString('utf8'));
+      if (parsed && parsed.pid === Number(name)) parents.push(parsed);
+    } catch {
+      // The process can exit between readdir and the stat read.
+    }
+  }
+  if (!parents.some((row) => row.pid === pid)) return null;
+  let tree = descendantPids(pid, parents);
+  if (tree.length > PROC_TREE_MAX) {
+    tree = [pid, ...parents.filter((row) => row.ppid === pid).map((row) => row.pid)];
+  }
+  if (tree.length > PROC_TREE_MAX) return null;
+  const rootLinks = fdLinks(pid);
+  if (!rootLinks) return null;
+  const rows: ProcProcess[] = [{ pid, ppid: parents.find((row) => row.pid === pid)?.ppid ?? 0, fdLinks: rootLinks }];
+  for (const id of tree) {
+    if (id === pid) continue;
+    const links = fdLinks(id);
+    if (!links) return null;
+    rows.push({ pid: id, ppid: parents.find((row) => row.pid === id)?.ppid ?? 0, fdLinks: links });
+  }
+  return listenersFromProcSnapshot(tcp, tcp6, pid, rows);
+}
+
+/** LISTEN sockets on the gateway port, marked by whether `pid` or a descendant holds each. Null when they cannot be read. */
 export async function localListeners(pid: number, platform: string = process.platform): Promise<PortListener[] | null> {
   if (!Number.isInteger(pid) || pid <= 0) return null;
-  if (platform === 'linux') {
-    let tcp: string;
-    try {
-      tcp = fs.readFileSync('/proc/net/tcp', 'utf8');
-    } catch {
-      return null;
-    }
-    let tcp6 = '';
-    try {
-      tcp6 = fs.readFileSync('/proc/net/tcp6', 'utf8');
-    } catch {
-      // No IPv6 on this kernel. Nothing can listen on ::1.
-      tcp6 = '';
-    }
-    const links: string[] = [];
-    try {
-      const dir = `/proc/${pid}/fd`;
-      for (const name of fs.readdirSync(dir)) {
-        try {
-          links.push(fs.readlinkSync(`${dir}/${name}`));
-        } catch {
-          // A descriptor can disappear between readdir and readlink.
-        }
-      }
-    } catch {
-      return null;
-    }
-    return procListenersFor(tcp, tcp6, links);
-  }
+  if (platform === 'linux') return linuxProcessListeners(pid);
   if (platform === 'darwin') {
     return new Promise((resolve) => {
       execFile('lsof', ['-nP', `-iTCP:${GATEWAY_PORT}`, '-sTCP:LISTEN', '-Fpn'], {
