@@ -17,13 +17,8 @@ export function createOpenHome(launch: {
         const result = await launch.start();
         if (result === 'stopped') return;
         if (startOpensBrowser && (result === 'started' || result === 'already-running')) return;
-        // Start can reuse the controller after an earlier status probe saw it
-        // starting. That call did not run home --browser again.
-        const deadline = Date.now() + 150_000;
-        while (await launch.getStatus() !== 'running') {
-          if (Date.now() >= deadline) throw new Error('Home did not become ready in time. Try Open Home again.');
-          await new Promise(resolve => setTimeout(resolve, 250));
-        }
+        // A reused controller waits for health in start(), but does not run
+        // home --browser again. This click must open the ready Home itself.
       }
       launch.openInBrowser();
     })().finally(() => { opening = null; });

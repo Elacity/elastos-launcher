@@ -1058,7 +1058,16 @@ export function createGatewaySupervisor(deps: GatewaySupervisorDeps): GatewaySup
       if (owned && current === 'running') {
         const exited = await owned.hasExited();
         if (lifetime.shuttingDown) return 'stopped';
-        if (!exited) return 'running';
+        if (!exited) {
+          const deadline = deps.now() + healthTimeoutMs;
+          while (deps.now() < deadline) {
+            const health = await deps.fetchHealth();
+            if (lifetime.shuttingDown) return 'stopped';
+            if (isHealthOk(health)) return 'running';
+            await deps.sleep(pollMs);
+          }
+          throw new Error('ElastOS did not become ready in time. Try Open Home again.');
+        }
         owned = null;
       }
       current = 'starting';
