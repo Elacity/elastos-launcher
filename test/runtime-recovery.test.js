@@ -57,17 +57,6 @@ function deps(overrides = {}) {
   return world;
 }
 
-test('the error screen offers Try again and Fix it', () => {
-  const html = fs.readFileSync(path.join(__dirname, '../src/renderer/index.html'), 'utf8');
-  const app = fs.readFileSync(path.join(__dirname, '../src/renderer/app.js'), 'utf8');
-  assert.match(html, /id="error-title"/);
-  assert.match(html, /id="fix-btn"/);
-  assert.match(html, />Fix it</);
-  assert.match(html, />Try again</);
-  assert.match(app, /describeFailure/);
-  assert.match(app, /fixFailure/);
-});
-
 test('an offline failure does not install', async () => {
   const input = facts({
     checks: [{ id: 'network', level: 'block', message: 'You appear to be offline.' }],
@@ -75,8 +64,8 @@ test('an offline failure does not install', async () => {
   const screen = failureScreen(input);
   assert.equal(screen.kind, 'offline');
   assert.equal(screen.title, 'You are offline');
-  assert.equal(screen.fixLabel, 'Fix it');
-  assert.equal(screen.retryLabel, 'Try again');
+  assert.equal(screen.fixLabel, 'Try Again');
+  assert.equal(screen.retryLabel, 'Try Again');
   const blocked = deps();
   assert.equal(await applyFix(input, blocked), 'still-blocked');
   assert.deepEqual(blocked.calls, ['online']);
@@ -92,7 +81,7 @@ test('a busy port is not cleared by killing another program', async () => {
   });
   const screen = failureScreen(input);
   assert.equal(screen.kind, 'port');
-  assert.match(screen.message, /will not close other programs/);
+  assert.match(screen.message, /Another app is preventing Home from starting/);
   const busy = deps();
   assert.equal(await applyFix(input, busy), 'still-blocked');
   assert.deepEqual(busy.calls, ['port']);
@@ -129,8 +118,7 @@ test('an interrupted install continues setup and does not download', async () =>
   const input = facts({ binaryPresent: true, componentsPresent: false });
   const screen = failureScreen(input);
   assert.equal(screen.kind, 'interrupted');
-  assert.match(screen.message, /check the signed release again/);
-  assert.match(screen.message, /installer is not downloaded again/);
+  assert.equal(screen.message, 'ElastOS setup did not finish.');
   const world = deps();
   assert.equal(await applyFix(input, world), 'ready');
   assert.deepEqual(world.calls, ['setup']);
@@ -143,7 +131,7 @@ test('a stale host lock is removed and a live one is left alone', async () => {
   const stale = facts({ lockText: LOCK_TEXT, lockPath: LOCK, pidAlive: () => false });
   const screen = failureScreen(stale);
   assert.equal(screen.kind, 'stale-lock');
-  assert.match(screen.message, /left alone/);
+  assert.match(screen.message, /did not close properly/);
   const world = deps();
   assert.equal(await applyFix(stale, world), 'ready');
   assert.deepEqual(world.calls, [['remove', LOCK]]);
@@ -214,8 +202,59 @@ test('a secret or a stack trace is not the error screen', () => {
   assert.equal(secret.fixLabel, null);
   assert.equal(secret.message.includes('sekrit'), false);
   const stack = failureScreen(facts({ error: '    at run (/tmp/app.js:10:1)' }));
-  assert.match(stack.message, /Try again/);
+  assert.match(stack.message, /ElastOS could not finish/);
   assert.equal(stack.message.includes('app.js'), false);
   const plain = failureScreen(facts({ error: 'The download stopped.' }));
   assert.equal(plain.message, 'The download stopped.');
+});
+
+test('every failure screen uses short plain copy with safety facts and a verb action', () => {
+  const inputs = [
+    facts({ checks: [{ id: 'network', level: 'block', message: 'offline' }] }),
+    facts({ checks: [{ id: 'port', level: 'block', message: 'Port 8090 is busy' }] }),
+    facts({ binaryPresent: true }),
+    facts({ lockText: LOCK_TEXT }),
+    facts({ checks: [{ id: 'windows', level: 'block', message: 'WSL JSON internals. Click Fix it.' }] }),
+    facts({ error: 'Release head is not valid JSON.' }),
+    facts({ error: 'Unexpected token in JSON at /private/secret' }),
+    facts({ error: 'Your computer is already running.' }),
+    facts({ error: 'Restart Windows. When you open ElastOS again, Install continues.' }),
+    facts({ error: 'ElastOS did not reset /private/data. This folder has no signed ElastOS install record. Click Fix it.' }),
+  ];
+  for (const input of inputs) {
+    const screen = failureScreen(input);
+    assert.match(screen.message, /^[^.?!\n]+[.!?](?: [^.?!\n]+[.!?])?$/, screen.kind);
+    assert.doesNotMatch(`${screen.title} ${screen.message}`, /port|lock|session|signed|JSON|WSL|\/private|click|already running|commands/i);
+    assert.equal(screen.retryLabel, 'Try Again');
+    if (screen.fixLabel) assert.equal(screen.fixLabel, 'Try Again');
+  }
+});
+
+test('the no-record screen keeps Home data and says nothing was deleted', () => {
+  const screen = failureScreen(facts({ error: 'This folder has no signed ElastOS install record.' }));
+  assert.equal(screen.kind, 'no-record');
+  assert.match(screen.message, /Home data is kept/);
+  assert.match(screen.message, /nothing was deleted/i);
+});
+
+test('the backup refusal screen says nothing was deleted', () => {
+  for (const error of [
+    'ElastOS was not reset. A copy of your data cannot be saved here. Nothing was deleted.',
+    'ElastOS was not reset. The copy of your data could not be saved (disk full). Nothing was deleted.',
+    'ElastOS was not reset. There is not enough free space for a copy of your data. Nothing was deleted.',
+  ]) {
+    const screen = failureScreen(facts({ error }));
+    assert.match(screen.message, /ElastOS could not finish/);
+    assert.match(screen.message, /nothing was deleted/i);
+  }
+});
+
+test('the busy port screen says ElastOS will not close the other app', () => {
+  const screen = failureScreen(facts({ checks: [{ id: 'port', level: 'block', message: 'busy' }] }));
+  assert.match(screen.message, /ElastOS will not close the other app/);
+});
+
+test('the stale lock screen says a running Home is left alone', () => {
+  const screen = failureScreen(facts({ lockText: LOCK_TEXT }));
+  assert.match(screen.message, /a running Home is left alone/);
 });

@@ -59,18 +59,10 @@ async function main() {
   });
 
   try {
-    const page = await electronApp.firstWindow();
-    const deadline = Date.now() + 90000;
-    let visible = false;
-    while (Date.now() < deadline) {
-      visible = await page.locator('#remove-pc2-btn').evaluate((node) => !node.classList.contains('hidden'));
-      if (visible) break;
-      await page.waitForTimeout(200);
-    }
-    const label = (await page.locator('#remove-pc2-btn').innerText()).trim();
-    if (!visible || label !== 'Remove PC2') {
-      throw new Error(`Remove PC2 was not offered (visible=${visible}, label=${label})`);
-    }
+    const { waitFor } = require('./tray-e2e');
+    await waitFor(() => electronApp.evaluate(() => global.__elastosTrayMenu?.items
+      .find(item => item.label === 'Troubleshoot')?.submenu.items
+      .some(item => item.label === 'Remove Old PC2 Files…')), 90000, 'PC2 menu item was not offered');
     const pkg = JSON.parse(fs.readFileSync(path.join(pc2, 'package.json'), 'utf8'));
     if (pkg.name !== 'puter') throw new Error('~/.pc2 was changed before Remove PC2 was confirmed');
     if (!server.listening) throw new Error('the listener on port 4200 is gone');

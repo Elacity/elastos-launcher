@@ -1,7 +1,13 @@
 import * as os from 'os';
+import { runtimeDataDir, runtimeJoin } from './targets/runtimePaths';
+import { DISTRO_HOME, DISTRO_NAME } from './targets/windowsRuntime';
+export { isLoginLaunch, startHomeAtLogin } from './targets/openAtLogin';
+
 import { applyOpenAtLogin, readOpenAtLogin } from './targets/openAtLogin';
 import { buildDiagnostics, collectPreflight, PreflightReport, saveCollectedSupportBundle } from './targets/preflight';
-import { confirmInstalledGateway, isForeignGatewayError, isHealthOk, probeGatewayHealth, STOP_GRACE_MS } from './targets/runtimeGateway';
+import { confirmInstalledGateway, homeLaunchForPlatform, isForeignGatewayError, isHealthOk, probeGatewayHealth, STOP_GRACE_MS } from './targets/runtimeGateway';
+
+export { homeLaunchForPlatform };
 import { collectFailureFacts, failureScreen, FailureScreen, fixCollectedFailure, windowsFixResult } from './targets/runtimeRecovery';
 import { resolveLaunchTargetId } from './targets/preferences';
 import { LAUNCH_TARGET_ENV, retiredPc2Notice } from './targets/registry';
@@ -10,15 +16,21 @@ import { setRuntimeLogSink } from './targets/runtimeGateway';
 import { loadActiveRuntimePin } from './targets/runtimePin';
 import { browserNote } from './targets/runtimeSupport';
 import { runtimeHeadStore } from './targets/runtimeUpdate';
-import { rollbackRuntimeUpdate } from './targets/runtimeTarget';
 import { BackupDescription, describeRuntimeBackupOnThisComputer } from './targets/runtimeBackup';
 import { resetRuntimeOnThisComputer, ResetResult } from './targets/runtimeUninstall';
 import { describeDistroBackupOnThisComputer, resetRuntimeInDistroOnThisComputer } from './targets/windowsReset';
-import { UninstallPrompt, UninstallResult, uninstallRuntimeInDistroOnThisComputer } from './targets/windowsUninstall';
+import { UninstallPrompt, UninstallResult, uninstallRuntimeInDistroOnThisComputer, uninstallDistroProgramOnThisComputer } from './targets/windowsUninstall';
 import { finishResumeInstall as clearResumeInstall, fixWindowsOnThisComputer, resumeInstallPlanOnThisComputer, ResumeInstallPlan } from './targets/windowsHost';
-import { LaunchTarget, LaunchTargetId, TargetStatus, UpdateCheck } from './targets/types';
+import { HomeStartResult, LaunchTarget, LaunchTargetId, TargetStatus, UpdateCheck } from './targets/types';
 
 export type { TargetStatus };
+
+export function homeLogFolder(platform: string, home: string, env: NodeJS.ProcessEnv): string {
+  if (platform === 'win32') {
+    return `\\\\wsl.localhost\\${DISTRO_NAME}${runtimeDataDir('linux', DISTRO_HOME, {}).replace(/\//g, '\\')}\\logs`;
+  }
+  return runtimeJoin(runtimeDataDir(platform, home, env), 'logs');
+}
 
 export interface LaunchControllerOptions {
   explicit?: string | null;
@@ -29,14 +41,15 @@ export interface LaunchController {
   readonly target: LaunchTarget;
   onStatusChange(listener: (status: TargetStatus) => void): void;
   onLog(listener: (line: string) => void): void;
+  onActionSuccess(listener: () => void): void;
   getStatus(): Promise<TargetStatus>;
-  start(): Promise<void>;
+  start(): Promise<HomeStartResult>;
   stop(): Promise<void>;
   restart(): Promise<void>;
   install(onProgress: (message: string) => void): Promise<void>;
   update(onProgress: (message: string) => void): Promise<void>;
   /** On Windows `confirmRemoval` asks the second question before the Linux environment is saved and removed. */
-  uninstall(confirmRemoval?: (prompt: UninstallPrompt) => Promise<unknown>): Promise<UninstallResult | void>;
+  uninstall(confirmRemoval?: (prompt: UninstallPrompt) => Promise<unknown>, deleteData?: boolean): Promise<UninstallResult | void>;
   /** `choice.backup` must be true or false. Anything else resets nothing. */
   resetRuntime(choice?: { backup?: unknown }): Promise<ResetResult>;
   describeResetBackup(): Promise<BackupDescription>;
@@ -50,8 +63,8 @@ export interface LaunchController {
   getPreflight(): Promise<PreflightReport>;
   getDiagnostics(): Promise<string>;
   saveSupportBundle(): Promise<string>;
-  describeFailure(): Promise<FailureScreen>;
-  fixFailure(): Promise<'ready' | 'still-blocked'>;
+  describeFailure(error?: unknown): Promise<FailureScreen>;
+  fixFailure(error?: unknown): Promise<'ready' | 'still-blocked'>;
   resumeInstallPlan(): Promise<ResumeInstallPlan>;
   finishResumeInstall(ok: boolean): void;
   setOpenAtLogin(enabled: boolean): void;
@@ -122,13 +135,17 @@ export interface LaunchInfo {
   openUrl: string;
   status: TargetStatus;
   platformNote: string | null;
+  error: string | null;
   /** Shown in the info panel. Windows only: its Browser is not available yet. */
   browserNote: string | null;
   /** Windows: Uninstall saves the whole Linux environment as one file, then removes it. */
   uninstallRemovesLinux: boolean;
+  /** `home --browser` opens one tab. The launcher does not open a second one after Start. */
+  runtimeOpensBrowser: boolean;
   preflight: PreflightReport;
   openAtLogin: boolean;
   canRollback: boolean;
+  openBrowserAfterInstall: boolean;
 }
 
 function messageOf(err: unknown): string {
@@ -147,10 +164,12 @@ export function createLaunchController(options: LaunchControllerOptions = {}): L
     env: options.env,
   });
   const active = createLaunchTarget(id);
+  let shuttingDown = false;
   let lastError = '';
   const statusListeners: Array<(status: TargetStatus) => void> = [];
   const logListeners: Array<(line: string) => void> = [];
   const runtimeLogs: string[] = [];
+  const actionListeners: Array<() => void> = [];
 
   const emitStatus = (status: TargetStatus) => {
     for (const listener of statusListeners) listener(status);
@@ -163,9 +182,16 @@ export function createLaunchController(options: LaunchControllerOptions = {}): L
   setRuntimeLogSink(emitLog);
   if (retired) emitLog(retired);
 
-  async function runRuntime<T>(action: () => Promise<T>): Promise<T> {
+  function clearLastError(): void {
+    lastError = '';
+    for (const listener of actionListeners) listener();
+  }
+
+  async function runRuntime<T>(action: () => Promise<T>, clearsError = false): Promise<T> {
     try {
-      return await action();
+      const result = await action();
+      if (clearsError) clearLastError();
+      return result;
     } catch (err) {
       lastError = messageOf(err);
       emitLog(lastError);
@@ -174,9 +200,16 @@ export function createLaunchController(options: LaunchControllerOptions = {}): L
     }
   }
 
-  function runRuntimeSync<T>(action: () => T): T {
+  // Also refuse new update/rollback commands and UI success events after Quit.
+  function runWhileActive(action: () => Promise<void>): Promise<void> {
+    return shuttingDown ? Promise.resolve() : runRuntime(action, true);
+  }
+
+  function runRuntimeSync<T>(action: () => T, clearsError = false): T {
     try {
-      return action();
+      const result = action();
+      if (clearsError) clearLastError();
+      return result;
     } catch (err) {
       lastError = messageOf(err);
       emitLog(lastError);
@@ -186,7 +219,7 @@ export function createLaunchController(options: LaunchControllerOptions = {}): L
   }
 
   async function currentStatus(): Promise<TargetStatus> {
-    return runRuntime(() => active.getStatus());
+    return active.getStatus();
   }
 
   async function diagnosticsText(): Promise<string> {
@@ -216,7 +249,7 @@ export function createLaunchController(options: LaunchControllerOptions = {}): L
     const probed = await probeGatewayHealth({ timeoutMs: 800 });
     const health = isHealthOk(probed) ? 'OK' : 'not answering';
     return buildDiagnostics({
-      launcherVersion: '1.4.0',
+      launcherVersion: require('../../package.json').version,
       runtimeVersion,
       target: active.id,
       channel,
@@ -241,40 +274,45 @@ export function createLaunchController(options: LaunchControllerOptions = {}): L
     onLog(listener) {
       logListeners.push(listener);
     },
+    onActionSuccess(listener) {
+      actionListeners.push(listener);
+    },
     getStatus: () => currentStatus(),
-    start: () => runRuntime(() => active.start()),
-    stop: () => runRuntime(() => active.stop()),
-    restart: () => runRuntime(() => active.restart()),
-    install: (onProgress) => runRuntime(() => active.install(onProgress)),
-    update: (onProgress) => runRuntime(() => active.update(onProgress)),
-    // On Windows, Uninstall removes the ElastOS Linux environment, after the Reset checks and a second question.
-    uninstall: (confirmRemoval) => runRuntime<UninstallResult | void>(() => (process.platform === 'win32'
-      ? uninstallRuntimeInDistroOnThisComputer(() => active.stopForRemoval(), confirmRemoval ?? (async () => false))
-      : active.uninstall())),
+    start: () => shuttingDown ? Promise.resolve('stopped') : runRuntime(() => active.start(), true),
+    stop: () => runRuntime(() => active.stop(), true),
+    restart: () => runWhileActive(() => active.restart()),
+    install: (onProgress) => runRuntime(() => active.install(onProgress), true),
+    update: (onProgress) => runWhileActive(() => active.update(onProgress)),
+    // Windows preserves the Home in place, or exports and removes its environment after a second question.
+    uninstall: (confirmRemoval, deleteData = false) => runRuntime<UninstallResult | void>(() => (process.platform === 'win32'
+      ? (deleteData ? uninstallRuntimeInDistroOnThisComputer(() => active.stopForRemoval(), confirmRemoval ?? (async () => false)) : uninstallDistroProgramOnThisComputer(() => active.stopForRemoval()))
+      : active.uninstall(deleteData)), true),
     // On Windows the ElastOS data is inside the ElastOS Linux environment, so Reset works there.
     resetRuntime: (choice) => runRuntime(() => (process.platform === 'win32'
       ? resetRuntimeInDistroOnThisComputer(() => active.stopForRemoval(), choice ?? {})
-      : resetRuntimeOnThisComputer(() => active.stopForRemoval(), choice ?? {}))),
+      : resetRuntimeOnThisComputer(() => active.stopForRemoval(), choice ?? {})), true),
     describeResetBackup: () => (process.platform === 'win32'
       ? describeDistroBackupOnThisComputer()
       : describeRuntimeBackupOnThisComputer()),
-    rollback: (onProgress) => runRuntime(() => rollbackRuntimeUpdate(onProgress)),
-    getVersion: () => runRuntimeSync(() => active.getVersion()),
-    checkForUpdate: () => runRuntime(() => active.checkForUpdate()),
+    rollback: (onProgress) => runWhileActive(() => active.rollback(onProgress)),
+    getVersion: () => active.getVersion(),
+    checkForUpdate: () => active.checkForUpdate(),
     openInBrowser: () => {
-      runRuntimeSync(() => active.openInBrowser());
+      runRuntimeSync(() => active.openInBrowser(), true);
     },
     getLogs: (lines) => {
       const count = lines ?? runtimeLogs.length;
       return Promise.resolve(runtimeLogs.slice(-count).join('\n'));
     },
-    isInstalled: () => runRuntime(() => active.isInstalled()),
+    isInstalled: () => active.isInstalled(),
     async getLaunchInfo() {
       let status: TargetStatus = 'stopped';
+      let error = lastError;
       try {
         status = await currentStatus();
-      } catch {
+      } catch (err) {
         status = 'error';
+        error = messageOf(err);
       }
       const preflight = await collectPreflight();
       const platform = preflight.checks.find((check) => check.id === 'platform' && check.level === 'block');
@@ -283,22 +321,25 @@ export function createLaunchController(options: LaunchControllerOptions = {}): L
         displayName: active.descriptor.displayName,
         openUrl: active.descriptor.openUrl,
         status,
+        error: status === 'error' ? error : null,
         platformNote: platform?.message ?? null,
         browserNote: browserNote(process.platform),
+        runtimeOpensBrowser: homeLaunchForPlatform(process.platform).args[0] === 'home',
         uninstallRemovesLinux: process.platform === 'win32',
         preflight,
         openAtLogin: readOpenAtLogin(),
         canRollback: Boolean(runtimeHeadStore().get()),
+        openBrowserAfterInstall: homeLaunchForPlatform(process.platform).openBrowserAfterInstall,
       };
     },
     getPreflight: () => collectPreflight(),
-    async describeFailure() {
+    async describeFailure(error?: unknown) {
       const preflight = await collectPreflight();
-      return failureScreen(collectFailureFacts(lastError, preflight.checks));
+      return failureScreen(collectFailureFacts(error === undefined ? lastError : messageOf(error), preflight.checks));
     },
-    async fixFailure() {
+    async fixFailure(error?: unknown) {
       const preflight = await collectPreflight();
-      const facts = collectFailureFacts(lastError, preflight.checks);
+      const facts = collectFailureFacts(error === undefined ? lastError : messageOf(error), preflight.checks);
       if (failureScreen(facts).kind === 'windows') {
         return windowsFixResult(
           () => fixWindowsOnThisComputer(),
@@ -323,6 +364,9 @@ export function createLaunchController(options: LaunchControllerOptions = {}): L
       return readOpenAtLogin();
     },
     async shutdown() {
+      // Shutdown ends this controller's lifetime, even if stopping fails.
+      shuttingDown = true;
+      active.beginShutdown();
       try {
         await active.stop();
       } catch (err) {

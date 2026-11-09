@@ -8,17 +8,17 @@ const { removeVerifiedTarget, resetRuntime, sweepRemovalHoldings } = require('..
 const { foreignRuntimeDataMessage, isRuntimeDataName, launcherOwnedDirectories, signedInstallRecord } = require('../dist/main/targets/runtimePaths');
 const { ForeignGatewayError } = require('../dist/main/targets/runtimeGateway');
 const { applyFix, failureScreen } = require('../dist/main/targets/runtimeRecovery');
-const flow = require('../src/renderer/flow.js');
 
 test('reset removes the runtime program, data, and unfinished install', async () => {
+  const home = require('node:path').join(require('node:fs').realpathSync(require('node:os').tmpdir()), 'fixture-home');
   const removed = [];
   const calls = [];
   await resetRuntime({
     backup: false,
-    binary: '/home/tester/.local/bin/elastos',
-    dataDir: '/home/tester/.local/share/elastos',
-    stageFile: '/home/tester/.elastos-launcher/install-stage.json',
-    homeDir: '/home/tester',
+    binary: `${home}/.local/bin/elastos`,
+    dataDir: `${home}/.local/share/elastos`,
+    stageFile: `${home}/.elastos-launcher/install-stage.json`,
+    homeDir: `${home}`,
     platform: 'linux',
     env: {},
     stop: async () => { calls.push('stop'); },
@@ -29,13 +29,33 @@ test('reset removes the runtime program, data, and unfinished install', async ()
   });
   assert.deepEqual(calls, [
     'stop',
-    '/home/tester/.local/bin/elastos',
-    '/home/tester/.local/share/elastos',
-    '/home/tester/.elastos-launcher/install-stage.json',
-    '/home/tester/.elastos-launcher/resume-install.json',
-    '/home/tester/.elastos-launcher/resume-install.json.lock',
+    `${home}/.local/bin/elastos`,
+    `${home}/.local/share/elastos`,
+    `${home}/.elastos-launcher/install-stage.json`,
+    `${home}/.elastos-launcher/resume-install.json`,
+    `${home}/.elastos-launcher/resume-install.json.lock`,
   ]);
   assert.deepEqual(removed, calls.slice(1));
+});
+
+test('Mac Reset backs up and removes Runtime Home while preserving the Electron profile and PC2', async () => {
+  const home = path.join(fs.realpathSync(os.tmpdir()), 'launcher-mac-reset-fixture');
+  const data = path.join(home, 'Library', 'Application Support', 'elastos');
+  const stage = path.join(home, '.elastos-launcher', 'install-stage.json');
+  const binary = path.join(home, '.local', 'bin', 'elastos');
+  const calls = [];
+  await resetRuntime({
+    homeDir: home, platform: 'darwin', env: {}, binary, dataDir: data, stageFile: stage,
+    backup: true,
+    stop: async () => { calls.push(['stop']); },
+    saveBackup: async (target) => { calls.push(['backup', target]); return '/scratch/backup.zip'; },
+    remove: (target) => { calls.push(['remove', target]); },
+  });
+  assert.deepEqual(calls, [
+    ['stop'], ['backup', data], ['remove', binary], ['remove', data], ['remove', stage],
+    ['remove', path.join(home, '.elastos-launcher', 'resume-install.json')],
+    ['remove', path.join(home, '.elastos-launcher', 'resume-install.json.lock')],
+  ]);
 });
 
 test('a dotted account name is still a launcher path', async () => {
@@ -69,24 +89,25 @@ test('a dotted account name is still a launcher path', async () => {
   assert.equal(launcherOwnedDirectories('/var/lib/elastos', '/home/tester', 'linux', { XDG_DATA_HOME: '/var/lib' }), false);
   assert.equal(launcherOwnedDirectories('/home/tester/.local/share/elastos', '/home/tester', 'linux', { XDG_DATA_HOME: '/var/lib' }), true);
 
+  const home = path.join(fs.realpathSync(os.tmpdir()), 'jane.doe');
   const removed = [];
   await resetRuntime({
     backup: false,
-    binary: '/home/jane.doe/.local/bin/elastos',
-    dataDir: '/home/jane.doe/.local/share/elastos',
-    stageFile: '/home/jane.doe/.elastos-launcher/install-stage.json',
-    homeDir: '/home/jane.doe',
+    binary: `${home}/.local/bin/elastos`,
+    dataDir: `${home}/.local/share/elastos`,
+    stageFile: `${home}/.elastos-launcher/install-stage.json`,
+    homeDir: `${home}`,
     platform: 'linux',
     env: {},
     stop: async () => {},
     remove: (target) => { removed.push(target); },
   });
   assert.deepEqual(removed, [
-    '/home/jane.doe/.local/bin/elastos',
-    '/home/jane.doe/.local/share/elastos',
-    '/home/jane.doe/.elastos-launcher/install-stage.json',
-    '/home/jane.doe/.elastos-launcher/resume-install.json',
-    '/home/jane.doe/.elastos-launcher/resume-install.json.lock',
+    `${home}/.local/bin/elastos`,
+    `${home}/.local/share/elastos`,
+    `${home}/.elastos-launcher/install-stage.json`,
+    `${home}/.elastos-launcher/resume-install.json`,
+    `${home}/.elastos-launcher/resume-install.json.lock`,
   ]);
 });
 
@@ -148,15 +169,7 @@ test('reset refuses a foreign directory, a live foreign host, and a misnamed sta
     remove,
   }), /install stage/);
 
-  const copy = flow.resetCopy();
-  assert.equal(copy.title, 'Reset ElastOS?');
-  assert.match(copy.body, /install it again/);
-  assert.equal(/terminal|sudo|powershell/i.test(copy.body), false);
-  const html = fs.readFileSync(path.join(__dirname, '../src/renderer/index.html'), 'utf8');
-  const app = fs.readFileSync(path.join(__dirname, '../src/renderer/app.js'), 'utf8');
-  assert.match(html, /id="reset-btn"/);
-  assert.match(app, /resetRuntime/);
-  assert.match(app, /resetCopy/);
+
 });
 
 test('reset refuses a symlink and a dotted foreign directory', async () => {
@@ -567,9 +580,9 @@ test('an old custom XDG install with no installation folder says in plain words 
     assert.deepEqual(screen, {
       kind: 'no-record',
       title: 'Install ElastOS again, then reset',
-      message,
-      retryLabel: 'Try again',
-      fixLabel: 'Fix it',
+      message: 'ElastOS needs to be installed again; Home data is kept and nothing was deleted.',
+      retryLabel: 'Try Again',
+      fixLabel: 'Try Again',
     });
     // Fix it changes nothing itself. The window then runs Install, which writes the signed record.
     const calls = [];
@@ -864,7 +877,11 @@ test('Windows removal does not open a directory and does not use O_NOFOLLOW', ()
  * Install must then run the pinned install.sh (which writes the record), not
  * stop at "already installed". Otherwise Reset refuses again, for ever.
  */
-async function fixItThenReset(breakRecord) {
+async function fixItThenReset(t, breakRecord) {
+  const fixture = require('./helpers/signed-release');
+  const pins = require('../dist/main/targets/runtimePin');
+  const packaged = pins.loadRuntimePinFile();
+  t.mock.method(pins, 'loadRuntimePinFile', () => ({ ...packaged, maintainerDid: fixture.FIXTURE_DID }));
   const { installRuntime, defaultRuntimeInstallDeps } = require('../dist/main/targets/runtimeInstall');
   const { loadActiveRuntimePin } = require('../dist/main/targets/runtimePin');
   const crypto = require('node:crypto');
@@ -876,8 +893,8 @@ async function fixItThenReset(breakRecord) {
     const record = path.join(data, 'installation', 'release-head.json');
     realXdgInstall(data);
     const pinned = loadActiveRuntimePin({});
-    const script = '#!/bin/bash\necho pinned-installer\n';
-    const pin = { ...pinned, installerSha256: crypto.createHash('sha256').update(script).digest('hex') };
+    const script = fixture.SCRIPT;
+    const pin = { ...pinned, maintainerDid: fixture.FIXTURE_DID, version: fixture.FIXTURE_VERSION, headCid: fixture.FIXTURE_HEAD_CID, installerSha256: crypto.createHash('sha256').update(script).digest('hex') };
     // What install.sh writes for the pinned release: sources.json with its head CID.
     fs.writeFileSync(path.join(data, 'sources.json'), JSON.stringify({
       default_source: 'default',
@@ -903,18 +920,18 @@ async function fixItThenReset(breakRecord) {
       homeDir: home,
       env,
       probe: async () => ({ kind: 'version', version: `ElastOS Runtime v${pin.version}`, binaryPath: path.join(home, '.local', 'bin', 'elastos') }),
-      fetchText: async (url) => (url.endsWith('/release-head.json') ? SIGNED_HEAD.toString('utf8') : script),
+      fetchText: async (url) => url.endsWith('/release-head.json') ? fixture.SIGNED_HEAD : url.endsWith('/release.json') ? fixture.MANIFEST : script,
       // install-release writes the verified head into installation/ (runtime update.rs install_release).
       runInstaller: async (file, args) => {
         installs.push([file, [...args]]);
         fs.rmSync(record, { force: true });
-        fs.writeFileSync(record, SIGNED_HEAD, { mode: 0o600 });
+        fs.writeFileSync(record, fixture.SIGNED_HEAD, { mode: 0o600 });
         return { stdout: '', stderr: '' };
       },
       runSetup: async () => { throw new Error('setup must not run: components.json is there'); },
     }, () => {});
     assert.equal(installs.length, 1);
-    assert.deepEqual(installs[0][1], ['--install-only', '--maintainer-did', pin.maintainerDid]);
+    assert.deepEqual(installs[0][1], ['--install-only', '--maintainer-did', pin.maintainerDid, '--publisher-gateway', pin.publisherGateway]);
     assert.equal(signedInstallRecord(data), true);
     // The user data is still there; only the record was written.
     assert.equal(fs.readFileSync(path.join(data, 'identity', 'device.key'), 'utf8'), 'x');
@@ -925,13 +942,32 @@ async function fixItThenReset(breakRecord) {
   }
 }
 
-test('Fix it after a missing install record runs install.sh, and then Reset goes ahead', async () => {
-  await fixItThenReset((record) => fs.rmSync(record));
+test('Fix it after a missing install record runs install.sh, and then Reset goes ahead', async (t) => {
+  await fixItThenReset(t, (record) => fs.rmSync(record));
 });
 
-test('Fix it after a tampered install record runs install.sh, and then Reset goes ahead', async () => {
-  await fixItThenReset((record) => {
+test('Fix it after a tampered install record runs install.sh, and then Reset goes ahead', async (t) => {
+  await fixItThenReset(t, (record) => {
     fs.writeFileSync(record, SIGNED_HEAD.toString('utf8').replace('"version":"0.8.0-alpha.22"', '"version":"0.8.0-alpha.23"'));
     assert.equal(signedInstallRecord(path.dirname(path.dirname(record))), false);
   });
+});
+
+test('program-only Uninstall keeps Home on Mac and Linux and honors the existing stop refusal', async () => {
+  const { uninstallRuntime } = require('../dist/main/targets/runtimeUninstall');
+  for (const platform of ['darwin','linux']) {
+    const home=fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()),'elastos-keep-home-'));
+    const binary=path.join(home,'.local/bin/elastos');
+    const dataDir=platform==='darwin'?path.join(home,'Library/Application Support/elastos'):path.join(home,'.local/share/elastos');
+    fs.mkdirSync(path.dirname(binary),{recursive:true});fs.writeFileSync(binary,'program');
+    fs.mkdirSync(path.join(dataDir,'Users/alice'),{recursive:true});fs.writeFileSync(path.join(dataDir,'Users/alice/note'),'keep me');
+    try {
+      const deps={homeDir:home,platform,env:{},binary,dataDir,...(platform==='darwin'?{deleteData:false}:{}),stop:async()=>{},remove:removeVerifiedTarget};
+      await assert.rejects(uninstallRuntime({...deps,stop:async()=>{throw new ForeignGatewayError();}}),/another window/);
+      assert.equal(fs.existsSync(binary),true);
+      await uninstallRuntime(deps);
+      assert.equal(fs.existsSync(binary),false);
+      assert.equal(fs.readFileSync(path.join(dataDir,'Users/alice/note'),'utf8'),'keep me');
+    } finally {fs.rmSync(home,{recursive:true,force:true});}
+  }
 });

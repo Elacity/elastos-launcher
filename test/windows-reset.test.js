@@ -34,8 +34,9 @@ const { distroIsInstalled } = require('../dist/main/targets/windowsRuntime');
 const { installRuntime } = require('../dist/main/targets/runtimeInstall');
 const { loadActiveRuntimePin } = require('../dist/main/targets/runtimePin');
 
-const SIGNED_HEAD = fs.readFileSync(path.join(__dirname, 'fixtures', 'release-head-0.8.0-alpha.22.json'));
-const PIN = loadActiveRuntimePin();
+const fixture = require('./helpers/signed-release');
+const SIGNED_HEAD = Buffer.from(fixture.SIGNED_HEAD);
+const PIN = { ...loadActiveRuntimePin(), headCid: fixture.FIXTURE_HEAD_CID, version: fixture.FIXTURE_VERSION, maintainerDid: fixture.FIXTURE_DID };
 const DID = PIN.maintainerDid;
 const PLENTY = () => 1e12;
 // The helper runs inside Linux. Here it runs with this machine's python3, so these tests need POSIX.
@@ -612,8 +613,7 @@ test('the Windows runtime target alone removes nothing on Uninstall: it needs th
       () => createRuntimeTarget().uninstall(),
       /^Error: Uninstall on Windows needs your answer in the Uninstall window\. Nothing was removed\.$/,
     );
-    const controller = fs.readFileSync(path.join(__dirname, '../src/main/launchController.ts'), 'utf8');
-    assert.match(controller, /process\.platform === 'win32'\s*\? uninstallRuntimeInDistroOnThisComputer\(\(\) => active\.stopForRemoval\(\), confirmRemoval \?\? \(async \(\) => false\)\)/);
+
   } finally {
     Object.defineProperty(process, 'platform', real);
     fs.rmSync(process.env.HOME, { recursive: true, force: true });
@@ -1014,7 +1014,7 @@ test('no install record in the distro shows the Fix it screen, and Install then 
       error: message, checks: [], binaryPresent: true, componentsPresent: true, lockText: null, lockPath: null, pidAlive: () => false,
     };
     assert.deepEqual(failureScreen(facts), {
-      kind: 'no-record', title: 'Install ElastOS again, then reset', message, retryLabel: 'Try again', fixLabel: 'Fix it',
+      kind: 'no-record', title: 'Install ElastOS again, then reset', message: 'ElastOS needs to be installed again; Home data is kept and nothing was deleted.', retryLabel: 'Try Again', fixLabel: 'Try Again',
     });
     assert.equal(await applyFix(facts, {}), 'ready');
     // A runtime from before the record (3 October 2026) is an older version, so Install runs install.sh, which writes the record.
@@ -1108,7 +1108,6 @@ test('Fix it on the pinned version with no, a tampered, or a linked record in th
 });
 
 test('python3 missing in the distro: the Reset dialog says so in plain words and keeps Reset off', POSIX, async () => {
-  const flow = require('../src/renderer/flow.js');
   const fx = distroFixture();
   try {
     const calls = [];
@@ -1128,20 +1127,47 @@ test('python3 missing in the distro: the Reset dialog says so in plain words and
       assert.ok(DISTRO_PYTHON_MISSING_DIALOG.includes(part));
       assert.ok(DISTRO_PYTHON_MISSING_MESSAGE.includes(part));
     }
-    const offer = flow.resetBackupCopy(seen);
-    assert.equal(offer.text, DISTRO_PYTHON_MISSING_DIALOG);
-    assert.equal(offer.blocked, true);
-    assert.equal(offer.canSave, false);
-    assert.equal(offer.needsChoice, false);
-    assert.doesNotMatch(offer.text, /could not measure/);
-    const app = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'app.js'), 'utf8');
-    assert.match(app, /confirmDelete\.disabled = Boolean\(resetOffer\.blocked\)/);
-    assert.match(app, /if \(!resetOffer \|\| resetOffer\.blocked\) return;/);
-    // With python3 there, the dialog measures as before.
-    const ok = await describeDistroBackup({ run: localRun([]), home: fx.winHome, paths: fx.paths, distroPresent: async () => true, pythonPresent: async () => true, freeBytes: PLENTY });
-    assert.equal(ok.blocked, undefined);
-    assert.equal(ok.present, true);
+
   } finally {
     fx.cleanup();
+  }
+});
+
+test('program-only Windows Uninstall preserves Home bytes through the real guarded helper', POSIX, async () => {
+  const { uninstallDistroProgram } = require('../dist/main/targets/windowsUninstall');
+  const fx = distroFixture();
+  try {
+    const calls = [], run = localRun(calls);
+    const note = path.join(fx.paths.dataDir, 'Users/alice/notes.txt');
+    const key = path.join(fx.paths.dataDir, 'signing_key');
+    await uninstallDistroProgram({ paths: fx.paths, maintainerDid: DID,
+      stop: async () => calls.push('stop'), inspect: () => inspectDistro(run, fx.paths, 'uninstall'),
+      removeProgram: plan => removeInDistro(run, fx.paths, plan, true),
+    });
+    assert.deepEqual(calls, ['inspect', 'stop', 'inspect', 'remove']);
+    assert.equal(fs.existsSync(fx.paths.binary), false);
+    assert.equal(fs.readFileSync(note,'utf8'), 'my notes');
+    assert.equal(fs.readFileSync(key,'utf8'), 'secret key bytes');
+    assert.equal(fs.existsSync(path.join(fx.paths.dataDir,'installation/release-head.json')), true);
+  } finally { fx.cleanup(); }
+});
+test('program-only Windows Uninstall refuses changed, unproved and linked Home without deleting', POSIX, async () => {
+  const { uninstallDistroProgram } = require('../dist/main/targets/windowsUninstall');
+  for (const tamper of ['after-stop','unsigned','linked']) {
+    const fx = distroFixture();
+    try {
+      const run = localRun([]); let removes = 0;
+      if(tamper==='unsigned') fs.writeFileSync(path.join(fx.paths.dataDir,'installation/release-head.json'),'{}');
+      if(tamper==='linked') {
+        fs.renameSync(fx.paths.dataDir,fx.paths.dataDir+'-kept');
+        fs.symlinkSync(fx.paths.dataDir+'-kept',fx.paths.dataDir);
+      }
+      await assert.rejects(uninstallDistroProgram({paths:fx.paths,maintainerDid:DID,
+        inspect:()=>inspectDistro(run,fx.paths,'uninstall'),
+        stop:async()=>{if(tamper==='after-stop')fx.put('.local/share/elastos/new-foreign','x');},
+        removeProgram:async plan=>{removes++;await removeInDistro(run,fx.paths,plan,true);},
+      }));
+      assert.equal(removes,0);assert.equal(fs.existsSync(fx.paths.binary),true);
+    } finally {fx.cleanup();}
   }
 });

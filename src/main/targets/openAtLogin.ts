@@ -10,13 +10,33 @@ export function linuxAutostartPath(homeDir: string): string {
   return path.join(homeDir, '.config', 'autostart', 'elastos.desktop');
 }
 
+/** A mounted AppImage reports a temporary exec path. `$APPIMAGE` is the file the user keeps. */
+export function linuxAutostartExecPath(env: NodeJS.ProcessEnv, execPath: string): string {
+  const image = typeof env.APPIMAGE === 'string' ? env.APPIMAGE.trim() : '';
+  return image || execPath;
+}
+
+/** Quote a desktop Exec value when it contains a reserved character. */
+export function desktopExecValue(execPath: string): string {
+  if (/[\r\n\0]/.test(execPath)) {
+    throw new Error('The sign-in program path is not valid.');
+  }
+  if (!/[\s"'\\><~|&;$*?#()`]/.test(execPath)) return execPath;
+  const escaped = execPath
+    .replace(/\\/g, '\\\\')
+    .replace(/"/g, '\\"')
+    .replace(/`/g, '\\`')
+    .replace(/\$/g, '\\$');
+  return `"${escaped}"`;
+}
+
 export function linuxAutostartFile(execPath: string): string {
   return [
     '[Desktop Entry]',
     'Type=Application',
     'Name=ElastOS',
-    'Comment=Open your computer',
-    `Exec=${execPath}`,
+    'Comment=Start ElastOS when you log in to this computer',
+    `Exec=${desktopExecValue(execPath)} --login`,
     'X-GNOME-Autostart-enabled=true',
     '',
   ].join('\n');
@@ -63,7 +83,7 @@ export function syncLinuxAutostart(
 export function applyOpenAtLogin(enabled: boolean, homeDir: string = os.homedir()): void {
   writeOpenAtLogin(enabled, homeDir);
   if (process.platform === 'linux') {
-    syncLinuxAutostart(enabled, homeDir, process.execPath, {
+    syncLinuxAutostart(enabled, homeDir, linuxAutostartExecPath(process.env, process.execPath), {
       mkdirp: (dir) => fs.mkdirSync(dir, { recursive: true }),
       writeFile: (file, contents) => fs.writeFileSync(file, contents),
       remove: (file) => fs.rmSync(file, { force: true }),
@@ -71,9 +91,24 @@ export function applyOpenAtLogin(enabled: boolean, homeDir: string = os.homedir(
     return;
   }
   try {
-    const electron = require('electron') as { app?: { setLoginItemSettings: (settings: { openAtLogin: boolean }) => void } };
-    electron.app?.setLoginItemSettings?.({ openAtLogin: enabled });
+    const electron = require('electron') as { app?: { setLoginItemSettings: (settings: { openAtLogin: boolean; openAsHidden?: boolean; args?: string[] }) => void } };
+    electron.app?.setLoginItemSettings?.({
+      openAtLogin: enabled,
+      ...(process.platform === 'darwin' ? { openAsHidden: true } : { args: ['--login'] }),
+    });
   } catch {
     // Unit tests are not inside Electron.
   }
+}
+
+/** Login launches keep the app in the tray while Home starts. */
+export function isLoginLaunch(platform: string, argv: readonly string[], settings: { wasOpenedAtLogin?: boolean }): boolean {
+  return platform === 'darwin' ? settings.wasOpenedAtLogin === true : argv.includes('--login');
+}
+
+export async function startHomeAtLogin(enabled: boolean, launch: {
+  getStatus(): Promise<string>;
+  start(): Promise<unknown>;
+}): Promise<void> {
+  if (enabled && await launch.getStatus() === 'stopped') await launch.start();
 }

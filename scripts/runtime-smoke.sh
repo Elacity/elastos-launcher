@@ -3,10 +3,14 @@
 # require /healthz to be OK and /home/ to return 200, then stop the process group.
 #
 # Reads resources/runtime-pin.json. "active" selects canary or stable.
-# If that pin does not match the publisher, install stops.
+# If the signature, channel, or rollback floor fails, install stops.
 #
 # Uses an isolated HOME so it does not touch the runner's real data dir.
 set -euo pipefail
+if [[ "$(uname -s)" == "Darwin" && "${GITHUB_ACTIONS:-}" != "true" ]]; then
+  echo "Mac installation smoke runs only on the GitHub runner." >&2
+  exit 1
+fi
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 raw_pin="${ELASTOS_SMOKE_PIN:-${root}/resources/runtime-pin.json}"
@@ -109,11 +113,15 @@ print(f"publisher channel={payload.get('channel')} version={payload.get('version
 print(f"pin       channel={pin.get('channel')} version={pin.get('version')} head_cid={pin.get('headCid')}")
 matched = (
     payload.get("channel") == pin.get("channel")
-    and payload.get("version") == pin.get("version")
-    and head_cid == pin.get("headCid")
+    and __import__("re").fullmatch(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)", payload.get("version", "")) is not None
+    and tuple(map(int, payload["version"].split("."))) >= tuple(map(int, pin["version"].split(".")))
     and head.get("signer_did") == pin.get("maintainerDid")
 )
 open(sys.argv[2], "w").write("yes\n" if matched else "no\n")
+if matched:
+    pin["headCid"] = head_cid
+    pin["version"] = payload["version"]
+    json.dump(pin, open(sys.argv[1], "w"))
 PY
 
 matched="$(cat "${work}/pin.match")"
@@ -127,7 +135,20 @@ fi
 echo "Pinned release matches the publisher. Verifying the signature and installer hash."
 maintainer="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["maintainerDid"])' "${pin_file}")"
 head_cid="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["headCid"])' "${pin_file}")"
-want_sha="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["installerSha256"])' "${pin_file}")"
+gateway="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["publisherGateway"])' "${pin_file}")"
+curl -fsSL --max-time 60 "${gateway%/}/release.json" -o "${work}/release.json"
+python3 - "${work}/release-head.json" "${work}/release.json" <<'PYMANIFEST'
+import hashlib, json, sys
+head = json.load(open(sys.argv[1]))["payload"]
+raw = open(sys.argv[2], "rb").read()
+if hashlib.sha256(raw).hexdigest() != head.get("release_sha256"):
+    sys.exit("Release manifest SHA-256 does not match the signed head")
+manifest = json.loads(raw)["payload"]
+if any(head.get(key) != manifest.get(key) for key in ("version", "channel")):
+    sys.exit("Release manifest identity does not match the signed head")
+PYMANIFEST
+python3 "${root}/scripts/verify-release-head.py" "${work}/release.json" elastos.release.v1 "${maintainer}"
+want_sha="$(python3 -c 'import json,re,sys; value=json.load(open(sys.argv[1]))["payload"].get("installer_sha256", ""); assert re.fullmatch("[0-9a-f]{64}",value), "Signed installer hash missing"; print(value)' "${work}/release.json")"
 python3 "${root}/scripts/verify-release-head.py" "${work}/release-head.json" elastos.release.head.v1 "${maintainer}"
 echo "Release head signature matches the pinned maintainer"
 

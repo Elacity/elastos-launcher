@@ -546,7 +546,22 @@ def do_remove():
     except OSError:
         raise Refused('changed')
     try:
-        if now == 'dir':
+        if now == 'dir' and req.get('keepData') is True:
+            dfd = os.open(os.path.basename(data), DIR_FLAGS, dir_fd=pfd)
+            try:
+                if place(dfd) != place(pfd) or entries_at(dfd) != req['entries']:
+                    raise Refused('changed')
+                if req['recordSha256'] is not None and record_at(dfd).get('sha256') != req['recordSha256']:
+                    raise Refused('changed')
+                if crossings(dfd, place(dfd), '', []):
+                    raise Refused('mount')
+                removed = []
+                for p in (binary, stage):
+                    if unlink_file(p):
+                        removed.append(p)
+            finally:
+                os.close(dfd)
+        elif now == 'dir':
             removed = remove_with_data(pfd, data, binary, stage)
         else:
             removed = []
@@ -556,7 +571,7 @@ def do_remove():
                         removed.append(p)
             except (OSError, Refused):
                 raise partial('program', removed, True, None, [])
-        left = sweep(pfd, parent, ('elastos',)) if pfd is not None else []
+        left = sweep(pfd, parent, ('elastos',)) if pfd is not None and req.get('keepData') is not True else []
     finally:
         if pfd is not None:
             os.close(pfd)

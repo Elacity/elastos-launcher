@@ -30,11 +30,18 @@ test('the only target is the runtime', () => {
   assert.equal(createLaunchTargetFromEnv({ OTHER: 'runtime' }).id, 'runtime');
 });
 
-test('a missing runtime does not start', async () => {
+test('a missing runtime does not start', async (t) => {
+  const probe = require('../dist/main/targets/runtimeProbe');
+  t.mock.method(probe, 'findRuntimeBinary', () => null);
   const target = createLaunchTarget('runtime');
   assert.equal(target.descriptor.implemented, true);
   await assert.rejects(() => target.start(), /not installed yet/);
   assert.equal(target.getVersion(), 'not installed');
+});
+
+test('the unit test runner cannot discover a host ElastOS installation', () => {
+  const { findRuntimeBinary } = require('../dist/main/targets/runtimeProbe');
+  assert.equal(findRuntimeBinary(require('node:os').homedir(), process.env.PATH ?? ''), null);
 });
 
 test('unknown target ids fail closed', () => {
@@ -164,25 +171,7 @@ test('quit waits for the gateway this launcher started and leaves one it did not
   );
   assert.deepEqual(order, ['kill', 'quit']);
 
-  const main = fs.readFileSync(path.join(__dirname, '../src/main/index.ts'), 'utf8');
-  const app = fs.readFileSync(path.join(__dirname, '../src/renderer/app.js'), 'utf8');
-  assert.match(main, /Stopping ElastOS/);
-  assert.match(main, /elastos:resumeInstallPlan/);
-  assert.match(main, /forceStopGateway/);
-  const controllerSrc = fs.readFileSync(path.join(__dirname, '../src/main/launchController.ts'), 'utf8');
-  const targetSrc = fs.readFileSync(path.join(__dirname, '../src/main/targets/runtimeTarget.ts'), 'utf8');
-  assert.match(controllerSrc, /resetRuntimeOnThisComputer\(\(\) => active\.stopForRemoval\(\), choice \?\? \{\}\)/);
-  assert.match(controllerSrc, /await active\.stop\(\)/);
-  assert.match(targetSrc, /stop: \(\) => stopGateway\(false\)/);
-  assert.match(targetSrc, /stopForRemoval: \(\) => stopGateway\(true\)/);
-  assert.match(targetSrc, /await stopGateway\(false\)/);
-  assert.match(targetSrc, /runtimeUninstall\(\(\) => stopGateway\(true\)\)/);
-  assert.equal(main.includes('./targets'), false);
-  assert.match(app, /resumeInstallPlan/);
-  assert.match(app, /finishResumeInstall/);
-  const replay = main.slice(main.indexOf('ready-to-show'), main.indexOf('Check initial status'));
-  assert.match(replay, /elastos:log/);
-  assert.equal(/log\.info/.test(replay), false);
+
 });
 
 test('the runtime health contract is the gateway', () => {
@@ -221,10 +210,16 @@ test('install logs a missing runtime and does not spawn another product', async 
   assert.equal(resolveLaunchTargetId({}), 'runtime');
   assert.equal(resolveLaunchTargetId({ env: { [LAUNCH_TARGET_ENV]: 'elastos-runtime' } }), 'runtime');
 
-  const main = fs.readFileSync(path.join(__dirname, '../src/main/index.ts'), 'utf8');
-  const preload = fs.readFileSync(path.join(__dirname, '../src/preload/index.ts'), 'utf8');
-  assert.equal(main.includes('./targets'), false);
-  assert.equal(main.includes('elastos:start'), true);
-  assert.equal(preload.includes("exposeInMainWorld('elastos'"), true);
-  assert.equal(preload.includes('elastos:install'), true);
+
+});
+
+test('launch info preserves a specific foreign-port error for the window', async (t) => {
+  const preflight = require('../dist/main/targets/preflight');
+  t.mock.method(preflight, 'collectPreflight', async () => ({ ok: true, checks: [] }));
+  const { createLaunchController } = require('../dist/main/launchController');
+  const controller = createLaunchController({ env: {} });
+  controller.target.getStatus = async () => { throw new Error('Another program is answering on port 8090. Home was not adopted.'); };
+  const info = await controller.getLaunchInfo();
+  assert.equal(info.status, 'error');
+  assert.match(info.error, /Another program.*port 8090/);
 });

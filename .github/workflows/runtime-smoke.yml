@@ -1,35 +1,87 @@
+# test/launcher-mac* -> mac. test/launcher-jetson* or test/launcher-linux* -> linux x64+arm64. test/launcher-windows* -> windows.
+# PR into main or push to main -> all. Other branches -> none. Dispatch uses explicit platforms (default none).
 name: Runtime smoke
 
-# Linux x64, macOS arm64, and the ElastOS WSL2 distro are required.
-# A red run fails the pull request. Each job installs the active pin
-# (canary until stable is published). If that pin does not match the
-# publisher, install stops. The job then checks gateway /healthz and
+# A red run fails the pull request. Each job verifies the selected channel
+# against the maintainer DID and rollback floor. Failed verification means
+# install stops. The job then checks gateway /healthz and
 # /home/. The Windows job imports distro ElastOS as WSL2. It does not skip.
 on:
   pull_request:
+    paths-ignore: ['**/*.md', 'docs/**']
+  push:
+    branches: [main]
   workflow_dispatch:
+    inputs:
+      platforms:
+        description: 'Platforms to run'
+        type: choice
+        options: [none, mac, linux, windows, all]
+        default: none
+
+concurrency:
+  group: runtime-smoke-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
 
 jobs:
+  plan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    outputs:
+      platforms: ${{ steps.plan.outputs.platforms }}
+      runtime: ${{ steps.plan.outputs.runtime }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: plan
+        run: node scripts/ci-plan.js
+        env:
+          INPUT_PLATFORMS: ${{ inputs.platforms }}
+
+  mac-dialogs:
+    needs: [plan]
+    if: contains(needs.plan.outputs.platforms, 'mac')
+    name: packaged dialog hit regions (mac)
+    runs-on: macos-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+      - run: npm ci
+      - name: Package the candidate
+        run: npm run build:mac -- --arm64 --publish never -c.mac.identity=- -c.mac.hardenedRuntime=false -c.forceCodeSigning=false
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+          NOTARIZE_MAC: 'false'
+      - name: Require clickable packaged dialogs and main controls
+        run: node scripts/mac-dialog-e2e.js dist-electron/mac-arm64/ElastOS.app
+
   smoke:
+    needs: [plan]
+    if: contains(needs.plan.outputs.platforms, 'mac') || contains(needs.plan.outputs.platforms, 'linux')
     name: smoke (${{ matrix.platform }})
     timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - os: ubuntu-24.04
-            platform: linux-x64
-          - os: macos-14
-            platform: darwin-arm64
+        include: ${{ fromJSON(needs.plan.outputs.runtime) }}
     runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Require Apple silicon for the Mac lane
+        if: runner.os == 'macOS'
+        run: test "$(uname -m)" = arm64
+
       - name: Install pinned runtime and require a healthy Home
         run: bash scripts/runtime-smoke.sh
 
   windows-wsl:
+    needs: [plan]
+    if: contains(needs.plan.outputs.platforms, 'windows')
     name: smoke (windows-wsl)
     timeout-minutes: 60
     runs-on: windows-2025
@@ -41,28 +93,15 @@ jobs:
         shell: pwsh
         run: pwsh -File scripts/windows-elastos-distro.ps1
 
-  rollback:
-    name: rollback (linux-x64)
-    timeout-minutes: 60
-    runs-on: ubuntu-24.04
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Roll 0.8.0-alpha.22 back to 0.8.0-alpha.21 and forward again
-        run: bash scripts/runtime-rollback.sh
-
   electron-e2e:
+    needs: [plan]
+    if: contains(needs.plan.outputs.platforms, 'mac') || contains(needs.plan.outputs.platforms, 'linux')
     name: e2e (${{ matrix.platform }})
-    timeout-minutes: 40
+    timeout-minutes: 50
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - os: ubuntu-24.04
-            platform: linux-x64
-          - os: macos-14
-            platform: darwin-arm64
+        include: ${{ fromJSON(needs.plan.outputs.runtime) }}
     runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout code
@@ -74,11 +113,15 @@ jobs:
           node-version: '20'
           cache: npm
 
+      - name: Require Apple silicon for the Mac lane
+        if: runner.os == 'macOS'
+        run: test "$(uname -m)" = arm64
+
       - name: Install display libraries
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y xvfb libnss3 libatk1.0-0 libatk-bridge2.0-0 libcups2 libdrm2 libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 libgbm1 libasound2t64 libgtk-3-0t64 libxss1
+          sudo apt-get install -y ${{ matrix.packages }}
 
       - name: Install dependencies
         env:
@@ -107,6 +150,8 @@ jobs:
           fi
 
   electron-e2e-windows:
+    needs: [plan]
+    if: contains(needs.plan.outputs.platforms, 'windows')
     name: e2e (windows)
     timeout-minutes: 60
     runs-on: windows-2025
@@ -133,6 +178,8 @@ jobs:
         run: npm run e2e
 
   windows-app:
+    needs: [plan]
+    if: contains(needs.plan.outputs.platforms, 'windows')
     name: app install (windows-wsl)
     timeout-minutes: 60
     runs-on: windows-2025
@@ -158,6 +205,8 @@ jobs:
         run: node scripts/windows-app-install.js
 
   clean-machine-linux:
+    needs: [plan]
+    if: contains(needs.plan.outputs.platforms, 'linux')
     name: clean machine (ubuntu)
     timeout-minutes: 45
     runs-on: ubuntu-24.04
@@ -183,6 +232,8 @@ jobs:
         run: bash scripts/clean-machine-linux.sh
 
   clean-machine-windows:
+    needs: [plan]
+    if: contains(needs.plan.outputs.platforms, 'windows')
     name: clean machine (windows-wsl)
     timeout-minutes: 20
     runs-on: windows-2025

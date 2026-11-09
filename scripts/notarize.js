@@ -1,76 +1,72 @@
-const { execSync } = require("child_process");
-const path = require("path");
+const { execFileSync } = require('node:child_process');
+const path = require('node:path');
 
-/**
- * electron-builder afterAllArtifactBuild hook.
- *
- * Submits macOS DMG/ZIP artifacts to Apple's notary service.
- * Does NOT block on --wait (Apple's in-depth analysis for new accounts
- * can exceed CI timeouts). Prints submission UUIDs for manual follow-up.
- *
- * To check status later:
- *   xcrun notarytool info <UUID> --apple-id ... --team-id ... --password ...
- *
- * To staple after acceptance:
- *   xcrun stapler staple <artifact>
- *
- * Requires APPLE_ID, APPLE_APP_SPECIFIC_PASSWORD, APPLE_TEAM_ID env vars.
- */
-module.exports = async function (context) {
-  if (process.platform !== "darwin") return [];
+// Ported from SashaMIT's v1.4.0 fix, commit 6e28656 (PR #5).
+// Keep the Apple password in the child's environment and secure prompt. Never
+// interpolate it into a command, process argument, exception, or saved file.
+const submit = `
+set timeout 1800
+log_user 0
+spawn -noecho xcrun notarytool submit $env(ELASTOS_NOTARY_ARTIFACT) --apple-id $env(APPLE_ID) --team-id $env(APPLE_TEAM_ID) --wait --timeout 25m --output-format json
+expect {
+  -nocase -re {password[^:]*:} { send -- "$env(APPLE_APP_SPECIFIC_PASSWORD)\\r" }
+  timeout { puts "Timed out waiting for the password prompt"; exit 124 }
+  eof { puts $expect_out(buffer); exit 1 }
+}
+expect {
+  -re {\\{.*\\}} { puts $expect_out(0,string); exp_continue }
+  timeout { exit 124 }
+  eof { puts $expect_out(buffer); set result [wait]; exit [lindex $result 3] }
+}
+`;
 
-  const notarizableExts = [".dmg", ".zip"];
-  const artifacts = context.artifactPaths.filter((p) =>
-    notarizableExts.some((ext) => p.endsWith(ext))
-  );
-
-  if (artifacts.length === 0) return [];
-
-  const appleId = process.env.APPLE_ID;
-  const appPassword = process.env.APPLE_APP_SPECIFIC_PASSWORD;
-  const teamId = process.env.APPLE_TEAM_ID;
-
-  if (!appleId || !appPassword || !teamId) {
-    console.log("[notarize] Apple credentials not set, skipping notarization");
-    console.log("[notarize] Set APPLE_ID, APPLE_APP_SPECIFIC_PASSWORD, APPLE_TEAM_ID to enable");
-    return artifacts;
+async function notarize(context) {
+  const artifacts = context.artifactPaths.filter((file) => /\.(dmg|zip)$/.test(file));
+  if (!artifacts.length) throw new Error('No macOS artifact was produced.');
+  for (const name of ['APPLE_ID', 'APPLE_APP_SPECIFIC_PASSWORD', 'APPLE_TEAM_ID']) {
+    if (!process.env[name]) throw new Error(`Missing required notarization credential ${name}.`);
   }
-
-  const submissionIds = [];
-
-  for (const artifactPath of artifacts) {
+  for (const artifact of artifacts) {
+    const name = path.basename(artifact);
+    console.log(`[notarize] Submitting ${name} and waiting for Apple.`);
+    let result;
     try {
-      console.log(`[notarize] Submitting ${path.basename(artifactPath)} for notarization...`);
-
-      const result = execSync(
-        `xcrun notarytool submit "${artifactPath}" ` +
-          `--apple-id "${appleId}" --team-id "${teamId}" --password "${appPassword}"`,
-        { encoding: "utf8", stdio: ["pipe", "pipe", "pipe"], timeout: 5 * 60 * 1000 }
-      );
-
-      const idMatch = result.match(/id:\s*([0-9a-f-]{36})/);
-      if (idMatch) {
-        submissionIds.push({ file: path.basename(artifactPath), id: idMatch[1] });
-        console.log(`[notarize] Submitted ${path.basename(artifactPath)} → UUID: ${idMatch[1]}`);
+      const output = execFileSync('/usr/bin/expect', ['-c', submit], {
+        env: { ...process.env, ELASTOS_NOTARY_ARTIFACT: artifact },
+        encoding: 'utf8', timeout: 30 * 60 * 1000, stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      result = JSON.parse(output.trim());
+    } catch (error) {
+      let diagnostic = [error.stdout, error.stderr].filter(Boolean).map(String).join('\n');
+      for (const key of ['CSC_LINK', 'CSC_KEY_PASSWORD', 'APPLE_ID', 'APPLE_APP_SPECIFIC_PASSWORD', 'APPLE_TEAM_ID']) {
+        const secret = process.env[key];
+        if (secret) diagnostic = diagnostic.split(secret).join('[redacted]');
       }
-      console.log(result);
-    } catch (err) {
-      console.error(`[notarize] Submission failed for ${path.basename(artifactPath)}: ${err.message}`);
-      if (err.stdout) console.error(err.stdout);
-      if (err.stderr) console.error(err.stderr);
+      throw new Error(`[notarize] Submission failed for ${name} (exit ${error.status ?? 'unknown'}). ${diagnostic.slice(-8000)}`);
+    }
+    console.log(`[notarize] ${name} status=${result.status} id=${result.id}`);
+    if (result.status !== 'Accepted') throw new Error(`[notarize] ${name} was not Accepted.`);
+    if (artifact.endsWith('.dmg')) {
+      execFileSync('xcrun', ['stapler', 'staple', artifact], { stdio: 'inherit', timeout: 120000 });
+      execFileSync('xcrun', ['stapler', 'validate', artifact], { stdio: 'inherit', timeout: 120000 });
     }
   }
-
-  if (submissionIds.length > 0) {
-    console.log("\n[notarize] ═══════════════════════════════════════════════");
-    console.log("[notarize] Submissions sent (check status manually):");
-    for (const s of submissionIds) {
-      console.log(`[notarize]   ${s.file} → ${s.id}`);
-    }
-    console.log("[notarize] Check:  xcrun notarytool info <UUID> --keychain-profile <profile>");
-    console.log("[notarize] Staple: xcrun stapler staple <artifact>");
-    console.log("[notarize] ═══════════════════════════════════════════════\n");
-  }
-
   return artifacts;
+}
+
+module.exports = async function (context) {
+  if (process.platform !== 'darwin') return [];
+  const strict = process.env.MAC_RELEASE_STRICT === 'true';
+  if (process.env.NOTARIZE_MAC !== 'true') {
+    if (strict) throw new Error('[notarize] A release build must be notarized.');
+    console.log('[notarize] Skipped because notarization was not requested.');
+    return [];
+  }
+  try {
+    return await notarize(context);
+  } catch (error) {
+    if (strict) throw error;
+    console.warn(`[notarize] Test build continues without notarization: ${error.message}`);
+    return [];
+  }
 };

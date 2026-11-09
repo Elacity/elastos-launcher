@@ -80,8 +80,9 @@ export function detectLinuxLibc(
       // That directory is not on this computer.
     }
   }
-  if (names.some((name) => name.startsWith('ld-musl-'))) return 'musl';
+  // The glibc loader is the system libc when a leftover musl loader is also present.
   if (names.some((name) => name.startsWith('ld-linux') || name === 'libc.so.6')) return 'glibc';
+  if (names.some((name) => name.startsWith('ld-musl-'))) return 'musl';
   return 'unknown';
 }
 

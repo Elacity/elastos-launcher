@@ -45,7 +45,7 @@ test('production ignores an environment pin that replaces the trust root', () =>
     /cannot replace the packaged trust root/,
   );
 
-  const emptyStable = writePin({ ...packaged, active: 'stable' });
+  const emptyStable = writePin({ ...packaged, active: 'canary', channels: { ...packaged.channels, canary: { version: null, headCid: null } } });
   assert.throws(
     () => loadRuntimePinFile({ ELASTOS_RUNTIME_PIN: emptyStable }, 'production'),
     /cannot replace the packaged trust root/,

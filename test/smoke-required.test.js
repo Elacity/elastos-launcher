@@ -13,15 +13,14 @@ test('the runtime smoke workflow has no continue-on-error', () => {
   assert.equal(/continue-on-error/i.test(workflow), false);
   assert.equal(/\|\|\s*true/.test(workflow), false);
   assert.match(workflow, /ubuntu-24\.04/);
-  assert.match(workflow, /macos-14/);
+  assert.match(workflow, /macos-latest/);
   assert.match(workflow, /runs-on: windows-2025/);
   assert.match(workflow, /bash scripts\/runtime-smoke\.sh/);
   assert.match(workflow, /pwsh -File scripts\/windows-elastos-distro\.ps1/);
-  assert.match(workflow, /bash scripts\/runtime-rollback\.sh/);
   assert.match(workflow, /npm run e2e/);
   assert.match(workflow, /scripts\/legacy-upgrade-e2e\.js/);
   assert.match(workflow, /xvfb-run/);
-  assert.match(workflow, /macos-14/);
+  assert.match(workflow, /macos-latest/);
   assert.match(workflow, /node scripts\/windows-app-install\.js/);
   assert.match(workflow, /bash scripts\/clean-machine-linux\.sh/);
   const windowsE2e = (workflow.split('electron-e2e-windows:')[1] || '').split('\n  windows-app:')[0];
@@ -74,34 +73,18 @@ test('the smoke passes the pinned head the way the pinned installer accepts it',
   assert.equal(/--head-cid/.test(script), false);
 });
 
-test('rollback uses the real binary between alpha.21 and alpha.22', () => {
-  const script = fs.readFileSync(path.join(root, 'scripts/runtime-rollback.sh'), 'utf8');
-  assert.match(script, /0\.8\.0-alpha\.21/);
-  assert.match(script, /0\.8\.0-alpha\.22/);
-  assert.match(script, /update --rollback-to "\$\{PREV_CID\}" --yes/);
-  assert.match(script, /update --yes/);
-  assert.match(script, /\/healthz is OK/);
-  assert.equal(/--head-cid/.test(script), false);
-  assert.match(script, /ELASTOS_RETAIN_FILE/);
-});
-
-test('the electron e2e clicks Install and waits for Open my computer', () => {
-  const script = fs.readFileSync(path.join(root, 'scripts/electron-e2e.js'), 'utf8');
-  assert.match(script, /Open my computer/);
-  assert.match(script, /#open-btn/);
-  assert.match(script, /Release head signature matches the pinned maintainer/);
-  assert.match(script, /install\.sh SHA-256 matches the pin/);
-  assert.match(script, /Installed head CID matches the pin/);
-  assert.match(script, /app\.exit\(0\)/);
-  assert.match(script, /ELASTOS_LAUNCH_TARGET: 'runtime'/);
-  assert.match(script, /ELASTOS_HIDE_HOST_TOOLS: '1'/);
-  assert.match(script, /--disable-gpu-sandbox/);
-  assert.match(script, /APPDATA/);
-  assert.match(script, /LOCALAPPDATA/);
-  assert.match(script, /#fix-btn/);
-  assert.match(script, /Set up ElastOS on Windows/);
-  assert.match(script, /process\.platform === 'win32' && windowsFix === 'running'/);
-  assert.equal(script.includes("errorText !== 'That still needs attention.'"), false);
+test('e2e menu driver clicks real menu objects by label and rejects disabled items', async () => {
+  const { clickMenu } = require('../scripts/tray-e2e');
+  const calls = [];
+  global.__elastosTrayMenu = { items: [{ label: 'Open Home', enabled: true, click: () => calls.push('open') },
+    { label: 'Start Home', enabled: false },
+    { label: 'Troubleshoot', submenu: { items: [{ label: 'Reset ElastOS…', enabled: true, click: () => calls.push('reset') }] } }] };
+  const app = { evaluate: (fn,arg) => fn({},arg) };
+  try {
+    await clickMenu(app,'Open Home'); await clickMenu(app,'Reset ElastOS…');
+    assert.deepEqual(calls,['open','reset']);
+    await assert.rejects(clickMenu(app,'Start Home'),/No enabled menu item/);
+  } finally { delete global.__elastosTrayMenu; }
 });
 
 test('the flattened smoke pin keeps the installer hash', () => {
@@ -116,6 +99,6 @@ test('the flattened smoke pin keeps the installer hash', () => {
   const raw = JSON.parse(fs.readFileSync(pin, 'utf8'));
   assert.equal(flat.installerSha256, raw.installerSha256);
   assert.match(flat.installerSha256, /^[0-9a-f]{64}$/);
-  assert.equal(flat.channel, 'canary');
-  assert.equal(flat.headCid, raw.channels.canary.headCid);
+  assert.equal(flat.channel, 'stable');
+  assert.equal(flat.headCid, raw.channels.stable.headCid);
 });

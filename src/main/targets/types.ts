@@ -12,7 +12,8 @@ export type TargetStatus =
   | 'starting'
   | 'stopping'
   | 'error'
-  | 'not-installed';
+  | 'not-installed'
+  | 'other-home';
 
 export interface TargetPlatform {
   platform: 'darwin' | 'linux' | 'win32';
@@ -40,7 +41,7 @@ export interface LaunchTargetDescriptor {
   /** Arguments for a launcher-owned start. Not invoked by the registry. */
   startArgs: readonly string[];
   health: HealthProbe;
-  /** Page "Open my computer" should open once health passes. */
+  /** Page "Open Home" should open once health passes. */
   openUrl: string;
   platforms: readonly TargetPlatform[];
 }
@@ -52,13 +53,18 @@ export interface UpdateCheck {
   releaseUrl: string;
 }
 
+/** Whether this call launched Home, opened an existing Home, reused it, or was stopped. */
+export type HomeStartResult = 'started' | 'already-running' | 'running' | 'stopped';
+
 export interface LaunchTarget {
   readonly id: LaunchTargetId;
   readonly descriptor: LaunchTargetDescriptor;
   isInstalled(): Promise<boolean>;
   getStatus(): Promise<TargetStatus>;
-  start(): Promise<void>;
-  /** Stop a gateway this window started. Does not adopt one it did not start. */
+  start(): Promise<HomeStartResult>;
+  /** Permanently refuse Home starts before waiting for shutdown work. */
+  beginShutdown(): void;
+  /** Stop this window's gateway; on macOS, also adopt a proved installed Home. */
   stop(): Promise<void>;
   /** Reset and Uninstall, after the confirm dialog, may adopt the installed gateway. */
   stopForRemoval(): Promise<void>;
@@ -66,7 +72,8 @@ export interface LaunchTarget {
   restart(): Promise<void>;
   install(onProgress: (message: string) => void): Promise<void>;
   update(onProgress: (message: string) => void): Promise<void>;
-  uninstall(): Promise<void>;
+  rollback(onProgress?: (message: string) => void): Promise<void>;
+  uninstall(deleteData?: boolean): Promise<void>;
   getVersion(): string;
   checkForUpdate(): Promise<UpdateCheck>;
   openInBrowser(): void;

@@ -369,8 +369,9 @@ export async function removeInDistro(
   run: DistroHelperRun,
   paths: DistroResetPaths,
   plan: DistroRemovalPlan,
+  keepData = false,
 ): Promise<string[]> {
-  const result = await run('remove', { ...helperInput(paths), ...plan }, { timeoutMs: 30 * 60 * 1000 });
+  const result = await run('remove', { ...helperInput(paths), ...plan, keepData }, { timeoutMs: 30 * 60 * 1000 });
   if (result.code === 3) {
     if (/ELASTOS-REFUSED mount/.test(result.stderr)) throw new Error(mountedMessage(`${paths.dataDir} ${DATA_IN_LINUX}`, ['.']));
     throw new Error(`ElastOS was not reset, because its files ${DATA_IN_LINUX} changed. Nothing was deleted there. Click Reset to try again.`);

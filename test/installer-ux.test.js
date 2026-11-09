@@ -13,19 +13,9 @@ const {
   publisherHost,
   publisherOffline,
 } = require('../dist/main/targets/preflight');
-const { linuxAutostartFile, syncLinuxAutostart } = require('../dist/main/targets/openAtLogin');
-const flow = require('../src/renderer/flow.js');
+const { linuxAutostartFile, linuxAutostartExecPath, syncLinuxAutostart } = require('../dist/main/targets/openAtLogin');
 
-const base = {
-  platform: 'linux',
-  arch: 'x64',
-  freeBytes: DISK_FLOOR_BYTES,
-  portBusy: false,
-  healthOk: false,
-  offline: false,
-  wsl: false,
-  kvm: true,
-};
+const base = { platform: 'linux', arch: 'x64', freeBytes: DISK_FLOOR_BYTES, portBusy: false, healthOk: false, offline: false, wsl: false, kvm: true };
 
 test('preflight blocks disk, offline, a busy port, and Intel Mac', () => {
   assert.equal(evaluatePreflight(base).ok, true);
@@ -35,10 +25,10 @@ test('preflight blocks disk, offline, a busy port, and Intel Mac', () => {
   assert.match(disk.checks.find((check) => check.id === 'disk').message, /2 GB/);
 
   const offline = evaluatePreflight({ ...base, offline: true });
-  assert.match(offline.checks.find((check) => check.id === 'network').message, /offline/);
+  assert.match(offline.checks.find((check) => check.id === 'network').message, /internet/);
 
   const port = evaluatePreflight({ ...base, portBusy: true, healthOk: false });
-  assert.match(port.checks.find((check) => check.id === 'port').message, /8090/);
+  assert.match(port.checks.find((check) => check.id === 'port').message, /Another app/);
 
   const already = evaluatePreflight({ ...base, portBusy: true, healthOk: true });
   assert.equal(already.checks.find((check) => check.id === 'port').level, 'pass');
@@ -102,24 +92,17 @@ test('sign-in launch writes a desktop file and can remove it', () => {
   };
   const written = syncLinuxAutostart(true, '/home/tester', '/usr/bin/elastos', fs);
   assert.match(files.get(written), /Name=ElastOS/);
-  assert.match(linuxAutostartFile('/usr/bin/elastos'), /Exec=\/usr\/bin\/elastos/);
+  assert.match(files.get(written), /X-GNOME-Autostart-enabled=true/);
+  assert.match(linuxAutostartFile('/usr/bin/elastos'), /Exec=\/usr\/bin\/elastos --login\n/);
+  assert.equal(
+    linuxAutostartExecPath({ APPIMAGE: '/home/me/ElastOS.AppImage' }, '/tmp/.mount_abc/elastos'),
+    '/home/me/ElastOS.AppImage',
+  );
+  assert.equal(linuxAutostartExecPath({ APPIMAGE: '  ' }, '/usr/bin/elastos'), '/usr/bin/elastos');
+  assert.match(linuxAutostartFile('/home/me/ElastOS App.AppImage'), /Exec="\/home\/me\/ElastOS App\.AppImage"/);
+  assert.match(linuxAutostartFile('/home/me/ElastOS-$APP.AppImage'), /Exec="\/home\/me\/ElastOS-\\\$APP\.AppImage"/);
   assert.equal(syncLinuxAutostart(false, '/home/tester', '/usr/bin/elastos', fs), null);
   assert.equal(files.size, 0);
-});
-
-test('the install button is the primary action until the computer is healthy', () => {
-  assert.equal(flow.primaryAction({ targetId: 'runtime', status: 'not-installed', busy: false }).label, 'Install');
-  assert.equal(flow.primaryAction({ targetId: 'runtime', status: 'running', busy: false }).label, 'Open my computer');
-  assert.equal(flow.primaryAction({ targetId: 'runtime', status: 'error', busy: false }).id, 'retry');
-  assert.match(flow.firstRunCopy('runtime', 'not-installed'), /One button/);
-  assert.equal(flow.firstRunCopy('runtime', 'running'), '');
-  const copy = flow.confirmCopy('runtime', []);
-  assert.match(copy.title, /ElastOS/);
-  assert.match(copy.body, /removes the ElastOS program/);
-  const steps = flow.stepStates('Downloading ElastOS (about 1 minute)');
-  assert.equal(steps[1].state, 'active');
-  assert.equal(steps[0].state, 'done');
-  assert.equal(flow.urlLabel('http://localhost:8090/home/'), 'localhost:8090/home');
 });
 
 test('the port check covers 127.0.0.1 and ::1, and a host without IPv6 checks 127.0.0.1 only', async () => {
@@ -157,18 +140,19 @@ test('preflight blocks when localhost does not point to this computer', () => {
   assert.equal(evaluatePreflight(base).checks.some((check) => check.id === 'localhost'), false);
 });
 
-test('Windows shows that its Browser is not available yet, and only Windows', () => {
-  const { browserNote, WINDOWS_BROWSER_MESSAGE } = require('../dist/main/targets/runtimeSupport');
-  assert.equal(WINDOWS_BROWSER_MESSAGE, 'Browser is not available on this computer yet.');
-  assert.equal(browserNote('win32'), WINDOWS_BROWSER_MESSAGE);
-  for (const platform of ['darwin', 'linux']) assert.equal(browserNote(platform), null);
-  assert.equal(flow.browserNoteText({ browserNote: WINDOWS_BROWSER_MESSAGE }), WINDOWS_BROWSER_MESSAGE);
-  assert.equal(flow.browserNoteText({ browserNote: null }), '');
-  assert.equal(flow.browserNoteText(undefined), '');
-  const html = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'index.html'), 'utf8');
-  assert.match(html, /<div class="info-row single hidden" id="browser-row">/);
-  const app = fs.readFileSync(path.join(__dirname, '..', 'src', 'renderer', 'app.js'), 'utf8');
-  assert.match(app, /browserRow\.classList\.toggle\('hidden', !browserText\)/);
-  const controller = fs.readFileSync(path.join(__dirname, '..', 'src', 'main', 'launchController.ts'), 'utf8');
-  assert.match(controller, /browserNote: browserNote\(process\.platform\)/);
+test('passing preflight checks say nothing and failures use one plain sentence', () => {
+  for (const input of [base, { ...base, healthOk: true }, { ...base, networkChecked: false },
+    { ...base, platform: 'darwin', arch: 'arm64' },
+    { ...base, platform: 'win32', wslInstalled: true, distroReady: true }]) {
+    for (const check of evaluatePreflight(input).checks) {
+      if (check.level === 'pass') assert.equal(check.message, '', check.id);
+    }
+  }
+  for (const input of [{ ...base, portBusy: true }, { ...base, offline: true }, { ...base, freeBytes: 0 },
+    { ...base, platform: 'win32' }, { ...base, localhostAddresses: [] }]) {
+    for (const check of evaluatePreflight(input).checks.filter(check => check.level === 'block')) {
+      assert.match(check.message, /^[^.?!\n]+[.!?]$/, check.id);
+      assert.doesNotMatch(check.message, /\bport\b|\block\b|JSON|commands|click|hosts file/i);
+    }
+  }
 });

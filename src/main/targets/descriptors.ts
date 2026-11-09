@@ -3,8 +3,8 @@ import { LaunchTargetDescriptor } from './types';
 
 /**
  * Facts taken from elastos-runtime.
- * `elastos gateway` is the supervised entry: `elastos home --browser`
- * also opens the system browser itself.
+ * Desktop platforms start `home --browser` from homeLaunchForPlatform.
+ * `startArgs` describes the legacy gateway command.
  * Health is GET /healthz → "OK" on the gateway.
  * darwin/x64 is included because a runtime build for Intel Mac is planned.
  * Native win32 is absent: Windows uses a WSL2 distro.

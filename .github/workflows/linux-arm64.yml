@@ -1,0 +1,78 @@
+name: Linux ARM64 package
+
+# Ubuntu 22.04 matches the Jetson glibc (2.35).
+on:
+  pull_request:
+    paths-ignore: ['**/*.md', 'docs/**']
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      platforms:
+        description: 'Platforms to run'
+        type: choice
+        options: [none, mac, linux, windows, all]
+        default: none
+  workflow_call:
+    inputs:
+      platforms:
+        description: 'Platforms selected by the caller'
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: linux-arm64-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    outputs:
+      platforms: ${{ steps.plan.outputs.platforms }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: plan
+        run: node scripts/ci-plan.js
+        env:
+          INPUT_PLATFORMS: ${{ inputs.platforms }}
+
+  package:
+    needs: [plan]
+    if: contains(needs.plan.outputs.platforms, 'linux')
+    runs-on: ubuntu-22.04-arm
+    timeout-minutes: 90
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build the arm64 AppImage and deb
+        run: npm run build:linux -- --arm64 --publish never
+
+      - name: Record checksums
+        run: |
+          set -euo pipefail
+          sha256sum dist-electron/*.AppImage dist-electron/*.deb
+          test -n "$(find dist-electron -maxdepth 1 -name '*arm64*.AppImage' -print)"
+          test -n "$(find dist-electron -maxdepth 1 -name '*arm64*.deb' -print)"
+
+      - name: Upload the arm64 packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: ElastOS-linux-arm64
+          path: |
+            dist-electron/*.AppImage
+            dist-electron/*.deb
+          if-no-files-found: error

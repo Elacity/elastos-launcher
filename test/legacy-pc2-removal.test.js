@@ -33,7 +33,6 @@ const {
   zipStoredSizeFields,
 } = require('../dist/main/legacyPc2Removal');
 const { runtimeBinaryPath, runtimeDataDir, runtimeInstallStagePath } = require('../dist/main/targets/runtimePaths');
-const flow = require('../src/renderer/flow.js');
 
 function enoent() {
   const error = new Error('ENOENT');
@@ -165,6 +164,32 @@ function diskProbe(home) {
     },
   };
 }
+
+test('Mac PC2 removal selects old data and refuses both Home spellings and the installed app', async () => {
+  const home = '/Users/fixture';
+  const box = world(home);
+  box.dir(home);
+  box.dir(path.join(home, '.pc2'));
+  const probe = { ...box.probe(), platform: 'darwin' };
+  const entries = discoverLegacyPc2(probe);
+  assert.deepEqual(entries.map((entry) => entry.path), [path.join(home, '.pc2')]);
+  const act = tracker();
+  for (const file of [
+    path.join(home, 'Library', 'Application Support', 'elastos'),
+    path.join(home, 'Library', 'Application Support', 'ElastOS'),
+    path.join(home, '.elastos-launcher', 'electron'),
+    '/Applications/ElastOS.app',
+  ]) {
+    const result = await removeDiscoveredLegacyPc2(
+      [{ scope: 'user', path: file, label: 'protected', bytes: 0 }], probe, act,
+    );
+    assert.equal(result.ok, false);
+  }
+  assert.deepEqual(act.calls, []);
+  const result = await removeDiscoveredLegacyPc2(entries, probe, act);
+  assert.equal(result.ok, true);
+  assert.deepEqual(act.calls, [['stop'], ['remove', path.join(home, '.pc2')]]);
+});
 
 test('refuses runtime paths, unknown paths, and the ElastOS distro', async () => {
   const home = '/home/tester';
@@ -344,16 +369,7 @@ test('lists only a real PC2 node tree and backs up the PC2 folder before deletin
   assert.equal(act.calls[1][0], 'stop');
   assert.ok(act.calls.slice(2).every((call) => call[0] === 'remove'));
 
-  const copy = flow.legacyPc2Copy([
-    { label: 'PC2 folder', path: pc2, bytes: 5 },
-    { label: 'PC2 sudoers rule', path: '/etc/sudoers.d/amneziawg', bytes: null },
-  ]);
-  assert.equal(copy.title, 'Remove PC2?');
-  assert.equal(copy.backup, 'Back up my PC2 data first');
-  assert.equal(copy.done, 'PC2 removed');
-  assert.match(copy.list, /PC2 folder — .*\/\.pc2 \(5 bytes\)/);
-  assert.match(copy.list, /size unavailable/);
-  assert.match(withSupportBundle(copy.done, '/home/tester/Desktop/ElastOS-support.txt'), /support bundle/);
+  assert.match(withSupportBundle('Old PC2 files removed.', '/home/tester/Desktop/ElastOS-support.txt'), /support bundle/);
 });
 
 test('backup zip stores PC2 files and does not follow a symlink outside them', () => {
@@ -416,14 +432,22 @@ test('the privileged prompt and the WSL removal stay on known PC2 paths', () => 
     fs.writeFileSync(path.join(secretDir, 'secret'), 'SECRET');
     const link = path.join(outside, '.pc2');
     fs.symlinkSync(secretDir, link);
-    const linked = spawnSync('bash', ['-c', wslArgs[5], 'bash', link], { encoding: 'utf8' });
+    const env = { ...process.env };
+    if (process.platform === 'darwin') {
+      // The WSL script uses GNU realpath -e. Model that operation on macOS.
+      const bin = path.join(outside, 'bin');
+      fs.mkdirSync(bin);
+      fs.writeFileSync(path.join(bin, 'realpath'), '#!/usr/bin/env python3\nimport os,sys\nassert sys.argv[1] == "-e"\nprint(os.path.realpath(sys.argv[-1], strict=True))\n', { mode: 0o755 });
+      env.PATH = `${bin}:${env.PATH}`;
+    }
+    const linked = spawnSync('bash', ['-c', wslArgs[5], 'bash', link], { encoding: 'utf8', env });
     assert.notEqual(linked.status, 0);
     assert.equal(fs.readFileSync(path.join(secretDir, 'secret'), 'utf8'), 'SECRET');
     const real = path.join(outside, 'real');
     fs.mkdirSync(path.join(real, '.pc2'), { recursive: true });
     fs.writeFileSync(path.join(real, '.pc2', 'secret'), 'SECRET');
     fs.symlinkSync(real, path.join(outside, 'alias'));
-    const escaped = spawnSync('bash', ['-c', wslArgs[5], 'bash', path.join(outside, 'alias', '.pc2')], { encoding: 'utf8' });
+    const escaped = spawnSync('bash', ['-c', wslArgs[5], 'bash', path.join(outside, 'alias', '.pc2')], { encoding: 'utf8', env });
     assert.equal(escaped.status, 5);
     assert.equal(fs.readFileSync(path.join(real, '.pc2', 'secret'), 'utf8'), 'SECRET');
   } finally {
@@ -606,28 +630,6 @@ test('PC2 process selection ignores the ElastOS runtime', () => {
     { pid: process.pid, command: 'node /home/tester/.pc2/pc2-node/dist/index.js' },
   ], process.pid);
   assert.deepEqual(pids, [7]);
-});
-
-test('Remove PC2 stays hidden until a legacy install is reported', () => {
-  const html = fs.readFileSync(path.join(__dirname, '../src/renderer/index.html'), 'utf8');
-  const app = fs.readFileSync(path.join(__dirname, '../src/renderer/app.js'), 'utf8');
-  const main = fs.readFileSync(path.join(__dirname, '../src/main/index.ts'), 'utf8');
-  const preload = fs.readFileSync(path.join(__dirname, '../src/preload/index.ts'), 'utf8');
-  assert.match(html, /class="control-btn hidden" id="remove-pc2-btn"/);
-  assert.match(html, /id="confirm-backup"/);
-  assert.match(html, /Back up my PC2 data first/);
-  assert.match(app, /describeLegacyPc2/);
-  assert.match(app, /removeLegacyPc2\(backup, paths\)/);
-  assert.match(app, /legacyConfirmPaths/);
-  assert.match(app, /legacyItems\.length === 0/);
-  assert.match(app, /confirmMode === 'pc2'/);
-  assert.equal(main.includes('./targets'), false);
-  assert.match(main, /elastos:describeLegacyPc2/);
-  assert.match(main, /elastos:removeLegacyPc2/);
-  assert.match(main, /withSupportBundle/);
-  assert.match(preload, /describeLegacyPc2/);
-  assert.match(preload, /elastos:removeLegacyPc2/);
-  assert.equal(flow.primaryAction({ targetId: 'runtime', status: 'not-installed', busy: false }).label, 'Install');
 });
 
 test('sudoers and VPN programs are not PC2 just because of their names', async () => {

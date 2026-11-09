@@ -4,14 +4,19 @@ import * as os from 'os';
 import { RUNTIME_TARGET } from './descriptors';
 import {
   createDefaultGatewaySupervisor,
+  confirmInstalledGateway,
+  installedGatewayOnThisComputer,
   ForeignGatewayError,
   GatewaySupervisor,
+  GatewayLifetime,
+  homeGatewayLifetime,
+  homeLaunchForPlatform,
   isHealthOk,
   openRuntimeHome,
   probeGatewayHealth,
 } from './runtimeGateway';
 import * as runtimeInstall from './runtimeInstall';
-import { runtimeBinaryPath, runtimeComponentsPath, runtimeDataDir, runtimeUpdateCheckPath } from './runtimePaths';
+import { runtimeBinaryPath, runtimeComponentsPath, runtimeDataDir, runtimeUpdateCheckPath, runtimeJoin, signedInstallRecord } from './runtimePaths';
 import { findRuntimeBinary, parseRuntimeVersion, probeRuntimeInstallation, RUNTIME_VERSION_ARGS } from './runtimeProbe';
 import { runtimeInstallBlock } from './runtimeSupport';
 import { removeVerifiedTarget, uninstallRuntime } from './runtimeUninstall';
@@ -19,11 +24,13 @@ import {
   applyRuntimeUpdate,
   checkRuntimeUpdate,
   HeadVerify,
+  launcherUpdateStatusStore,
   rollbackRuntime,
   RuntimeCommand,
   runRuntimeCommand,
   runtimeHeadStore,
   toUpdateCheck,
+  writeSignedUpdateCheck,
 } from './runtimeUpdate';
 import { loadActiveRuntimePin } from './runtimePin';
 import {
@@ -33,10 +40,58 @@ import {
   readDistroVersion,
   runDistroRuntimeCommand,
 } from './windowsRuntime';
-import { LaunchTarget, UpdateCheck } from './types';
+import { HomeStartResult, LaunchTarget, UpdateCheck } from './types';
 
-export function createRuntimeTarget(): LaunchTarget {
+export function createRuntimeTarget(platform: NodeJS.Platform = process.platform, arch: string = process.arch, lifetime: GatewayLifetime = homeGatewayLifetime): LaunchTarget {
   let supervisor: GatewaySupervisor | null = null;
+  let updating = false;
+  let requestedRunning = false;
+  let lifecycle = Promise.resolve();
+
+  function serialize<T>(action: () => Promise<T>): Promise<T> {
+    const next = lifecycle.then(action);
+    lifecycle = next.then(() => {}, () => {});
+    return next;
+  }
+
+  async function startGateway(): Promise<HomeStartResult> {
+    if (!requestedRunning) return 'stopped';
+    if (platform === 'win32') {
+      if (!distroIsInstalled()) throw new Error('ElastOS is not installed yet. Click Install.');
+      if (!supervisor) supervisor = createDistroGatewaySupervisor(lifetime);
+    } else {
+      const block = runtimeInstallBlock(platform, arch);
+      if (block) throw new Error(block);
+      const file = binary();
+      if (!file) throw new Error('ElastOS is not installed yet. Click Install.');
+      if (!supervisor) supervisor = createDefaultGatewaySupervisor(file, platform, lifetime);
+    }
+    return supervisor.start();
+  }
+
+  function changeRuntime(action: () => Promise<void>): Promise<void> {
+    if (platform !== 'darwin' && platform !== 'win32') return serialize(action);
+    if (updating) return Promise.reject(new Error('An ElastOS update is already running.'));
+    updating = true;
+    requestedRunning = true;
+    return serialize(async () => {
+      // A failed Stop keeps its supervisor and must never lead to a new Start.
+      await stopGateway(true);
+      try {
+        await action();
+      } finally {
+        if (requestedRunning) {
+          supervisor = null;
+          await startGateway();
+        }
+      }
+    }).finally(() => { updating = false; });
+  }
+
+  function requestStop(adopt: boolean): Promise<void> {
+    requestedRunning = false;
+    return serialize(() => stopGateway(adopt));
+  }
 
   function binary(): string | null {
     return findRuntimeBinary(os.homedir(), process.env.PATH ?? '');
@@ -44,11 +99,29 @@ export function createRuntimeTarget(): LaunchTarget {
 
   async function stopGateway(adopt: boolean): Promise<void> {
     if (!supervisor) {
-      supervisor = process.platform === 'win32'
-        ? createDistroGatewaySupervisor()
-        : createDefaultGatewaySupervisor(binary() ?? runtimeBinaryPath(os.homedir()));
+      supervisor = platform === 'win32'
+        ? createDistroGatewaySupervisor(lifetime)
+        : createDefaultGatewaySupervisor(binary() ?? runtimeBinaryPath(os.homedir()), platform, lifetime);
     }
     await supervisor.stop({ adopt });
+  }
+
+  async function runWithHomeRestart(action: () => Promise<void>): Promise<void> {
+    if (updating) throw new Error('An ElastOS update is already running.');
+    updating = true;
+    try {
+      await stopGateway(true);
+      await action();
+    } finally {
+      try {
+        if (requestedRunning) {
+          supervisor = null;
+          await startGateway();
+        }
+      } finally {
+        updating = false;
+      }
+    }
   }
 
   return {
@@ -56,120 +129,142 @@ export function createRuntimeTarget(): LaunchTarget {
     descriptor: RUNTIME_TARGET,
     isInstalled: () => runtimeIsInstalled(),
     getStatus: async () => {
+      if (updating) return 'starting';
+      if (platform === 'linux' && (await installedGatewayOnThisComputer(platform)) === 'legacy') {
+        return 'other-home';
+      }
+      const observedSupervisor = supervisor;
+      const observedPhase = supervisor?.phase();
       if (supervisor) {
-        const phase = supervisor.phase();
-        if (phase === 'starting' || phase === 'stopping' || phase === 'running' || phase === 'error') {
+        const phase = observedPhase;
+        if (phase === 'starting' || phase === 'stopping' || phase === 'error'
+          || (phase === 'running' && platform !== 'darwin' && platform !== 'win32')) {
           return phase;
         }
       }
-      if (process.platform === 'win32') {
+      if (platform === 'win32') {
         if (!distroIsInstalled()) return 'not-installed';
-        if (isHealthOk(await readHealth())) return 'running';
+        if (isHealthOk(await readHealth())) {
+          // A live controller keeps Home up after the child pid changes. Health
+          // and the distro facts are the status, not the supervisor's old phase.
+          if (!(await confirmInstalledGateway())) {
+            throw new Error('Another program is answering on port 8090. Home was not adopted.');
+          }
+          return 'running';
+        }
         return 'stopped';
       }
-      if (runtimeInstallBlock(process.platform, process.arch)) return 'not-installed';
-      if (!(await runtimeIsInstalled())) return 'not-installed';
-      if (isHealthOk(await readHealth())) return 'running';
-      return 'stopped';
-    },
-    start: async () => {
-      if (process.platform === 'win32') {
-        if (!distroIsInstalled()) throw new Error('ElastOS is not installed yet. Click Install.');
-        if (!supervisor) supervisor = createDistroGatewaySupervisor();
-        await supervisor.start();
-        return;
+      if (runtimeInstallBlock(platform, arch)) return 'not-installed';
+      const installed = await runtimeIsInstalled();
+      if (updating) return 'starting';
+      if (!installed) return 'not-installed';
+      const health = await readHealth();
+      if (platform === 'darwin') {
+        const foreign = isHealthOk(health) && !(await confirmInstalledGateway());
+        // A control action can finish while version, health and socket probes
+        // are in flight. Its new phase supersedes those earlier observations.
+        const latestPhase = supervisor?.phase();
+        if (updating) return 'starting';
+        if (supervisor !== observedSupervisor || latestPhase !== observedPhase) return latestPhase ?? 'stopped';
+        if (foreign) throw new Error('Another program is answering on port 8090. Home was not adopted.');
       }
-      const block = runtimeInstallBlock(process.platform, process.arch);
-      if (block) throw new Error(block);
-      const file = binary();
-      if (!file) throw new Error('ElastOS is not installed yet. Click Install.');
-      if (!supervisor) supervisor = createDefaultGatewaySupervisor(file);
-      await supervisor.start();
+      return isHealthOk(health) ? 'running' : 'stopped';
     },
-    stop: () => stopGateway(false),
-    stopForRemoval: () => stopGateway(true),
+    start: () => {
+      requestedRunning = true;
+      return serialize(startGateway);
+    },
+    beginShutdown: () => { lifetime.shutdown(); },
+    stop: () => requestStop(false),
+    stopForRemoval: () => requestStop(true),
     forceStop: () => {
+      requestedRunning = false;
       supervisor?.forceKill();
     },
-    restart: async () => {
-      await stopGateway(false);
-      if (process.platform === 'win32') {
-        if (!distroIsInstalled()) throw new Error('ElastOS is not installed yet. Click Install.');
-        if (!supervisor) supervisor = createDistroGatewaySupervisor();
-        await supervisor.start();
-        return;
-      }
-      const file = binary();
-      if (!file) throw new Error('ElastOS is not installed yet. Click Install.');
-      if (!supervisor) supervisor = createDefaultGatewaySupervisor(file);
-      await supervisor.start();
+    restart: () => {
+      requestedRunning = true;
+      return serialize(async () => {
+        await stopGateway(false);
+        await startGateway();
+      });
     },
     install: (onProgress) => runtimeInstall.installRuntimeOnThisComputer(onProgress),
-    update: (onProgress) => applyRuntimeUpdate(runtimeCommand(), runtimeHeadStore(), headVerify(), onProgress),
+    update: (onProgress) => {
+      const action = () => applyRuntimeUpdate(runtimeCommand(platform), runtimeHeadStore(), headVerify(platform), onProgress);
+      if (platform === 'darwin' || platform === 'win32') return changeRuntime(action);
+      if (!homeLaunchForPlatform(platform).updateRestartsHome) return serialize(action);
+      requestedRunning = true;
+      return serialize(() => runWithHomeRestart(action));
+    },
+    rollback: (onProgress) => {
+      const action = () => rollbackRuntime(runtimeCommand(platform), runtimeHeadStore(), headVerify(platform), onProgress);
+      if (platform === 'darwin' || platform === 'win32') return changeRuntime(action);
+      if (!homeLaunchForPlatform(platform).rollbackRestartsHome) return serialize(action);
+      requestedRunning = true;
+      return serialize(() => runWithHomeRestart(action));
+    },
     // On Windows the launch controller runs uninstallRuntimeInDistro (windowsUninstall.ts) with the two answers.
-    uninstall: () => (process.platform === 'win32' ? Promise.reject(new Error('Uninstall on Windows needs your answer in the Uninstall window. Nothing was removed.')) : runtimeUninstall(() => stopGateway(true))),
-    getVersion: () => (process.platform === 'win32' ? readDistroVersion() : readRuntimeVersion()),
-    checkForUpdate: () => runtimeCheckForUpdate(),
+    uninstall: (deleteData = false) => {
+      requestedRunning = false;
+      return platform === 'win32'
+        ? Promise.reject(new Error('Uninstall on Windows needs your answer in the Uninstall window. Nothing was removed.'))
+        : serialize(() => runtimeUninstall(() => stopGateway(true), deleteData));
+    },
+    getVersion: () => (platform === 'win32' ? readDistroVersion() : readRuntimeVersion(platform, arch)),
+    checkForUpdate: () => runtimeCheckForUpdate(platform, arch),
     openInBrowser: () => openRuntimeHome(),
     getLogs: async (lines) => supervisor?.getLogs(lines) ?? '',
   };
 }
 
-function runtimeCommand(): RuntimeCommand {
-  return process.platform === 'win32' ? runDistroRuntimeCommand : runRuntimeCommand;
+function runtimeCommand(platform: NodeJS.Platform): RuntimeCommand {
+  return platform === 'win32' ? runDistroRuntimeCommand : runRuntimeCommand;
 }
 
-function readHostUpdateStatus(): string {
+function readHostUpdateStatus(platform: NodeJS.Platform): string {
   const home = os.homedir();
-  return fs.readFileSync(runtimeUpdateCheckPath(runtimeDataDir(process.platform, home, process.env)), 'utf8');
+  return fs.readFileSync(runtimeUpdateCheckPath(runtimeDataDir(platform, home, process.env)), 'utf8');
 }
 
-async function runtimeCheckForUpdate(): Promise<UpdateCheck> {
-  let releaseUrl = '';
-  try {
-    releaseUrl = loadActiveRuntimePin().publisherGateway;
-  } catch {
-    releaseUrl = '';
-  }
+async function runtimeCheckForUpdate(platform: NodeJS.Platform, arch: string): Promise<UpdateCheck> {
+  // The signed offer has no release-notes URL. A publisher gateway is not release notes.
+  const releaseUrl = '';
   const notInstalled = toUpdateCheck('not installed', {
     updateAvailable: false,
     detail: 'not installed',
     latest: null,
   }, releaseUrl);
-  if (process.platform === 'win32') {
-    if (!distroIsInstalled()) return notInstalled;
-    const parsed = await checkRuntimeUpdate(runDistroRuntimeCommand, readDistroUpdateStatus);
-    return toUpdateCheck(readDistroVersion(), parsed, releaseUrl);
-  }
-  if (runtimeInstallBlock(process.platform, process.arch)) return notInstalled;
-  if (!findRuntimeBinary(os.homedir(), process.env.PATH ?? '')) return notInstalled;
-  const parsed = await checkRuntimeUpdate(runRuntimeCommand, readHostUpdateStatus);
-  return toUpdateCheck(readRuntimeVersion(), parsed, releaseUrl);
+  const windows = platform === 'win32';
+  if (windows ? !distroIsInstalled() : runtimeInstallBlock(platform, arch)
+    || !findRuntimeBinary(os.homedir(), process.env.PATH ?? '')) return notInstalled;
+  const current = windows ? readDistroVersion() : readRuntimeVersion(platform, arch);
+  const store = launcherUpdateStatusStore(os.homedir());
+  const fallback = async () => {
+    await writeSignedUpdateCheck(current, loadActiveRuntimePin(), runtimeInstall.fetchRuntimeText, store.write);
+    return store.read();
+  };
+  const parsed = await checkRuntimeUpdate(windows ? runDistroRuntimeCommand : runRuntimeCommand,
+    windows ? readDistroUpdateStatus : () => readHostUpdateStatus(platform), fallback);
+  return toUpdateCheck(current, parsed, releaseUrl);
 }
 
-export async function rollbackRuntimeUpdate(
-  onProgress: (message: string) => void = () => {},
-): Promise<void> {
-  await rollbackRuntime(runtimeCommand(), runtimeHeadStore(), headVerify(), onProgress);
-}
-
-function headVerify(): HeadVerify {
+function headVerify(platform: NodeJS.Platform): HeadVerify {
   const pin = loadActiveRuntimePin();
   return {
     maintainerDid: pin.maintainerDid,
     publisherGateway: pin.publisherGateway,
-    fetchText: async (url: string) => {
-      const response = await fetch(url);
-      if (!response.ok) {
-        throw new Error('Could not verify the ElastOS release head.');
-      }
-      return response.text();
+    fetchText: runtimeInstall.fetchRuntimeText,
+    minimumVersion: pin.version ?? '2.0.0',
+    readInstalledHead: platform === 'win32' ? undefined : () => {
+      const data = runtimeDataDir(platform, os.homedir(), process.env);
+      if (!signedInstallRecord(data, pin.maintainerDid)) throw new Error('The signed install record is not valid.');
+      return fs.readFileSync(runtimeJoin(data, 'installation', 'release-head.json'), 'utf8');
     },
   };
 }
 
-function readRuntimeVersion(): string {
-  const block = runtimeInstallBlock(process.platform, process.arch);
+function readRuntimeVersion(platform: NodeJS.Platform = process.platform, arch: string = process.arch): string {
+  const block = runtimeInstallBlock(platform, arch);
   if (block) return block;
   const file = findRuntimeBinary(os.homedir(), process.env.PATH ?? '');
   if (!file) return 'not installed';
@@ -185,9 +280,10 @@ async function readHealth(): Promise<{ status: number; body: string } | null> {
   return probeGatewayHealth({ timeoutMs: 500 });
 }
 
-async function runtimeUninstall(stop: () => Promise<void>): Promise<void> {
+async function runtimeUninstall(stop: () => Promise<void>, deleteData: boolean): Promise<void> {
   const home = os.homedir();
   await uninstallRuntime({
+    deleteData,
     binary: runtimeBinaryPath(home),
     dataDir: runtimeDataDir(process.platform, home, process.env),
     stop: async () => {
@@ -214,6 +310,7 @@ async function runtimeIsInstalled(): Promise<boolean> {
     pathEnv: process.env.PATH,
   });
   if (probe.kind !== 'version') return false;
+  if (!runtimeInstall.versionAtLeast(probe.version, loadActiveRuntimePin().version)) return false;
   const components = runtimeComponentsPath(runtimeDataDir(process.platform, homeDir, process.env));
   try {
     return fs.statSync(components).isFile();

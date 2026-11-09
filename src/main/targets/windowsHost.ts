@@ -49,7 +49,7 @@ export function hostPrompt(facts: WindowsFacts): HostPrompt {
     return {
       kind: 'enable-wsl',
       title: 'Windows needs Linux support',
-      body: 'ElastOS on Windows runs in its own Linux environment. Click Enable. Windows will ask for permission once, and it may ask you to restart. After that restart, open ElastOS and Install continues. You do not type any commands.',
+      body: 'Windows needs permission to enable Linux support.',
       actionLabel: 'Enable',
     };
   }
@@ -57,14 +57,14 @@ export function hostPrompt(facts: WindowsFacts): HostPrompt {
     return {
       kind: 'setup-distro',
       title: 'Set up ElastOS on Windows',
-      body: 'Linux support is on. Click Set up and ElastOS will add its own Linux environment. Windows may ask for permission. You do not type any commands.',
+      body: 'ElastOS needs to finish setup on this computer.',
       actionLabel: 'Set up',
     };
   }
   return {
     kind: 'ready',
     title: 'Windows is ready',
-    body: 'Linux support is on. Click Install. ElastOS sets itself up in its own Linux environment and opens in the browser. You do not type any commands.',
+    body: '',
     actionLabel: null,
   };
 }
@@ -83,7 +83,7 @@ export function importDistroArgs(installDir: string, rootfs: string): readonly s
   return ['--import', 'ElastOS', installDir, rootfs, '--version', '2'];
 }
 
-export const WINDOWS_REBOOT_MESSAGE = 'Restart Windows. When you open ElastOS again, Install continues.';
+export const WINDOWS_REBOOT_MESSAGE = 'Windows needs to restart before setup can continue.';
 
 export type ResumeInstallPlan = 'install' | 'wait' | 'none';
 

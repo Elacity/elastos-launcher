@@ -37,8 +37,8 @@ export interface FailureScreen {
   kind: FailureKind;
   title: string;
   message: string;
-  retryLabel: 'Try again';
-  fixLabel: 'Fix it' | null;
+  retryLabel: 'Try Again';
+  fixLabel: 'Try Again' | null;
 }
 
 export interface RecoveryDeps {
@@ -51,7 +51,7 @@ export interface RecoveryDeps {
   gatewayIdentity?: () => Promise<boolean>;
 }
 
-const GENERIC = 'Something went wrong. Try again. If it keeps happening, copy diagnostics.';
+const GENERIC = 'ElastOS could not finish.';
 
 export function lockPid(text: string | null): number | null {
   if (!text) return null;
@@ -119,24 +119,23 @@ export function removeStaleLockNow(lockPath: string, deps: {
 export function failureScreen(facts: FailureFacts): FailureScreen {
   const kind = classify(facts);
   if (kind === 'windows') {
-    const check = facts.checks.find((item) => item.id === 'windows' && item.level === 'block');
     return {
       kind,
       title: 'Windows needs one step',
-      message: check?.message || 'Windows needs Linux support. Click Fix it. You do not type any commands.',
-      retryLabel: 'Try again',
-      fixLabel: 'Fix it',
+      message: /restart|reboot/i.test(facts.error) ? 'Windows needs to restart before setup can continue.' : 'Windows needs permission to finish setup.',
+      retryLabel: 'Try Again',
+      fixLabel: 'Try Again',
     };
   }
   if (kind === 'no-record') {
-    // The refusal names the folder and the next clicks (foreignRuntimeDataMessage).
+    // Keep the refusal's safety facts without exposing the folder or record details.
     return {
       kind,
       // Windows Uninstall needs the same record (windowsUninstall.ts).
       title: /click Uninstall/.test(facts.error) ? 'Install ElastOS again, then uninstall' : 'Install ElastOS again, then reset',
-      message: plainError(facts.error, facts.checks),
-      retryLabel: 'Try again',
-      fixLabel: 'Fix it',
+      message: 'ElastOS needs to be installed again; Home data is kept and nothing was deleted.',
+      retryLabel: 'Try Again',
+      fixLabel: 'Try Again',
     };
   }
   const copy = kind === 'other'
@@ -146,8 +145,8 @@ export function failureScreen(facts: FailureFacts): FailureScreen {
     kind,
     title: copy.title,
     message: copy.message,
-    retryLabel: 'Try again',
-    fixLabel: kind === 'other' ? null : 'Fix it',
+    retryLabel: 'Try Again',
+    fixLabel: kind === 'other' ? null : 'Try Again',
   };
 }
 
@@ -271,30 +270,37 @@ function blocked(facts: FailureFacts, id: string): boolean {
   return facts.checks.some((check) => check.id === id && check.level === 'block');
 }
 
+// Only known display copy crosses this boundary. Raw errors stay in diagnostics.
 function plainError(error: string, checks: FailureCheck[]): string {
   if (/attach_secret|runtime-coords|BEGIN [A-Z ]*PRIVATE KEY/i.test(error)) return GENERIC;
-  const line = error.split('\n').map((part) => part.trim()).find(Boolean) ?? '';
-  if (line && !/^\s*at\s+/.test(line)) return line.replace(/^Error:\s*/, '');
+  if (/nothing was deleted/i.test(error)) return 'ElastOS could not finish. Nothing was deleted.';
+  if (/restart Windows|reboot/i.test(error)) return 'Windows needs to restart before setup can continue.';
+  if (/already running|already owns/i.test(error)) return 'Another Home is running.';
+  if (/download/i.test(error)) return 'The download stopped.';
   const block = checks.find((check) => check.level === 'block');
-  return block?.message || GENERIC;
+  if (block?.id === 'disk') return 'ElastOS needs more free space to install.';
+  if (block?.id === 'localhost') return 'ElastOS could not connect to Home on this computer.';
+  if (block?.id === 'platform') return /Intel Mac/.test(block.message)
+    ? 'Intel Mac is not supported yet.' : 'ElastOS is not supported on this computer.';
+  return GENERIC;
 }
 
 const COPY: Record<Exclude<FailureKind, 'other' | 'windows' | 'no-record'>, { title: string; message: string }> = {
   offline: {
     title: 'You are offline',
-    message: 'ElastOS could not reach the internet, so nothing was installed. Connect, then click Fix it to check again.',
+    message: 'ElastOS could not connect to the internet.',
   },
   port: {
-    title: 'Port 8090 is busy',
-    message: 'Another program is using the address ElastOS needs. Quit that program, then click Fix it. ElastOS will not close other programs for you.',
+    title: 'Home could not start',
+    message: 'Another app is preventing Home from starting; ElastOS will not close the other app.',
   },
   interrupted: {
     title: 'The install did not finish',
-    message: 'ElastOS was downloaded, but setup did not finish. Click Fix it to check the signed release again and continue setup. The installer is not downloaded again.',
+    message: 'ElastOS setup did not finish.',
   },
   'stale-lock': {
     title: 'A previous ElastOS did not close',
-    message: 'The old session is gone, but it left a lock. Click Fix it to clear that lock. A running ElastOS is left alone.',
+    message: 'ElastOS did not close properly; a running Home is left alone.',
   },
 };
 

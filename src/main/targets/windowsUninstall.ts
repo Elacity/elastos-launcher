@@ -27,6 +27,7 @@ import {
   inspectDistro,
   launcherHostFiles,
   removeLauncherHostFiles,
+  removeInDistro,
   RestrictToOwner,
   windowsRestrictToOwner,
   wslHelperRun,
@@ -551,4 +552,33 @@ export async function uninstallRuntimeInDistroOnThisComputer(
     runWsl: runWslNoShell,
     removeHost: (target) => removeVerifiedTarget(target),
   });
+}
+
+/** Program-only uninstall keeps the existing Home and the Linux environment in place. */
+export async function uninstallDistroProgram(deps: {
+  stop: () => Promise<void>;
+  inspect: () => Promise<DistroInspection>;
+  paths: DistroResetPaths;
+  maintainerDid: string | null;
+  removeProgram: (plan: ReturnType<typeof distroRemovalPlan>) => Promise<unknown>;
+}): Promise<void> {
+  const before = await deps.inspect();
+  const plan = distroRemovalPlan(before, deps.paths, deps.maintainerDid, 'uninstall');
+  if (before.data === 'dir') assertDistroIsElastos(before, deps.paths, deps.maintainerDid);
+  await deps.stop();
+  const after = await deps.inspect();
+  const fresh = distroRemovalPlan(after, deps.paths, deps.maintainerDid, 'uninstall');
+  if (JSON.stringify(fresh) !== JSON.stringify(plan)) throw new Error('ElastOS changed before uninstall. Nothing was removed.');
+  await deps.removeProgram(fresh);
+}
+
+export async function uninstallDistroProgramOnThisComputer(stop: () => Promise<void>): Promise<void> {
+  const paths = distroResetPaths();
+  const run = wslHelperRun();
+  await uninstallDistroProgram({ stop, paths, maintainerDid: pinnedMaintainerDid(),
+    inspect: () => inspectDistro(run, paths, 'uninstall'),
+    removeProgram: plan => removeInDistro(run, paths, plan, true),
+  });
+  const hostFiles = launcherHostFiles(os.homedir(), process.platform, process.env);
+  removeLauncherHostFiles(hostFiles, { removeHost: target => removeVerifiedTarget(target) });
 }

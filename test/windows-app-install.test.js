@@ -13,6 +13,11 @@ const {
   distroListenerKind,
   assertDistroPath,
   distroGatewayArgs,
+  distroHomeSpawnOptions,
+  distroStopPid,
+  parseDistroStopReport,
+  DISTRO_CONTROLLER_COMMAND,
+  DISTRO_STOP_READER,
   distroInstallerArgs,
   distroRuntimeArgs,
   distroPackageArgs,
@@ -21,6 +26,7 @@ const {
   DISTRO_INSTALL_DIR,
   DISTRO_SETUP_FAILED,
   ensureElastosDistro,
+  installRuntimeInsideDistro,
   factsAreElastos,
   readDistroLockPid,
   signalDistroGateway,
@@ -28,7 +34,7 @@ const {
   wslSpawnEnv,
 } = require('../dist/main/targets/windowsRuntime');
 const { createGatewaySupervisor } = require('../dist/main/targets/runtimeGateway');
-const { importDistroArgs } = require('../dist/main/targets/windowsHost');
+const { applyWindowsFix, importDistroArgs } = require('../dist/main/targets/windowsHost');
 const { INSTALLER_ENV_NAMES } = require('../dist/main/targets/releaseHead');
 
 const HEAD = 'QmXuy56RTFzXaifTuyCbMb6Ky1p5wuM9iP8eFbMghHxWij';
@@ -66,7 +72,7 @@ test('distro paths stay POSIX and the installer uses ELASTOS_HEAD_CID', () => {
   assert.deepEqual(Object.keys(wslEnv).sort(), ['PATH', 'WSLENV', 'WSL_UTF8']);
   assert.deepEqual([...wslCommandPrefix(), ...args].slice(0, 4), ['-d', 'ElastOS', '-u', 'root']);
   assert.equal(wslSpawnEnv({}).WSL_UTF8, '1');
-  assert.deepEqual(distroGatewayArgs().slice(-3), ['gateway', '--addr', 'localhost:8090']);
+  assert.deepEqual(distroGatewayArgs().slice(-3), ['/root/.local/bin/elastos', 'home', '--browser']);
   assert.deepEqual(distroRuntimeArgs(['update', '--check']), ['/root/.local/bin/elastos', 'update', '--check']);
   assert.equal(runtimeUpdateCheckPath(runtimeDataDir('linux', '/root', {})), '/root/.local/share/elastos/update-check.json');
   assert.match(distroPackageArgs().join(' '), /nameserver 8\.8\.8\.8/);
@@ -156,7 +162,7 @@ test('ensuring the distro imports the pinned rootfs and hides command failures',
     assert.equal(/wsl\.exe|powershell|\bbash\b|apt-get/.test(err.message), false);
     return true;
   });
-  assert.deepEqual(existingBoot, []);
+  assert.deepEqual(existingBoot, ['boot']);
   assert.equal(existingProgress.includes('Starting the Linux environment for the first time'), false);
 
   await assert.rejects(() => ensureElastosDistro({
@@ -174,6 +180,61 @@ test('ensuring the distro imports the pinned rootfs and hides command failures',
     assert.equal(/bash|true/.test(err.message), false);
     return true;
   });
+});
+
+const STOPPED_DISTRO = '  NAME      STATE           VERSION\n* ElastOS    Stopped         2\n';
+
+function importedDistroHost(runInDistro, extra = {}) {
+  return {
+    lookupWsl: async () => true,
+    listDistros: async () => STOPPED_DISTRO,
+    ensureRootfs: async () => { throw new Error('Install must not download the rootfs'); },
+    importDistro: async () => { throw new Error('Install must not import again'); },
+    runInDistro,
+    ...extra,
+  };
+}
+
+test('Install waits for first boot after Set up imported the distro', async () => {
+  const setup = [];
+  await applyWindowsFix(
+    { platform: 'win32', arch: 'x64', wslInstalled: true, distroReady: false },
+    {
+      spawnHidden: async (file, args) => {
+        setup.push([file, ...args]);
+        return { code: 0, stdout: '', stderr: '' };
+      },
+      ensureRootfs: async () => 'C:\\ElastOS\\ubuntu-noble-wsl.rootfs.tar.gz',
+      prepareImportDir() {},
+    },
+  );
+  assert.equal(setup.some((row) => row.includes('--import')), true);
+  assert.equal(setup.some((row) => row.includes('-d')), false);
+
+  const commands = [];
+  await installRuntimeInsideDistro(() => {}, importedDistroHost(
+    async (args, timeoutMs) => {
+      commands.push({ args: [...args], timeoutMs });
+      return { code: 0, stdout: '', stderr: '' };
+    },
+    { continueInstall: async () => { commands.push({ args: ['install-runtime'], timeoutMs: 0 }); } },
+  ));
+  assert.deepEqual(commands[0], { args: ['true'], timeoutMs: 3 * 60 * 1000 });
+  assert.match(commands[1].args.join(' '), /command -v python3/);
+  assert.equal(commands[1].timeoutMs, 20000);
+  assert.deepEqual(commands[2], { args: ['install-runtime'], timeoutMs: 0 });
+});
+
+test('Install stops when first boot of an imported distro does not finish', async () => {
+  let continued = false;
+  await assert.rejects(() => installRuntimeInsideDistro(() => {}, importedDistroHost(
+    async () => { throw new Error('timed out'); },
+    { continueInstall: async () => { continued = true; } },
+  )), (err) => {
+    assert.equal(err.message, DISTRO_SETUP_FAILED);
+    return true;
+  });
+  assert.equal(continued, false);
 });
 
 test('the distro gateway identity uses the lock pid socket and a positive wsl pid', () => {
@@ -196,7 +257,10 @@ test('the distro gateway identity uses the lock pid socket and a positive wsl pi
   const stopped = [];
   signalDistroGateway(42, 'SIGTERM', (pid, signal) => { killed.push([pid, signal]); }, (name) => { stopped.push(name); });
   assert.deepEqual(stopped, ['TERM']);
-  assert.deepEqual(killed, [[42, 'SIGTERM']]);
+  assert.deepEqual(killed, []);
+  signalDistroGateway(42, 'SIGKILL', (pid, signal) => { killed.push([pid, signal]); }, (name) => { stopped.push(name); });
+  assert.deepEqual(stopped, ['TERM', 'KILL']);
+  assert.deepEqual(killed, [[42, 'SIGKILL']]);
 
   const skipped = [];
   signalDistroGateway(0, 'SIGTERM', () => { skipped.push('kill'); }, () => { skipped.push('lock'); });
@@ -232,9 +296,8 @@ test('an adopted distro gateway uses the lock pid and does not report a live pid
   assert.equal(readDistroLockPid(() => ({ code: 0, stdout: '0\n' })), null);
   assert.equal(readDistroLockPid(() => ({ code: 0, stdout: '1\n' })), null);
   assert.equal(readDistroLockPid(() => ({ code: 1, stdout: '' })), null);
-  assert.equal(distroStopArgs('TERM', 77).at(-1), '77');
-  assert.equal(distroStopArgs('TERM', 77).includes('host-process.lock'), false);
-  assert.throws(() => distroStopArgs('TERM', 1), /Refusing to signal/);
+  assert.equal(distroStopArgs()[0], 'python3');
+  assert.equal(distroStopArgs().some((arg) => String(arg).includes('os.kill')), false);
   assert.equal(await distroPidAlive(77, async () => { throw new Error('timeout'); }), true);
   assert.equal(await distroPidAlive(77, async () => ({ code: 1 })), false);
   assert.equal(await distroPidAlive(77, async () => ({ code: 2 })), true);
@@ -244,52 +307,45 @@ test('an adopted distro gateway uses the lock pid and does not report a live pid
   const adopted = adoptDistroGatewayProcess({
     readPid: () => 77,
     alive: () => true,
-    signal: (pid, signal) => { signals.push([pid, signal]); },
+    stop: (name) => { signals.push(name); },
   });
   assert.equal(adopted.pid, 77);
   assert.equal(adopted.hasExited(), false);
   adopted.signal('SIGTERM');
-  assert.deepEqual(signals, [[77, 'SIGTERM']]);
+  assert.deepEqual(signals, ['TERM']);
   assert.equal(adoptDistroGatewayProcess({
     readPid: () => null,
     alive: () => true,
-    signal: () => { throw new Error('signaled'); },
   }), null);
   assert.equal(adoptDistroGatewayProcess({
     readPid: () => 0,
     alive: () => true,
-    signal: () => { throw new Error('signaled'); },
   }), null);
   const dead = adoptDistroGatewayProcess({
     readPid: () => 77,
     alive: () => false,
-    signal: () => {},
   });
   assert.equal(dead.hasExited(), true);
   const blown = adoptDistroGatewayProcess({
     readPid: () => 77,
     alive: () => { throw new Error('timeout'); },
-    signal: () => { throw new Error('signaled'); },
   });
   assert.equal(blown.hasExited(), false);
   const pending = adoptDistroGatewayProcess({
     readPid: () => 77,
     alive: () => Promise.reject(new Error('timeout')),
-    signal: () => {},
   });
   assert.equal(await pending.hasExited(), false);
 
-  const argv = [];
+  const calls = [];
   const signaled = adoptDistroGatewayProcess({
     readPid: () => 77,
     alive: () => true,
-    runStop: (args) => { argv.push(args); },
+    stop: (name) => { calls.push(name); },
   });
   signaled.signal('SIGTERM');
-  assert.equal(argv.length, 1);
-  assert.equal(argv[0].at(-1), '77');
-  assert.equal(argv[0][3], 'TERM');
-  assert.equal(String(argv[0][2]).includes('host-process.lock'), false);
+  signaled.signal('SIGKILL');
+  assert.deepEqual(calls, ['TERM', 'KILL']);
   const adoptedCalls = [];
   const adoptAny = (label) => (pid) => {
     adoptedCalls.push(`${label}:${pid}`);
@@ -341,8 +397,8 @@ test('an adopted distro gateway uses the lock pid and does not report a live pid
     adoptInstalled: () => adoptDistroGatewayProcess({
       readPid: () => 77,
       alive: () => true,
-      signal: (pid, signal) => {
-        signals.push([pid, signal]);
+      stop: (name) => {
+        signals.push(name);
         health = null;
       },
     }),
@@ -366,48 +422,33 @@ test('an adopted distro gateway uses the lock pid and does not report a live pid
     adoptInstalled: () => adoptDistroGatewayProcess({
       readPid: () => 77,
       alive: () => { throw new Error('timeout'); },
-      signal: (pid, signal) => {
-        probeSignals.push([pid, signal]);
+      stop: (name) => {
+        probeSignals.push(name);
         probeHealth = null;
       },
     }),
   });
   await assert.rejects(() => probed.stop({ adopt: true }), /still running/);
   assert.equal(probed.phase(), 'error');
-  assert.deepEqual(probeSignals, [[77, 'SIGTERM'], [77, 'SIGKILL']]);
-  assert.equal(signals.some(([pid]) => pid === 0), false);
-  assert.equal(signals.every(([pid]) => pid === 77), true);
+  assert.deepEqual(probeSignals, ['TERM', 'KILL']);
+  assert.equal(signals.includes(0), false);
+  assert.equal(signals.every((name) => name === 'TERM' || name === 'KILL'), true);
 
   const source = fs.readFileSync(path.join(__dirname, '../src/main/targets/windowsRuntime.ts'), 'utf8');
   assert.equal(source.includes('signalDistroGateway(0'), false);
   assert.equal(source.includes('hasExited() { return true; }'), false);
-  const helper = source.match(/const STOP_HELPER = `\n([\s\S]*?)`\.trim\(\)/);
-  assert.ok(helper);
-  assert.equal(helper[1].includes('host-process.lock'), false);
-  const { spawn, spawnSync } = require('node:child_process');
+  assert.equal(source.includes('os.kill(-'), false);
+  const { STOP_HELPER } = require('../dist/main/targets/windowsRuntime');
+  const { spawnSync } = require('node:child_process');
   const probe = spawnSync('python3', ['-V'], { encoding: 'utf8' });
   if (probe.error || probe.status !== 0) {
     assert.fail(`python3 is required to test the distro stop helper (${probe.error ? probe.error.message : probe.stderr || probe.stdout})`);
   }
   for (const raw of ['1', '0', 'True', 'true', '-1']) {
-    const result = spawnSync('python3', ['-c', helper[1], 'TERM', raw], { encoding: 'utf8' });
+    const result = spawnSync('python3', ['-c', STOP_HELPER, 'TERM', raw], { encoding: 'utf8' });
     assert.equal(result.error, undefined, raw);
     assert.equal(result.status, 1, `${raw} status ${result.status} ${result.stderr}`);
     assert.equal(/Traceback/.test(result.stderr || ''), false, result.stderr);
-  }
-  const sleeper = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {
-    detached: true,
-    stdio: 'ignore',
-  });
-  sleeper.unref();
-  try {
-    const killed = spawnSync('python3', ['-c', helper[1], 'TERM', String(sleeper.pid)], { encoding: 'utf8' });
-    assert.equal(killed.error, undefined);
-    assert.equal(killed.status, 0, killed.stderr);
-    await new Promise((resolve) => { setTimeout(resolve, 200); });
-    assert.throws(() => process.kill(sleeper.pid, 0));
-  } finally {
-    try { process.kill(-sleeper.pid, 'SIGKILL'); } catch { /* already gone */ }
   }
 });
 
@@ -490,4 +531,96 @@ test('Reset adopts the distro pid the identity facts proved, not a second lock r
   });
   assert.equal(later, null);
   assert.deepEqual(rewritten, [7]);
+});
+
+test('a distro Home started with home --browser is the current listener', () => {
+  const facts = {
+    lock: JSON.stringify({ pid: 7, role: 'gateway', addr: 'localhost:8090', generation: 'abc' }),
+    command: '/root/.local/bin/elastos home --browser',
+    tcp: [TCP_HEADER, V4_LISTEN(4242)].join('\n'),
+    tcp6: TCP6_HEADER,
+    links: ['socket:[4242]'],
+    alive: true,
+  };
+  assert.equal(factsAreElastos(JSON.stringify(facts)), true);
+});
+
+test('Stop names the proved update controller and never the host pid', () => {
+  assert.equal(
+    DISTRO_CONTROLLER_COMMAND,
+    '/root/.local/share/elastos/update-controller/runtime __update-controller',
+  );
+  const command = `${DISTRO_CONTROLLER_COMMAND} --receipt /root/.local/share/elastos/update-controller/receipt.json`;
+  const report = (overrides = {}) => ({
+    lockText: JSON.stringify({ pid: 7, generation: 'abc', addr: 'localhost:8090' }),
+    statusText: JSON.stringify({ host_pid: 7, controller_pid: 4, generation: 'abc', phase: 'ready' }),
+    procs: {
+      4: { ppid: 1, command },
+      7: { ppid: 4, command: '/root/.local/bin/elastos home --browser' },
+    },
+    ...overrides,
+  });
+  assert.equal(distroStopPid(report()), 4);
+  assert.equal(distroStopPid(report({
+    procs: {
+      4: { ppid: 1, command: '/root/.local/bin/elastos gateway --addr localhost:8090' },
+      7: { ppid: 4, command: '/root/.local/bin/elastos home --browser' },
+    },
+  })), null);
+  assert.equal(distroStopPid(report({
+    statusText: JSON.stringify({ host_pid: 7, controller_pid: 4, generation: 'other' }),
+  })), null);
+  assert.equal(distroStopPid(report({ statusText: null })), null);
+  assert.equal(distroStopPid(report({
+    procs: {
+      4: { ppid: 1, command },
+      7: { ppid: 9, command: '/root/.local/bin/elastos home --browser' },
+    },
+  })), null);
+  assert.equal(distroStopPid({ lockText: '{', statusText: null, procs: {} }), null);
+
+  const signals = [];
+  const adopted = adoptDistroGatewayProcess({
+    readPid: () => 7,
+    alive: () => true,
+    stop: (name) => { signals.push(name); },
+  });
+  assert.equal(adopted && adopted.pid, 7);
+  adopted.signal('SIGTERM');
+  adopted.signal('SIGKILL');
+  assert.deepEqual(signals, ['TERM', 'KILL']);
+  const hostSignals = [];
+  const hostOnly = adoptDistroGatewayProcess({
+    readPid: () => 7,
+    alive: () => false,
+    stop: (name) => { hostSignals.push(name); },
+  });
+  hostOnly.signal('SIGTERM');
+  assert.deepEqual(hostSignals, ['TERM']);
+  assert.equal(hostOnly.hasExited(), true);
+
+  const spawnOptions = distroHomeSpawnOptions(wslSpawnEnv({
+    PATH: 'C:\\Windows',
+    ELASTOS_UPDATE_CONTROLLER_HOST: '1',
+  }));
+  assert.equal(spawnOptions.detached, true);
+  assert.deepEqual(spawnOptions.stdio, ['ignore', 'pipe', 'pipe']);
+  assert.equal(spawnOptions.env.WSL_UTF8, '1');
+  assert.equal(Object.hasOwn(spawnOptions.env, 'ELASTOS_UPDATE_CONTROLLER_HOST'), false);
+
+  const parsed = parseDistroStopReport(JSON.stringify({
+    lock: report().lockText,
+    status: report().statusText,
+    procs: { 4: { ppid: 1, command }, 7: { ppid: 4, command: '/root/.local/bin/elastos home --browser' } },
+  }));
+  assert.equal(parsed && distroStopPid(parsed), 4);
+  assert.equal(parseDistroStopReport('{"lock":1}'), null);
+
+  const syntax = require('node:child_process').spawnSync('python3', ['-c', 'import ast,sys; ast.parse(sys.stdin.read())'], {
+    input: DISTRO_STOP_READER,
+    encoding: 'utf8',
+  });
+  assert.equal(syntax.status, 0, syntax.stderr);
+  assert.equal(DISTRO_STOP_READER.includes("split('\\n')"), true);
+  assert.equal(DISTRO_STOP_READER.includes("b'\\x00'"), true);
 });
